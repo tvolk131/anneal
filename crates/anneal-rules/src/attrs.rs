@@ -66,6 +66,16 @@ impl Attrs {
         }
     }
 
+    /// An optional string attribute: `None` when absent, error when present with the
+    /// wrong type.
+    pub fn string_opt(&self, name: &str) -> Result<Option<&str>, AttrError> {
+        match self.map.get(name) {
+            None => Ok(None),
+            Some(AttrValue::String(s)) => Ok(Some(s)),
+            Some(_) => Err(AttrError::wrong_type(name, "string")),
+        }
+    }
+
     /// A required label attribute.
     pub fn label(&self, name: &str) -> Result<&Label, AttrError> {
         match self.map.get(name) {

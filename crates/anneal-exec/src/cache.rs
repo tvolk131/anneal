@@ -81,8 +81,14 @@ pub fn action_digest(action: &Action) -> Digest {
         write_str(&mut buf, &path.to_string_lossy());
     }
 
-    // relevant platform requirements
-    write_str(&mut buf, action.config.platform().target_triple());
+    // relevant platform requirements: the target triple for platform-sensitive
+    // actions, a fixed marker for platform-independent ones (so their key — and thus
+    // their cached result — is shared across all platforms, §6.3).
+    if action.platform_sensitive {
+        write_str(&mut buf, action.config.platform().target_triple());
+    } else {
+        write_str(&mut buf, "*platform-independent*");
+    }
 
     // consumed axes only (trimming, §6.2), in canonical order
     let consumed = action.config.axes().consumed(&action.consumed_axes);

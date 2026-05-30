@@ -25,6 +25,7 @@
 mod attrs;
 mod cargo_workspace;
 mod context;
+mod nickel_eval;
 mod providers;
 mod rule;
 mod rules;
@@ -32,6 +33,7 @@ mod schema;
 
 pub use attrs::{AttrError, AttrValue, Attrs};
 pub use cargo_workspace::CargoWorkspace;
+pub use nickel_eval::NickelEval;
 pub use context::{ResolvedDep, RuleContext};
 pub use providers::{Artifact, ArtifactSource, FileSet, ProviderSet};
 pub use rule::{Analysis, Rule, RuleError};

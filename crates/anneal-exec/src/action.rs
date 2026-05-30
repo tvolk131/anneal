@@ -103,6 +103,10 @@ pub struct Action {
     /// The coarse snapshot key (e.g. a hash of toolchain+lockfile+triple+profile).
     /// An accelerator only — deliberately **not** part of the action cache key.
     pub(crate) snapshot_key: Option<Digest>,
+    /// Whether this action's output depends on the target platform. `true` for most
+    /// actions (the platform is part of identity); `false` for platform-independent
+    /// ones like `nickel_eval`, whose result is shared across all platforms (§6.3).
+    pub(crate) platform_sensitive: bool,
 }
 
 impl Action {
@@ -126,6 +130,7 @@ impl Action {
                 timeout_ms: 600_000,
                 snapshot_paths: Vec::new(),
                 snapshot_key: None,
+                platform_sensitive: true,
             },
         }
     }
@@ -224,6 +229,14 @@ impl ActionBuilder {
 
     pub fn timeout_ms(mut self, timeout_ms: u64) -> Self {
         self.action.timeout_ms = timeout_ms;
+        self
+    }
+
+    /// Mark the action's output as independent of the target platform, so its cache
+    /// key is shared across all platforms (§6.3). Combined with consuming no axes,
+    /// this makes the action fully configuration-invariant.
+    pub fn platform_independent(mut self) -> Self {
+        self.action.platform_sensitive = false;
         self
     }
 
