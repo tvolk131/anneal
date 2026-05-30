@@ -75,15 +75,15 @@ fn snapshot_restored_build_is_correctness_neutral() {
     let exec = LocalExecutor::new(root.join(".mybuild")).unwrap();
     let label = Label::parse("//ws:ws").unwrap();
 
-    // Analyze + return the single build action for the current sources.
+    // Analyze + return the coarse build action for the current sources.
     let build_action = |exec: &LocalExecutor| -> Action {
         let graph = load_package(root, "ws", &registry).unwrap();
         Analyzer::new(&graph, &registry, &cfg, root, exec.cas())
             .analyze(&label)
             .unwrap()
             .actions()
-            .next()
-            .unwrap()
+            .find(|a| a.name().starts_with("cargo_workspace build"))
+            .expect("a build action")
             .clone()
     };
 

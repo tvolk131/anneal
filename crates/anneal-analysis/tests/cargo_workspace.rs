@@ -5,11 +5,20 @@
 //! network (Milestone 1 is scoped to public-/no-dependency workflows; vendoring is
 //! a later increment).
 
-use anneal_analysis::Analyzer;
+use anneal_analysis::{ActionGraph, Analyzer};
 use anneal_core::{AxisValues, Configuration, OptLevel, Platform};
-use anneal_exec::{Executor, LocalExecutor};
+use anneal_exec::{Action, Executor, LocalExecutor};
 use anneal_loader::load_package;
 use anneal_rules::builtin_rules;
+
+/// The coarse `build` action of a `cargo_workspace` (now one of several emitted).
+fn build_action(graph: &ActionGraph) -> Action {
+    graph
+        .actions()
+        .find(|a| a.name().starts_with("cargo_workspace build"))
+        .expect("a build action")
+        .clone()
+}
 
 fn config(opt: OptLevel) -> Configuration {
     Configuration::new(
@@ -65,9 +74,7 @@ fn cargo_workspace_builds_hermetically_and_caches() {
     let analyzer = Analyzer::new(&graph, &registry, &cfg, root, exec.cas());
     let label = anneal_core::Label::parse("//ws:ws").unwrap();
     let g = analyzer.analyze(&label).unwrap();
-    assert_eq!(g.action_count(), 1, "one coarse build action");
-
-    let action = g.actions().next().unwrap().clone();
+    let action = build_action(&g);
 
     // First build: real, hermetic cargo build through the sandbox.
     let first = exec.execute(&action).unwrap();
@@ -99,7 +106,7 @@ fn editing_a_source_busts_the_cache() {
             .analyze(&label)
             .unwrap()
     };
-    let first = exec.execute(g1.actions().next().unwrap()).unwrap();
+    let first = exec.execute(&build_action(&g1)).unwrap();
     assert!(first.success());
 
     // Edit a source file, re-analyze (new content digest), rebuild.
@@ -114,7 +121,7 @@ fn editing_a_source_busts_the_cache() {
             .analyze(&label)
             .unwrap()
     };
-    let after_edit = exec.execute(g2.actions().next().unwrap()).unwrap();
+    let after_edit = exec.execute(&build_action(&g2)).unwrap();
     assert!(after_edit.success());
     assert!(!after_edit.cache_hit, "a source edit must bust the build cache");
 }
@@ -129,21 +136,16 @@ fn profile_axis_changes_the_build() {
     let label = anneal_core::Label::parse("//ws:ws").unwrap();
     let graph = load_package(root, "ws", &registry).unwrap();
 
-    let debug_action = Analyzer::new(&graph, &registry, &config(OptLevel::Debug), root, exec.cas())
-        .analyze(&label)
-        .unwrap()
-        .actions()
-        .next()
-        .unwrap()
-        .clone();
-    let release_action =
-        Analyzer::new(&graph, &registry, &config(OptLevel::Release), root, exec.cas())
+    let debug_action = build_action(
+        &Analyzer::new(&graph, &registry, &config(OptLevel::Debug), root, exec.cas())
             .analyze(&label)
-            .unwrap()
-            .actions()
-            .next()
-            .unwrap()
-            .clone();
+            .unwrap(),
+    );
+    let release_action = build_action(
+        &Analyzer::new(&graph, &registry, &config(OptLevel::Release), root, exec.cas())
+            .analyze(&label)
+            .unwrap(),
+    );
 
     assert!(exec.execute(&debug_action).unwrap().success());
     // Release is a different action; first run is a miss, not served from debug's cache.
