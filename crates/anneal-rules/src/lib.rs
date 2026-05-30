@@ -23,6 +23,7 @@
 //! is also deferred — `genrule` is configuration-invariant for now.
 
 mod attrs;
+mod cargo_workspace;
 mod context;
 mod providers;
 mod rule;
@@ -30,6 +31,7 @@ mod rules;
 mod schema;
 
 pub use attrs::{AttrError, AttrValue, Attrs};
+pub use cargo_workspace::CargoWorkspace;
 pub use context::{ResolvedDep, RuleContext};
 pub use providers::{Artifact, ArtifactSource, FileSet, ProviderSet};
 pub use rule::{Analysis, Rule, RuleError};

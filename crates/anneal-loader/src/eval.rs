@@ -139,6 +139,14 @@ fn build_globals(builder: &mut GlobalsBuilder) {
     ) -> anyhow::Result<NoneType> {
         record(eval, "alias", name, kwargs)
     }
+
+    fn cargo_workspace<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] kwargs: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        record(eval, "cargo_workspace", name, kwargs)
+    }
 }
 
 /// Parse and evaluate one `BUILD` file, returning the raw target declarations.

@@ -195,5 +195,9 @@ pub fn builtin_rules() -> RuleRegistry {
     rules.insert("genrule", Box::new(GenRule));
     rules.insert("filegroup", Box::new(FileGroup));
     rules.insert("alias", Box::new(Alias));
+    rules.insert(
+        "cargo_workspace",
+        Box::new(crate::cargo_workspace::CargoWorkspace),
+    );
     RuleRegistry { rules }
 }

@@ -11,6 +11,24 @@ fn load(src: &str) -> Result<anneal_loader::TargetGraph, LoadError> {
 }
 
 #[test]
+fn every_registered_rule_kind_has_a_loader_global() {
+    // Guards against loader/registry drift: each kind in the registry must be a
+    // callable Starlark global. A missing global yields "Variable ... not found";
+    // a present one yields at worst a schema error — never a "not found".
+    let registry = builtin_rules();
+    for kind in registry.kinds() {
+        let src = format!(r#"{kind}(name = "x")"#);
+        if let Err(err) = load_package_str("pkg", "pkg/BUILD", &src, &registry) {
+            assert!(
+                !err.message().contains("not found"),
+                "rule `{kind}` is in the registry but has no loader global: {}",
+                err.message()
+            );
+        }
+    }
+}
+
+#[test]
 fn loads_all_three_rule_kinds() {
     let graph = load(
         r#"

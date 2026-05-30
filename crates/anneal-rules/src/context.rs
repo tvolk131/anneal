@@ -86,4 +86,60 @@ impl<'a> RuleContext<'a> {
             source: ArtifactSource::Source(digest),
         })
     }
+
+    /// Resolve an entire source tree under `rel` (relative to the package) into
+    /// content-addressed [`Artifact`]s, skipping directories named in `ignore_dirs`.
+    /// Each artifact's `path` is relative to the package directory, so the tree
+    /// materializes back into the same layout inside the sandbox. This is how a
+    /// whole-package wrapper rule (e.g. `cargo_workspace`) captures its inputs.
+    pub fn source_tree(
+        &self,
+        rel: &Path,
+        ignore_dirs: &[&str],
+    ) -> Result<Vec<Artifact>, RuleError> {
+        let base = self.package_dir.join(rel);
+        let mut artifacts = Vec::new();
+        self.walk_tree(&base, ignore_dirs, &mut artifacts)?;
+        // Deterministic order so the resulting action is stable.
+        artifacts.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(artifacts)
+    }
+
+    fn walk_tree(
+        &self,
+        dir: &Path,
+        ignore_dirs: &[&str],
+        out: &mut Vec<Artifact>,
+    ) -> Result<(), RuleError> {
+        let source_err = |path: &Path, error| RuleError::Source {
+            path: path.to_path_buf(),
+            error,
+        };
+        let entries = std::fs::read_dir(dir).map_err(|e| source_err(dir, e))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| source_err(dir, e))?;
+            let path = entry.path();
+            let file_type = entry.file_type().map_err(|e| source_err(&path, e))?;
+            if file_type.is_dir() {
+                let name = entry.file_name();
+                if ignore_dirs.iter().any(|ig| std::ffi::OsStr::new(ig) == name) {
+                    continue;
+                }
+                self.walk_tree(&path, ignore_dirs, out)?;
+            } else if file_type.is_file() {
+                let rel = path
+                    .strip_prefix(self.package_dir)
+                    .unwrap_or(&path)
+                    .to_path_buf();
+                let bytes = std::fs::read(&path).map_err(|e| source_err(&rel, e))?;
+                let digest = self.cas.put(&bytes).map_err(|e| source_err(&rel, e))?;
+                out.push(Artifact {
+                    path: rel,
+                    source: ArtifactSource::Source(digest),
+                });
+            }
+            // Symlinks and other entry types are skipped in Milestone 1.
+        }
+        Ok(())
+    }
 }
