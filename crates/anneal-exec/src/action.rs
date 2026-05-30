@@ -97,6 +97,12 @@ pub struct Action {
     /// Which axes this action's cache key depends on — drives trimming (§6.2).
     pub(crate) consumed_axes: Vec<Axis>,
     pub(crate) timeout_ms: u64,
+    /// Mutable cache directories to snapshot (e.g. `["target"]`), relative to the
+    /// working directory. Empty unless the action uses snapshot-based caching.
+    pub(crate) snapshot_paths: Vec<PathBuf>,
+    /// The coarse snapshot key (e.g. a hash of toolchain+lockfile+triple+profile).
+    /// An accelerator only — deliberately **not** part of the action cache key.
+    pub(crate) snapshot_key: Option<Digest>,
 }
 
 impl Action {
@@ -118,6 +124,8 @@ impl Action {
                 config: default_host_config(),
                 consumed_axes: Vec::new(),
                 timeout_ms: 600_000,
+                snapshot_paths: Vec::new(),
+                snapshot_key: None,
             },
         }
     }
@@ -216,6 +224,16 @@ impl ActionBuilder {
 
     pub fn timeout_ms(mut self, timeout_ms: u64) -> Self {
         self.action.timeout_ms = timeout_ms;
+        self
+    }
+
+    /// Use snapshot-based caching: `paths` are the mutable cache directories
+    /// (relative to the working directory) snapshotted under the coarse `key`. Sets
+    /// the cache policy to [`CachePolicy::SnapshotBased`].
+    pub fn snapshot(mut self, key: Digest, paths: Vec<PathBuf>) -> Self {
+        self.action.snapshot_key = Some(key);
+        self.action.snapshot_paths = paths;
+        self.action.cache_policy = CachePolicy::SnapshotBased;
         self
     }
 

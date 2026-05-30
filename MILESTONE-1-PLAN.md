@@ -247,7 +247,7 @@ moment the first snapshot does.
 |------|-----------|--------|
 | starlark-rust integration | Spike A | **retired** — see `spikes/FINDINGS.md` |
 | macOS materializer at scale | Spike B | **retired** (hardlink throughput carried to Phase 3 benchmarks) |
-| snapshot correctness-neutrality | Phase 3 verification harness | pending |
+| snapshot correctness-neutrality | Phase 3 verification harness | **harness built & passing** — `anneal-snapshot` + `verify_correctness_neutral`; a warm (incremental) build that reuses a snapshotted crate produces byte-identical outputs to a cold build. Wired into CI per PR is the remaining step. |
 | per-`(crate, test_type)` cold-cache overhead | Phase 6 benchmarks (batch-invocation fallback ready) | pending |
 | macOS hermeticity ceiling | documented; Linux-VM mode for strict needs | accepted/documented |
 | system/rule boundary under future extensibility | discipline now, while first-party | ongoing |

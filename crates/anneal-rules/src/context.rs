@@ -87,6 +87,24 @@ impl<'a> RuleContext<'a> {
         })
     }
 
+    /// Read a file within the package for **introspection** (e.g. parsing
+    /// `Cargo.toml` to enumerate crates). Unlike [`source_artifact`], this does not
+    /// add the file to the CAS as a build input — it is metadata the rule consults
+    /// while deciding what actions to emit. Scoped to the package directory.
+    ///
+    /// [`source_artifact`]: RuleContext::source_artifact
+    pub fn read_package_file(&self, rel: &Path) -> Result<String, RuleError> {
+        std::fs::read_to_string(self.package_dir.join(rel)).map_err(|error| RuleError::Source {
+            path: rel.to_path_buf(),
+            error,
+        })
+    }
+
+    /// Whether a file exists within the package (introspection helper).
+    pub fn package_file_exists(&self, rel: &Path) -> bool {
+        self.package_dir.join(rel).exists()
+    }
+
     /// Resolve an entire source tree under `rel` (relative to the package) into
     /// content-addressed [`Artifact`]s, skipping directories named in `ignore_dirs`.
     /// Each artifact's `path` is relative to the package directory, so the tree

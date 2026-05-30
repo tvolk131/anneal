@@ -13,15 +13,12 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use anneal_cas::Cas;
 use anneal_core::Digest;
 
 use crate::action::{Action, InputSource};
 use crate::executor::ExecError;
-
-static SANDBOX_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A prepared sandbox: directories created and inputs materialized, ready to run.
 pub(crate) struct PreparedSandbox {
@@ -35,16 +32,14 @@ pub(crate) struct PreparedSandbox {
     pub tmp: PathBuf,
 }
 
-/// Create a fresh sandbox under `base` and materialize all declared inputs into it.
-/// The directory name embeds the action key so retained sandboxes are identifiable.
-pub(crate) fn prepare(
+/// Create a fresh sandbox at `root` and materialize all declared inputs into it.
+/// The caller owns the directory naming (a nonce for normal actions, a stable name
+/// for snapshot-based ones).
+pub(crate) fn prepare_at(
     cas: &Cas,
     action: &Action,
-    base: &Path,
-    key: &Digest,
+    root: PathBuf,
 ) -> Result<PreparedSandbox, ExecError> {
-    let nonce = SANDBOX_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let root = base.join(format!("{}-{}", &key.to_hex()[..16], nonce));
     // Joining a bare "." would append a CurDir component that `create_dir_all`
     // rejects, so treat the default working directory as the root itself.
     let cwd = if action.working_directory == Path::new(".") {

@@ -11,15 +11,20 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::process::{Child, ExitStatus};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anneal_cas::Cas;
 use anneal_core::Digest;
+use anneal_snapshot::SnapshotStore;
 
 use crate::action::{Action, CachePolicy, ExecutionMode, InputSource};
 use crate::cache::{action_digest, ActionCache, StoredResult};
 use crate::materializer;
 use crate::sandbox::{self, SandboxSpec};
+
+/// Disambiguates per-run sandbox directories for normal (non-snapshot) actions.
+static SANDBOX_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// The outcome of executing an action.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,23 +54,26 @@ pub trait Executor {
 pub struct LocalExecutor {
     cas: Cas,
     cache: ActionCache,
+    snapshots: SnapshotStore,
     sandboxes: PathBuf,
     retain_sandboxes: bool,
 }
 
 impl LocalExecutor {
     /// Open a local executor rooted at `store_root` (e.g. `.mybuild/`). The CAS,
-    /// action cache, and sandbox roots are created underneath and share one volume
-    /// so hardlink materialization works (§3.4).
+    /// action cache, snapshot store, and sandbox roots are created underneath and
+    /// share one volume so hardlink materialization works (§3.4).
     pub fn new(store_root: impl Into<PathBuf>) -> io::Result<Self> {
         let root = store_root.into();
         let cas = Cas::open(root.join("cas"))?;
         let cache = ActionCache::open(root.join("cache"))?;
+        let snapshots = SnapshotStore::open(root.join("snapshots"))?;
         let sandboxes = root.join("sandboxes");
         fs::create_dir_all(&sandboxes)?;
         Ok(LocalExecutor {
             cas,
             cache,
+            snapshots,
             sandboxes,
             retain_sandboxes: false,
         })
@@ -130,26 +138,115 @@ fn resolve_action(
     Ok(resolved)
 }
 
-impl Executor for LocalExecutor {
-    fn execute(&self, action: &Action) -> Result<ActionResult, ExecError> {
-        // A single action must be fully resolved: every input a concrete blob.
-        // Actions with Output references are run via `execute_graph`, which resolves
-        // them against prior outputs first.
-        for input in action.inputs.values() {
-            if let InputSource::Output { action: a, name } = &input.source {
-                return Err(ExecError::UnresolvedInput {
-                    action: a.clone(),
-                    output: name.clone(),
-                });
+impl LocalExecutor {
+    /// Materialize → (optionally restore snapshot) → run → capture → (optionally save
+    /// snapshot). The shared core of cached execution and verification. The sandbox
+    /// at `root` is recreated fresh each call.
+    fn run_core(
+        &self,
+        action: &Action,
+        root: PathBuf,
+        restore: bool,
+        save: bool,
+    ) -> Result<ActionResult, ExecError> {
+        if root.exists() {
+            let _ = fs::remove_dir_all(&root);
+        }
+        let prepared = materializer::prepare_at(&self.cas, action, root)?;
+
+        if restore {
+            if let Some(key) = &action.snapshot_key {
+                for path in &action.snapshot_paths {
+                    self.snapshots
+                        .restore(&self.cas, key, &prepared.cwd.join(path))?;
+                }
             }
         }
 
-        let key = action_digest(action);
+        let spec = SandboxSpec {
+            mode: action.execution_mode,
+            cwd: &prepared.cwd,
+            home: &prepared.home,
+            tmp: &prepared.tmp,
+            env: &action.env,
+        };
+        let mut child = sandbox::build_command(action, &spec)
+            .spawn()
+            .map_err(ExecError::Spawn)?;
+        let status = wait_with_timeout(&mut child, action.timeout_ms)?;
+        let exit_code = status.code().unwrap_or(-1);
 
-        // An action is cacheable only if it is deterministic AND sealed: permeable
-        // and native modes are not cacheable (§7.2), and snapshot_based is Phase 3.
-        let cacheable = matches!(action.cache_policy, CachePolicy::Deterministic)
-            && matches!(action.execution_mode, ExecutionMode::Sealed);
+        let outputs = if exit_code == 0 {
+            let captured = materializer::capture(&self.cas, action, &prepared)?;
+            if save {
+                if let Some(key) = &action.snapshot_key {
+                    for path in &action.snapshot_paths {
+                        self.snapshots
+                            .save(&self.cas, key, &prepared.cwd.join(path))?;
+                    }
+                }
+            }
+            captured
+        } else {
+            // Failed actions: no captured outputs, no snapshot saved.
+            BTreeMap::new()
+        };
+
+        if !self.retain_sandboxes {
+            let _ = fs::remove_dir_all(&prepared.root);
+        }
+
+        Ok(ActionResult {
+            exit_code,
+            outputs,
+            cache_hit: false,
+        })
+    }
+
+    /// The sandbox root for an action. Snapshot-based actions get a **stable** path
+    /// (keyed by the snapshot key) so cold and warm runs use an identical working
+    /// directory — outputs are then reproducible and directly comparable. Normal
+    /// actions get a unique path so independent runs never collide.
+    fn sandbox_root(&self, action: &Action, key: &Digest, snapshot_based: bool) -> PathBuf {
+        if snapshot_based {
+            let tag = action.snapshot_key.unwrap_or(*key);
+            self.sandboxes.join(format!("snap-{}", &tag.to_hex()[..16]))
+        } else {
+            let nonce = SANDBOX_COUNTER.fetch_add(1, Ordering::Relaxed);
+            self.sandboxes
+                .join(format!("{}-{}", &key.to_hex()[..16], nonce))
+        }
+    }
+
+    /// Run an action **outside the action cache**, in a caller-named sandbox, with
+    /// explicit snapshot restore/save. This is the primitive the correctness-neutral
+    /// verification harness uses to run an action cold vs. snapshot-warm and compare.
+    pub fn run_uncached(
+        &self,
+        action: &Action,
+        sandbox_name: &str,
+        restore: bool,
+        save: bool,
+    ) -> Result<ActionResult, ExecError> {
+        guard_resolved(action)?;
+        let root = self.sandboxes.join(sandbox_name);
+        self.run_core(action, root, restore, save)
+    }
+}
+
+impl Executor for LocalExecutor {
+    fn execute(&self, action: &Action) -> Result<ActionResult, ExecError> {
+        guard_resolved(action)?;
+
+        let key = action_digest(action);
+        let snapshot_based = matches!(action.cache_policy, CachePolicy::SnapshotBased);
+        // Deterministic and snapshot-based actions are both cacheable when sealed;
+        // permeable and native are not (§7.2). A snapshot is a separate accelerator
+        // for the case where a cacheable action actually has to run.
+        let cacheable = matches!(
+            action.cache_policy,
+            CachePolicy::Deterministic | CachePolicy::SnapshotBased
+        ) && matches!(action.execution_mode, ExecutionMode::Sealed);
 
         if cacheable {
             if let Some(stored) = self.cache.lookup(&key)? {
@@ -161,53 +258,35 @@ impl Executor for LocalExecutor {
             }
         }
 
-        // Cache miss (or non-cacheable): materialize, run, capture.
-        let prepared = materializer::prepare(&self.cas, action, &self.sandboxes, &key)?;
-        let spec = SandboxSpec {
-            mode: action.execution_mode,
-            cwd: &prepared.cwd,
-            home: &prepared.home,
-            tmp: &prepared.tmp,
-            env: &action.env,
-        };
+        // Cache miss: run, restoring/saving the snapshot for snapshot-based actions.
+        let root = self.sandbox_root(action, &key, snapshot_based);
+        let result = self.run_core(action, root, snapshot_based, snapshot_based)?;
 
-        let mut child = sandbox::build_command(action, &spec)
-            .spawn()
-            .map_err(ExecError::Spawn)?;
-        let status = wait_with_timeout(&mut child, action.timeout_ms)?;
-        let exit_code = status.code().unwrap_or(-1);
-
-        let result = if exit_code == 0 {
-            let outputs = materializer::capture(&self.cas, action, &prepared)?;
-            if cacheable {
-                self.cache.insert(
-                    &key,
-                    &StoredResult {
-                        exit_code,
-                        outputs: outputs.clone(),
-                    },
-                )?;
-            }
-            ActionResult {
-                exit_code,
-                outputs,
-                cache_hit: false,
-            }
-        } else {
-            // Failed actions are not cached and their outputs are not captured.
-            ActionResult {
-                exit_code,
-                outputs: BTreeMap::new(),
-                cache_hit: false,
-            }
-        };
-
-        if !self.retain_sandboxes {
-            let _ = fs::remove_dir_all(&prepared.root);
+        if result.exit_code == 0 && cacheable {
+            self.cache.insert(
+                &key,
+                &StoredResult {
+                    exit_code: result.exit_code,
+                    outputs: result.outputs.clone(),
+                },
+            )?;
         }
-
         Ok(result)
     }
+}
+
+/// A single action must be fully resolved (every input a concrete blob); Output
+/// references are resolved by `execute_graph` first.
+fn guard_resolved(action: &Action) -> Result<(), ExecError> {
+    for input in action.inputs.values() {
+        if let InputSource::Output { action: a, name } = &input.source {
+            return Err(ExecError::UnresolvedInput {
+                action: a.clone(),
+                output: name.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Wait for `child`, killing it if it exceeds `timeout_ms`.

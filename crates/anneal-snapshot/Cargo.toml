@@ -1,14 +1,12 @@
 [package]
-name = "anneal-rules"
+name = "anneal-snapshot"
 version.workspace = true
 edition.workspace = true
-description = "The Rule trait (the system/rule boundary) and the first-party rules."
+description = "The snapshot protocol: content-addressed save/restore of native tools' mutable cache directories (e.g. Cargo's target/)."
 
 [dependencies]
 anneal-core = { path = "../anneal-core" }
 anneal-cas = { path = "../anneal-cas" }
-anneal-exec = { path = "../anneal-exec" }
-toml = "0.8"
 
 [dev-dependencies]
 tempfile = "3"

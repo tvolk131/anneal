@@ -74,6 +74,13 @@ pub fn action_digest(action: &Action) -> Digest {
     write_str(&mut buf, action.execution_mode.as_str());
     write_str(&mut buf, action.cache_policy.as_str());
 
+    // The declared snapshot paths are part of the key (§19.1); the snapshot *key*
+    // itself is NOT — a snapshot is a correctness-neutral accelerator (§8.2).
+    write_count(&mut buf, action.snapshot_paths.len());
+    for path in &action.snapshot_paths {
+        write_str(&mut buf, &path.to_string_lossy());
+    }
+
     // relevant platform requirements
     write_str(&mut buf, action.config.platform().target_triple());
 

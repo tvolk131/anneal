@@ -30,10 +30,12 @@ mod cache;
 mod executor;
 mod materializer;
 mod sandbox;
+mod verify;
 
 pub use action::{Action, ActionBuilder, CachePolicy, ExecutionMode, Input, InputSource};
 pub use cache::action_digest;
 pub use executor::{ActionResult, ExecError, Executor, LocalExecutor};
+pub use verify::{prime_snapshot, verify_correctness_neutral, NeutralityReport};
 
 /// Participates in every cache key (§8.1). Bump when sandbox semantics change so that
 /// a sandbox behavior change invalidates previously-cached results.

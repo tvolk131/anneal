@@ -7,6 +7,7 @@ description = "Execution kernel: Action model, action cache, materializer, sandb
 [dependencies]
 anneal-core = { path = "../anneal-core" }
 anneal-cas = { path = "../anneal-cas" }
+anneal-snapshot = { path = "../anneal-snapshot" }
 
 [dev-dependencies]
 tempfile = "3"
