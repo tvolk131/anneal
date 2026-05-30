@@ -31,7 +31,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anneal_core::{Axis, Digest, OptLevel};
+use anneal_core::{AxisValues, Coverage, DebugInfo, Digest, Lto, OptLevel, Sanitizer, ALL_AXES};
 use anneal_exec::{Action, ActionBuilder};
 
 use crate::context::RuleContext;
@@ -77,8 +77,13 @@ impl Rule for CargoWorkspace {
         path.push("/bin".to_owned());
         let path_env = path.join(":");
 
+        // cargo_workspace interprets all five axes (§13.6), so it consumes all five —
+        // each enters the cache key, and the snapshot key, at its current value.
+        let rustflags = rustflags_for(ctx.config().axes());
+        let consumed = ALL_AXES.to_vec();
+
         let crates = workspace_crates(ctx)?;
-        let snapshot_key = snapshot_key(&toolchain_dirs, &sources, ctx, opt_level);
+        let snapshot_key = snapshot_key(&toolchain_dirs, &sources, ctx);
         let snapshot_paths = vec![PathBuf::from("target")];
         let label = ctx.label().clone();
 
@@ -87,7 +92,7 @@ impl Rule for CargoWorkspace {
         // --- coarse build action ---
         let build_cmd = cargo_args("build", None, None, release_flag);
         let mut build = with_sources(
-            cargo_builder(format!("cargo_workspace build {label}"), build_cmd, &path_env),
+            cargo_builder(format!("cargo_workspace build {label}"), build_cmd, &path_env, &rustflags),
             &sources,
         );
         for c in crates.iter().filter(|c| c.has_lib) {
@@ -97,7 +102,7 @@ impl Rule for CargoWorkspace {
         }
         actions.push(
             build
-                .configured(ctx.config().clone(), vec![Axis::OptLevel])
+                .configured(ctx.config().clone(), consumed.clone())
                 .snapshot(snapshot_key, snapshot_paths.clone())
                 .build(),
         );
@@ -110,11 +115,16 @@ impl Rule for CargoWorkspace {
                 let run_id = format!("cargo_workspace test-run {label} {} unit", c.name);
 
                 let compile = with_sources(
-                    cargo_builder(compile_id.clone(), unit_compile_script(&c.name, release_flag), &path_env),
+                    cargo_builder(
+                        compile_id.clone(),
+                        unit_compile_script(&c.name, release_flag),
+                        &path_env,
+                        &rustflags,
+                    ),
                     &sources,
                 )
                 .output("test-bin", "test-bin")
-                .configured(ctx.config().clone(), vec![Axis::OptLevel])
+                .configured(ctx.config().clone(), consumed.clone())
                 .snapshot(snapshot_key, snapshot_paths.clone());
                 actions.push(compile.build());
 
@@ -142,10 +152,11 @@ impl Rule for CargoWorkspace {
                         format!("cargo_workspace test {label} {} doc", c.name),
                         cargo_args("test", Some(&c.name), Some("--doc"), release_flag),
                         &path_env,
+                        &rustflags,
                     ),
                     &sources,
                 )
-                .configured(ctx.config().clone(), vec![Axis::OptLevel])
+                .configured(ctx.config().clone(), consumed.clone())
                 .snapshot(snapshot_key, snapshot_paths.clone());
                 actions.push(doc.build());
             }
@@ -157,10 +168,11 @@ impl Rule for CargoWorkspace {
                         format!("cargo_workspace test {label} {} integration", c.name),
                         cargo_args("test", Some(&c.name), Some("--tests"), release_flag),
                         &path_env,
+                        &rustflags,
                     ),
                     &sources,
                 )
-                .configured(ctx.config().clone(), vec![Axis::OptLevel])
+                .configured(ctx.config().clone(), consumed.clone())
                 .snapshot(snapshot_key, snapshot_paths.clone());
                 actions.push(integ.build());
             }
@@ -181,12 +193,54 @@ struct CrateInfo {
 }
 
 /// Build a base `cargo` action builder with the shared environment (toolchain on
-/// PATH, deterministic settings). `command` is the full argv.
-fn cargo_builder(name: String, command: Vec<String>, path_env: &str) -> ActionBuilder {
-    Action::builder(name, command)
+/// PATH, deterministic settings, and the axis-derived `RUSTFLAGS`). `command` is the
+/// full argv.
+fn cargo_builder(name: String, command: Vec<String>, path_env: &str, rustflags: &str) -> ActionBuilder {
+    let mut builder = Action::builder(name, command)
         .env("PATH", path_env)
         .env("CARGO_TERM_COLOR", "never")
-        .env("CARGO_INCREMENTAL", "0")
+        .env("CARGO_INCREMENTAL", "0");
+    // Only set RUSTFLAGS when an axis actually changes a flag, so a default-config
+    // build is byte-for-byte what plain `cargo` produces.
+    if !rustflags.is_empty() {
+        builder = builder.env("RUSTFLAGS", rustflags);
+    }
+    builder
+}
+
+/// Translate the `lto`, `debug_info`, `sanitizer`, and `coverage` axes into a
+/// `RUSTFLAGS` string (§13.6). `opt_level` is handled separately as the Cargo
+/// profile. Each axis emits a flag only for non-default values, so the default
+/// configuration yields an empty string (no override of the profile's own choices).
+///
+/// `sanitizer` maps to `-Z sanitizer=…`, which requires a nightly toolchain; on
+/// stable a sanitized build will fail at compile time. The mapping is still applied
+/// so the configuration is honest and enters the cache key.
+fn rustflags_for(axes: &AxisValues) -> String {
+    let mut flags: Vec<String> = Vec::new();
+
+    match axes.lto {
+        Lto::Off => {}
+        Lto::Thin => flags.push("-Clto=thin".to_owned()),
+        Lto::Full => flags.push("-Clto=fat".to_owned()),
+    }
+    match axes.debug_info {
+        DebugInfo::Full => {} // profile default
+        DebugInfo::LineTablesOnly => flags.push("-Cdebuginfo=1".to_owned()),
+        DebugInfo::None => flags.push("-Cdebuginfo=0".to_owned()),
+    }
+    match axes.sanitizer {
+        Sanitizer::None => {}
+        Sanitizer::Address => flags.push("-Zsanitizer=address".to_owned()),
+        Sanitizer::Thread => flags.push("-Zsanitizer=thread".to_owned()),
+        Sanitizer::Memory => flags.push("-Zsanitizer=memory".to_owned()),
+        Sanitizer::Undefined => flags.push("-Zsanitizer=undefined".to_owned()),
+    }
+    if axes.coverage == Coverage::On {
+        flags.push("-Cinstrument-coverage".to_owned());
+    }
+
+    flags.join(" ")
 }
 
 /// Add every source file as a content-addressed input.
@@ -229,13 +283,10 @@ fn unit_compile_script(pkg: &str, release_flag: &str) -> Vec<String> {
     vec!["/bin/sh".to_owned(), "-c".to_owned(), script]
 }
 
-/// Coarse snapshot key: `(toolchain, lockfile, target_triple, profile)` (§8.2).
-fn snapshot_key(
-    toolchain_dirs: &[PathBuf],
-    sources: &[Artifact],
-    ctx: &RuleContext,
-    opt_level: OptLevel,
-) -> Digest {
+/// Coarse snapshot key: `(toolchain, lockfile, target_triple, all axis values)`
+/// (§8.2). Including the axis values gives each configuration its own `target/`
+/// snapshot, so a debug, a release, and a coverage build don't thrash one another's.
+fn snapshot_key(toolchain_dirs: &[PathBuf], sources: &[Artifact], ctx: &RuleContext) -> Digest {
     let mut buf = Vec::new();
     for dir in toolchain_dirs {
         buf.extend_from_slice(dir.to_string_lossy().as_bytes());
@@ -252,7 +303,12 @@ fn snapshot_key(
     buf.push(0);
     buf.extend_from_slice(ctx.config().platform().target_triple().as_bytes());
     buf.push(0);
-    buf.extend_from_slice(opt_level.as_str().as_bytes());
+    for (name, value) in ctx.config().axes().consumed(&ALL_AXES) {
+        buf.extend_from_slice(name.as_bytes());
+        buf.push(b'=');
+        buf.extend_from_slice(value.as_bytes());
+        buf.push(b';');
+    }
     Digest::of(&buf)
 }
 
@@ -324,4 +380,48 @@ fn toolchain_bin_dirs() -> Result<Vec<PathBuf>, RuleError> {
 fn which_dir(tool: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path).find(|dir| dir.join(tool).is_file())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rustflags_for;
+    use anneal_core::{AxisValues, Coverage, DebugInfo, Lto, Sanitizer};
+
+    #[test]
+    fn default_config_emits_no_rustflags() {
+        assert_eq!(rustflags_for(&AxisValues::default()), "");
+    }
+
+    #[test]
+    fn lto_debuginfo_and_coverage_map_to_codegen_flags() {
+        let axes = AxisValues {
+            lto: Lto::Thin,
+            debug_info: DebugInfo::None,
+            coverage: Coverage::On,
+            ..Default::default()
+        };
+        assert_eq!(
+            rustflags_for(&axes),
+            "-Clto=thin -Cdebuginfo=0 -Cinstrument-coverage"
+        );
+    }
+
+    #[test]
+    fn line_tables_and_full_lto() {
+        let axes = AxisValues {
+            lto: Lto::Full,
+            debug_info: DebugInfo::LineTablesOnly,
+            ..Default::default()
+        };
+        assert_eq!(rustflags_for(&axes), "-Clto=fat -Cdebuginfo=1");
+    }
+
+    #[test]
+    fn sanitizer_maps_to_unstable_flag() {
+        let axes = AxisValues {
+            sanitizer: Sanitizer::Address,
+            ..Default::default()
+        };
+        assert_eq!(rustflags_for(&axes), "-Zsanitizer=address");
+    }
 }
