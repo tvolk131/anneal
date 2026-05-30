@@ -72,6 +72,54 @@ genrule(
 }
 
 #[test]
+fn genrule_consumes_another_genrules_output() {
+    // The chained case the action-graph model unlocks: `second` depends on `first`'s
+    // *produced* output, whose digest is unknown until `first` runs.
+    let tmp = workspace(
+        r#"
+genrule(name = "first", srcs = ["base.txt"], outs = ["first.txt"], cmd = "cat $(SRCS) > $(OUTS)")
+genrule(
+    name = "second",
+    deps = ["//pkg:first"],
+    outs = ["second.txt"],
+    cmd = "cat $(SRCS) > $(OUTS); echo extra >> $(OUTS)",
+)
+"#,
+        &[("base.txt", "hello\n")],
+    );
+    let root = tmp.path();
+    let registry = builtin_rules();
+    let graph = load_package(root, "pkg", &registry).unwrap();
+    let config = host_config();
+    let exec = LocalExecutor::new(root.join(".mybuild")).unwrap();
+
+    let analyzer = Analyzer::new(&graph, &registry, &config, root, exec.cas());
+    let g = analyzer.analyze(&Label::parse("//pkg:second").unwrap()).unwrap();
+
+    // Both genrules contribute an action; `first` precedes `second`.
+    assert_eq!(
+        g.order(),
+        &[
+            Label::parse("//pkg:first").unwrap(),
+            Label::parse("//pkg:second").unwrap()
+        ]
+    );
+    assert_eq!(g.action_count(), 2);
+
+    // execute_graph threads `first`'s output into `second`'s input.
+    let actions: Vec<_> = g.actions().cloned().collect();
+    let results = exec.execute_graph(&actions).unwrap();
+    let second = results.last().unwrap();
+    assert!(second.success());
+    let out = exec
+        .cas()
+        .get(second.outputs.get("second.txt").unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(String::from_utf8(out).unwrap(), "hello\nextra\n");
+}
+
+#[test]
 fn alias_forwards_providers_through_analysis() {
     let tmp = workspace(
         r#"

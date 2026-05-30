@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anneal_exec::Action;
 
 use crate::context::RuleContext;
-use crate::providers::{Artifact, FileSet, ProviderSet};
+use crate::providers::{Artifact, ArtifactSource, FileSet, ProviderSet};
 use crate::rule::{Analysis, Rule, RuleError};
 use crate::schema::{AttrSchema, AttrType};
 
@@ -97,11 +97,10 @@ impl Rule for GenRule {
             ));
         }
 
-        // Inputs = direct source files + every file provided by `deps` targets.
-        // Dependency FileSets arrive already content-addressed (resolved providers),
-        // so genrule → {filegroup, alias} works today. Consuming another action's
-        // *produced* outputs (genrule → genrule) needs post-execution digest
-        // threading and is a later increment.
+        // Inputs = direct source files + every file provided by `deps` targets. A
+        // dependency artifact may be a resolved source (`filegroup`) or another
+        // action's produced output (`genrule`); either flows straight through as the
+        // matching input source.
         let mut inputs: Vec<Artifact> = Vec::new();
         for src in direct_srcs {
             inputs.push(ctx.source_artifact(Path::new(src))?);
@@ -122,11 +121,25 @@ impl Rule for GenRule {
             .replace("$(SRCS)", &srcs_joined)
             .replace("$(OUTS)", &outs.join(" "));
 
+        // The action's name doubles as its graph id; outputs are referenced as
+        // `(action_id, output_name)` by any consumer.
+        let action_id = format!("genrule {}", ctx.label());
         let command = vec!["/bin/sh".to_owned(), "-c".to_owned(), expanded];
-        let mut builder = Action::builder(format!("genrule {}", ctx.label()), command);
+        let mut builder = Action::builder(action_id.clone(), command);
         for artifact in &inputs {
             let name = artifact.path.to_string_lossy().into_owned();
-            builder = builder.input(name, artifact.path.clone(), artifact.digest);
+            match &artifact.source {
+                ArtifactSource::Source(digest) => {
+                    builder = builder.input(name, artifact.path.clone(), *digest);
+                }
+                ArtifactSource::Output {
+                    action: producer,
+                    name: output,
+                } => {
+                    builder =
+                        builder.input_from_output(name, artifact.path.clone(), producer, output);
+                }
+            }
         }
         for out in outs {
             builder = builder.output(out.clone(), PathBuf::from(out));
@@ -135,11 +148,26 @@ impl Rule for GenRule {
         // is a later increment.
         builder = builder.configured(ctx.config().clone(), Vec::new());
 
+        // Expose the produced outputs so dependents can consume them — the digests
+        // are unknown until execution, so they are Output references resolved then.
+        let provided_outputs = outs
+            .iter()
+            .map(|out| Artifact {
+                path: PathBuf::from(out),
+                source: ArtifactSource::Output {
+                    action: action_id.clone(),
+                    name: out.clone(),
+                },
+            })
+            .collect();
+
         Ok(Analysis {
             actions: vec![builder.build()],
-            // Exposing genrule's *produced* outputs as a provider requires
-            // post-execution digests (the action-graph increment); none for now.
-            providers: ProviderSet::default(),
+            providers: ProviderSet {
+                files: Some(FileSet {
+                    files: provided_outputs,
+                }),
+            },
         })
     }
 }

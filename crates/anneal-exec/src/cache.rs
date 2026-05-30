@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anneal_core::Digest;
 
-use crate::action::Action;
+use crate::action::{Action, InputSource};
 use crate::SANDBOX_VERSION;
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -42,12 +42,25 @@ pub fn action_digest(action: &Action) -> Digest {
         write_str(&mut buf, arg);
     }
 
-    // inputs (BTreeMap → sorted by name)
+    // inputs (BTreeMap → sorted by name). The source is tagged so a Blob digest can
+    // never collide with an Output reference. In normal execution every input is a
+    // Blob by the time keying happens (the graph executor resolves Output refs to
+    // Blobs first); the Output arm is kept for totality.
     write_count(&mut buf, action.inputs.len());
     for (name, input) in &action.inputs {
         write_str(&mut buf, name);
         write_str(&mut buf, &input.path.to_string_lossy());
-        write_bytes(&mut buf, input.digest.as_bytes());
+        match &input.source {
+            InputSource::Blob(digest) => {
+                buf.push(0);
+                write_bytes(&mut buf, digest.as_bytes());
+            }
+            InputSource::Output { action, name } => {
+                buf.push(1);
+                write_str(&mut buf, action);
+                write_str(&mut buf, name);
+            }
+        }
     }
 
     // env (BTreeMap → sorted by key); keys and values both matter (§7.4)

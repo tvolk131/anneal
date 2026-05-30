@@ -12,7 +12,7 @@ use anneal_cas::Cas;
 use anneal_core::{Configuration, Label};
 
 use crate::attrs::Attrs;
-use crate::providers::{Artifact, ProviderSet};
+use crate::providers::{Artifact, ArtifactSource, ProviderSet};
 use crate::rule::RuleError;
 
 /// A dependency that has already been analyzed: its label and the providers it
@@ -83,7 +83,7 @@ impl<'a> RuleContext<'a> {
         })?;
         Ok(Artifact {
             path: rel.to_path_buf(),
-            digest,
+            source: ArtifactSource::Source(digest),
         })
     }
 }

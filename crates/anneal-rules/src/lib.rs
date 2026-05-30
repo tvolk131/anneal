@@ -31,7 +31,7 @@ mod schema;
 
 pub use attrs::{AttrError, AttrValue, Attrs};
 pub use context::{ResolvedDep, RuleContext};
-pub use providers::{Artifact, FileSet, ProviderSet};
+pub use providers::{Artifact, ArtifactSource, FileSet, ProviderSet};
 pub use rule::{Analysis, Rule, RuleError};
 pub use rules::{builtin_rules, Alias, FileGroup, GenRule, RuleRegistry};
 pub use schema::{AttrSchema, AttrType};

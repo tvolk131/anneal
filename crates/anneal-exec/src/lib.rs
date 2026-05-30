@@ -31,7 +31,7 @@ mod executor;
 mod materializer;
 mod sandbox;
 
-pub use action::{Action, ActionBuilder, CachePolicy, ExecutionMode, Input};
+pub use action::{Action, ActionBuilder, CachePolicy, ExecutionMode, Input, InputSource};
 pub use cache::action_digest;
 pub use executor::{ActionResult, ExecError, Executor, LocalExecutor};
 

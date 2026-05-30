@@ -123,6 +123,58 @@ fn missing_declared_output_is_an_error() {
 }
 
 #[test]
+fn execute_graph_threads_outputs_between_actions() {
+    let dir = tempfile::tempdir().unwrap();
+    let exec = LocalExecutor::new(dir.path()).unwrap();
+    let seed = exec.cas().put(b"seed\n").unwrap();
+
+    // Producer uppercases its source into the output "produced.txt".
+    let producer = Action::builder(
+        "producer",
+        ["/bin/sh", "-c", "tr a-z A-Z < in.txt > produced.txt"],
+    )
+    .input("src", "in.txt", seed)
+    .output("produced.txt", "produced.txt")
+    .build();
+
+    // Consumer reads the producer's output (materialized at from_producer.txt) and
+    // appends a line — it references the producer by name + output name.
+    let consumer = Action::builder(
+        "consumer",
+        [
+            "/bin/sh",
+            "-c",
+            "cat from_producer.txt > final.txt; echo done >> final.txt",
+        ],
+    )
+    .input_from_output("p", "from_producer.txt", "producer", "produced.txt")
+    .output("final.txt", "final.txt")
+    .build();
+
+    let results = exec.execute_graph(&[producer, consumer]).unwrap();
+    assert_eq!(results.len(), 2);
+    assert!(results[0].success() && results[1].success());
+    let out = exec
+        .cas()
+        .get(results[1].outputs.get("final.txt").unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(String::from_utf8(out).unwrap(), "SEED\ndone\n");
+}
+
+#[test]
+fn executing_an_unresolved_action_directly_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let exec = LocalExecutor::new(dir.path()).unwrap();
+    let action = Action::builder("c", ["/bin/sh", "-c", "true"])
+        .input_from_output("p", "x.txt", "no_such_producer", "out")
+        .output("o", "o.txt")
+        .build();
+    let err = exec.execute(&action).unwrap_err();
+    assert!(matches!(err, anneal_exec::ExecError::UnresolvedInput { .. }));
+}
+
+#[test]
 fn failed_action_reports_exit_code_and_is_not_cached() {
     let dir = tempfile::tempdir().unwrap();
     let exec = LocalExecutor::new(dir.path()).unwrap();

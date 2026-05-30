@@ -96,8 +96,11 @@ fn filegroup_provides_resolved_sources() {
     assert!(analysis.actions.is_empty());
     let files = analysis.providers.files.expect("filegroup exposes a FileSet");
     assert_eq!(files.files.len(), 2);
-    // Digests are real content addresses of the sources.
-    assert_eq!(files.files[0].digest, anneal_core::Digest::of(b"x"));
+    // Sources are resolved content addresses.
+    assert_eq!(
+        files.files[0].source,
+        anneal_rules::ArtifactSource::Source(anneal_core::Digest::of(b"x"))
+    );
 }
 
 #[test]

@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anneal_cas::Cas;
 use anneal_core::Digest;
 
-use crate::action::Action;
+use crate::action::{Action, InputSource};
 use crate::executor::ExecError;
 
 static SANDBOX_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -60,8 +60,19 @@ pub(crate) fn prepare(
     std::fs::create_dir_all(&tmp).map_err(ExecError::Io)?;
 
     for input in action.inputs.values() {
+        // Inputs must be resolved to blobs before reaching the materializer; the
+        // graph executor guarantees this. An unresolved Output is a caller error.
+        let digest = match &input.source {
+            InputSource::Blob(digest) => digest,
+            InputSource::Output { action, name } => {
+                return Err(ExecError::UnresolvedInput {
+                    action: action.clone(),
+                    output: name.clone(),
+                })
+            }
+        };
         let dest = cwd.join(&input.path);
-        cas.link_into(&input.digest, &dest).map_err(ExecError::Io)?;
+        cas.link_into(digest, &dest).map_err(ExecError::Io)?;
     }
 
     Ok(PreparedSandbox {

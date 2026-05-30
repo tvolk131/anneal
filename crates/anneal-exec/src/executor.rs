@@ -5,7 +5,7 @@
 //! outputs → record the cache entry.** A caller never touches the materializer,
 //! sandbox, or cache directly.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use anneal_cas::Cas;
 use anneal_core::Digest;
 
-use crate::action::{Action, CachePolicy, ExecutionMode};
+use crate::action::{Action, CachePolicy, ExecutionMode, InputSource};
 use crate::cache::{action_digest, ActionCache, StoredResult};
 use crate::materializer;
 use crate::sandbox::{self, SandboxSpec};
@@ -81,10 +81,69 @@ impl LocalExecutor {
         self.retain_sandboxes = retain;
         self
     }
+
+    /// Execute an action graph: `actions` in dependency order (producers before
+    /// consumers, as `anneal-analysis` emits). Each action's [`InputSource::Output`]
+    /// references are resolved against the outputs produced earlier in the run, then
+    /// the resolved action is executed (and cached) like any other. Returns the
+    /// per-action results, aligned with `actions`.
+    pub fn execute_graph(&self, actions: &[Action]) -> Result<Vec<ActionResult>, ExecError> {
+        // (producing action name, output name) -> content digest
+        let mut produced: HashMap<(String, String), Digest> = HashMap::new();
+        let mut results = Vec::with_capacity(actions.len());
+
+        for action in actions {
+            let resolved = resolve_action(action, &produced)?;
+            let result = self.execute(&resolved)?;
+            for (output_name, digest) in &result.outputs {
+                produced.insert((action.name().to_owned(), output_name.clone()), *digest);
+            }
+            results.push(result);
+        }
+        Ok(results)
+    }
+}
+
+/// Return a copy of `action` with every [`InputSource::Output`] replaced by the
+/// concrete blob produced earlier in the run.
+fn resolve_action(
+    action: &Action,
+    produced: &HashMap<(String, String), Digest>,
+) -> Result<Action, ExecError> {
+    let mut resolved = action.clone();
+    for input in resolved.inputs.values_mut() {
+        if let InputSource::Output {
+            action: producer,
+            name,
+        } = &input.source
+        {
+            let digest = produced
+                .get(&(producer.clone(), name.clone()))
+                .copied()
+                .ok_or_else(|| ExecError::UnresolvedInput {
+                    action: producer.clone(),
+                    output: name.clone(),
+                })?;
+            input.source = InputSource::Blob(digest);
+        }
+    }
+    Ok(resolved)
 }
 
 impl Executor for LocalExecutor {
     fn execute(&self, action: &Action) -> Result<ActionResult, ExecError> {
+        // A single action must be fully resolved: every input a concrete blob.
+        // Actions with Output references are run via `execute_graph`, which resolves
+        // them against prior outputs first.
+        for input in action.inputs.values() {
+            if let InputSource::Output { action: a, name } = &input.source {
+                return Err(ExecError::UnresolvedInput {
+                    action: a.clone(),
+                    output: name.clone(),
+                });
+            }
+        }
+
         let key = action_digest(action);
 
         // An action is cacheable only if it is deterministic AND sealed: permeable
@@ -177,6 +236,9 @@ pub enum ExecError {
     Spawn(io::Error),
     /// A declared output was not produced.
     MissingOutput(String),
+    /// An input referenced an action output that has not been produced (the producer
+    /// did not run before this action, or the reference is dangling).
+    UnresolvedInput { action: String, output: String },
     /// The action exceeded its timeout and was killed.
     Timeout { timeout_ms: u64 },
 }
@@ -188,6 +250,9 @@ impl fmt::Display for ExecError {
             ExecError::Spawn(e) => write!(f, "failed to spawn command: {e}"),
             ExecError::MissingOutput(name) => {
                 write!(f, "action did not produce declared output {name:?}")
+            }
+            ExecError::UnresolvedInput { action, output } => {
+                write!(f, "input references unproduced output {output:?} of action {action:?}")
             }
             ExecError::Timeout { timeout_ms } => {
                 write!(f, "action exceeded its {timeout_ms}ms timeout")

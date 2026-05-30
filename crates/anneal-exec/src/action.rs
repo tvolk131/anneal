@@ -12,12 +12,22 @@ use std::path::PathBuf;
 
 use anneal_core::{Axis, AxisValues, Configuration, Digest, Platform};
 
-/// A declared input: a CAS blob to be materialized at `path` (relative to the
-/// action's working directory) inside the sandbox.
+/// Where an input's content comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputSource {
+    /// A concrete CAS blob, known at analysis time (a source file, a `filegroup`).
+    Blob(Digest),
+    /// Another action's named output, resolved to a blob at execution time. The
+    /// referenced action is identified by its (graph-unique) [`Action::name`].
+    Output { action: String, name: String },
+}
+
+/// A declared input: content (a [`InputSource`]) to be materialized at `path`
+/// (relative to the action's working directory) inside the sandbox.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Input {
     pub path: PathBuf,
-    pub digest: Digest,
+    pub source: InputSource,
 }
 
 /// Isolation level for a running action (§7.2).
@@ -112,7 +122,9 @@ impl Action {
         }
     }
 
-    /// The action's human-facing name (excluded from the cache key, §8.1).
+    /// The action's name. Excluded from the cache key (§8.1), but it is the
+    /// **graph-unique identity** other actions use to reference this action's
+    /// outputs ([`InputSource::Output`]), so it must be unique within a graph.
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -131,14 +143,37 @@ pub struct ActionBuilder {
 }
 
 impl ActionBuilder {
-    /// Declare an input: materialize the CAS blob `digest` at `path` (relative to the
-    /// working directory) under the logical `name`.
+    /// Declare an input from a concrete CAS blob: materialize `digest` at `path`
+    /// (relative to the working directory) under the logical `name`.
     pub fn input(mut self, name: impl Into<String>, path: impl Into<PathBuf>, digest: Digest) -> Self {
         self.action.inputs.insert(
             name.into(),
             Input {
                 path: path.into(),
-                digest,
+                source: InputSource::Blob(digest),
+            },
+        );
+        self
+    }
+
+    /// Declare an input from another action's output: at execution time the producer
+    /// `action_id`'s output `output_name` is resolved to a blob and materialized at
+    /// `path`. This is the inter-action edge of the action graph.
+    pub fn input_from_output(
+        mut self,
+        name: impl Into<String>,
+        path: impl Into<PathBuf>,
+        action_id: impl Into<String>,
+        output_name: impl Into<String>,
+    ) -> Self {
+        self.action.inputs.insert(
+            name.into(),
+            Input {
+                path: path.into(),
+                source: InputSource::Output {
+                    action: action_id.into(),
+                    name: output_name.into(),
+                },
             },
         );
         self

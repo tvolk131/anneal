@@ -10,12 +10,23 @@ use std::path::PathBuf;
 
 use anneal_core::Digest;
 
-/// A content-addressed file with a logical (relative) path. Used for source files
-/// and `filegroup` outputs, whose digests are known at analysis time.
+/// Where an artifact's content comes from — mirroring [`anneal_exec::InputSource`],
+/// so a provider can carry both resolved sources and not-yet-produced outputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtifactSource {
+    /// Concrete content, known at analysis time (a source file, a `filegroup`).
+    Source(Digest),
+    /// An output produced by an action, identified by the producing action's id
+    /// (its [`anneal_exec::Action::name`]) and output name. Resolved to content at
+    /// execution time.
+    Output { action: String, name: String },
+}
+
+/// A file exposed by a target, with a logical (relative) path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Artifact {
     pub path: PathBuf,
-    pub digest: Digest,
+    pub source: ArtifactSource,
 }
 
 /// A set of files exposed by a target.
