@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anneal_exec::Action;
 
 use crate::context::RuleContext;
-use crate::providers::{FileSet, ProviderSet};
+use crate::providers::{Artifact, FileSet, ProviderSet};
 use crate::rule::{Analysis, Rule, RuleError};
 use crate::schema::{AttrSchema, AttrType};
 
@@ -14,6 +14,7 @@ const FILEGROUP_SCHEMA: &[AttrSchema] = &[AttrSchema::required("srcs", AttrType:
 const ALIAS_SCHEMA: &[AttrSchema] = &[AttrSchema::required("actual", AttrType::Label)];
 const GENRULE_SCHEMA: &[AttrSchema] = &[
     AttrSchema::optional("srcs", AttrType::StringList),
+    AttrSchema::optional("deps", AttrType::LabelList),
     AttrSchema::required("outs", AttrType::StringList),
     AttrSchema::required("cmd", AttrType::String),
 ];
@@ -86,7 +87,7 @@ impl Rule for GenRule {
     }
 
     fn analyze(&self, ctx: &RuleContext) -> Result<Analysis, RuleError> {
-        let srcs = ctx.attrs().string_list_opt("srcs")?;
+        let direct_srcs = ctx.attrs().string_list_opt("srcs")?;
         let outs = ctx.attrs().string_list("outs")?;
         let cmd = ctx.attrs().string("cmd")?;
 
@@ -96,21 +97,34 @@ impl Rule for GenRule {
             ));
         }
 
-        // Resolve sources into content-addressed inputs.
-        let mut src_artifacts = Vec::with_capacity(srcs.len());
-        for src in srcs {
-            src_artifacts.push(ctx.source_artifact(Path::new(src))?);
+        // Inputs = direct source files + every file provided by `deps` targets.
+        // Dependency FileSets arrive already content-addressed (resolved providers),
+        // so genrule → {filegroup, alias} works today. Consuming another action's
+        // *produced* outputs (genrule → genrule) needs post-execution digest
+        // threading and is a later increment.
+        let mut inputs: Vec<Artifact> = Vec::new();
+        for src in direct_srcs {
+            inputs.push(ctx.source_artifact(Path::new(src))?);
+        }
+        for dep in ctx.deps() {
+            if let Some(file_set) = &dep.providers.files {
+                inputs.extend(file_set.files.iter().cloned());
+            }
         }
 
-        // Expand the `$(SRCS)` / `$(OUTS)` make-style variables.
+        // `$(SRCS)` expands to every input path; `$(OUTS)` to every output path.
+        let srcs_joined = inputs
+            .iter()
+            .map(|a| a.path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
         let expanded = cmd
-            .replace("$(SRCS)", &srcs.join(" "))
+            .replace("$(SRCS)", &srcs_joined)
             .replace("$(OUTS)", &outs.join(" "));
 
         let command = vec!["/bin/sh".to_owned(), "-c".to_owned(), expanded];
         let mut builder = Action::builder(format!("genrule {}", ctx.label()), command);
-
-        for artifact in &src_artifacts {
+        for artifact in &inputs {
             let name = artifact.path.to_string_lossy().into_owned();
             builder = builder.input(name, artifact.path.clone(), artifact.digest);
         }

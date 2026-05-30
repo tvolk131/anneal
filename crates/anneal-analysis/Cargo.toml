@@ -1,0 +1,15 @@
+[package]
+name = "anneal-analysis"
+version.workspace = true
+edition.workspace = true
+description = "Analyzes a target graph into an action graph: dep-ordered rule analysis, provider threading, memoization."
+
+[dependencies]
+anneal-core = { path = "../anneal-core" }
+anneal-cas = { path = "../anneal-cas" }
+anneal-exec = { path = "../anneal-exec" }
+anneal-rules = { path = "../anneal-rules" }
+anneal-loader = { path = "../anneal-loader" }
+
+[dev-dependencies]
+tempfile = "3"

@@ -8,6 +8,7 @@ members = [
     "crates/anneal-exec",
     "crates/anneal-rules",
     "crates/anneal-loader",
+    "crates/anneal-analysis",
 ]
 
 # Shared package metadata, inherited by members via `field.workspace = true`.
