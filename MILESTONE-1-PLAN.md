@@ -247,6 +247,7 @@ moment the first snapshot does.
 |------|-----------|--------|
 | starlark-rust integration | Spike A | **retired** — see `spikes/FINDINGS.md` |
 | macOS materializer at scale | Spike B | **retired** (hardlink throughput carried to Phase 3 benchmarks) |
+| macOS read-only / store-corrupting inputs | APFS `clonefile` materialization | **addressed** — inputs are copy-on-write clones (distinct inode) marked `0444`; a write to an input COWs and cannot corrupt the store (proven by test). Full *read*-isolation of undeclared files remains the Linux-VM path. |
 | snapshot correctness-neutrality | Phase 3 verification harness | **harness built & passing** — `anneal-snapshot` + `verify_correctness_neutral`; a warm (incremental) build that reuses a snapshotted crate produces byte-identical outputs to a cold build. Wired into CI per PR is the remaining step. |
 | per-`(crate, test_type)` cold-cache overhead | Phase 6 benchmarks (batch-invocation fallback ready) | pending |
 | macOS hermeticity ceiling | documented; Linux-VM mode for strict needs | accepted/documented |

@@ -14,6 +14,21 @@
 //! cross-filesystem copy fallback proven necessary in Spike B), and never learns
 //! about sandboxes. The materializer never sees a path. This keeps the storage
 //! layout fully hidden behind a narrow interface.
+//!
+//! ## Protecting the store from materialized inputs
+//!
+//! A materialized input must not be a route to corrupting the immutable store.
+//!
+//! * **macOS (APFS):** inputs are placed with `clonefile(2)` — a copy-on-write clone
+//!   on a *separate inode*. A write to the input COWs and never touches the CAS blob,
+//!   and because it is a distinct inode we can also mark it read-only (`0444`) without
+//!   affecting the blob. This also sidesteps the per-inode hardlink-limit concern of
+//!   Spike B (no shared inode at all).
+//! * **Linux/other:** inputs are hardlinked (shared inode); strict read-only
+//!   enforcement is the future kernel bind-mount path, so we do not chmod the shared
+//!   inode here.
+//!
+//! Both fall back to a copy across filesystems / on non-CoW volumes.
 
 use std::fs;
 use std::io;
@@ -22,8 +37,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anneal_core::Digest;
 
-/// `EXDEV` ("cross-device link") errno — 18 on both Linux and macOS. A hardlink
-/// across filesystems fails with this; we fall back to a copy (Spike B finding §4).
+/// `EXDEV` ("cross-device link") errno — 18 on Linux. A hardlink across filesystems
+/// fails with this; we fall back to a copy (Spike B finding §4).
+#[cfg(not(target_os = "macos"))]
 const EXDEV: i32 = 18;
 
 /// Disambiguates temp file names within a process so concurrent `put`s don't collide.
@@ -32,9 +48,12 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// How a blob was placed into the destination by [`Cas::link_into`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkKind {
-    /// Hardlinked — O(1), shares the inode with the CAS blob (the common case).
+    /// Hardlinked — O(1), shares the inode with the CAS blob (Linux common case).
     Hardlinked,
-    /// Copied — destination was on a different filesystem from the store.
+    /// Copy-on-write clone — O(1), a separate inode sharing storage (APFS). A write
+    /// to the input COWs and cannot corrupt the CAS blob.
+    Cloned,
+    /// Copied — destination was on a different filesystem / non-CoW volume.
     Copied,
 }
 
@@ -96,9 +115,10 @@ impl Cas {
         self.blob_path(digest).exists()
     }
 
-    /// Place the blob for `digest` at `dest`, creating parent directories. Hardlinks
-    /// from the store (O(1), shared inode); falls back to a copy if `dest` is on a
-    /// different filesystem. Errors if the blob is absent.
+    /// Place the blob for `digest` at `dest`, creating parent directories. O(1) via a
+    /// CoW clone (macOS/APFS) or a hardlink (elsewhere), falling back to a copy across
+    /// filesystems. Errors if the blob is absent. See the module docs for how this
+    /// keeps a materialized input from corrupting the store.
     pub fn link_into(&self, digest: &Digest, dest: &Path) -> io::Result<LinkKind> {
         let src = self.blob_path(digest);
         if !src.exists() {
@@ -110,14 +130,7 @@ impl Cas {
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)?;
         }
-        match fs::hard_link(&src, dest) {
-            Ok(()) => Ok(LinkKind::Hardlinked),
-            Err(e) if e.raw_os_error() == Some(EXDEV) => {
-                fs::copy(&src, dest)?;
-                Ok(LinkKind::Copied)
-            }
-            Err(e) => Err(e),
-        }
+        place_blob(&src, dest)
     }
 
     /// The on-disk path of a blob: `objects/<first 2 hex>/<remaining 62 hex>`.
@@ -126,6 +139,63 @@ impl Cas {
     fn blob_path(&self, digest: &Digest) -> PathBuf {
         let hex = digest.to_hex();
         self.objects.join(&hex[..2]).join(&hex[2..])
+    }
+}
+
+/// Place a blob at `dest` using the cheapest store-safe mechanism for the platform.
+///
+/// macOS/APFS: `clonefile` (copy-on-write, distinct inode) then mark read-only. A
+/// write to the input COWs, so the store blob is never mutated.
+#[cfg(target_os = "macos")]
+fn place_blob(src: &Path, dest: &Path) -> io::Result<LinkKind> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let to_cstring = |p: &Path| {
+        CString::new(p.as_os_str().as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))
+    };
+    let src_c = to_cstring(src)?;
+    let dst_c = to_cstring(dest)?;
+
+    // SAFETY: both arguments are valid NUL-terminated paths; flags 0 is the default.
+    let rc = unsafe { libc::clonefile(src_c.as_ptr(), dst_c.as_ptr(), 0) };
+    if rc == 0 {
+        set_read_only(dest)?;
+        return Ok(LinkKind::Cloned);
+    }
+
+    let err = io::Error::last_os_error();
+    match err.raw_os_error() {
+        // Not a CoW volume, or a different filesystem: fall back to a copy.
+        Some(libc::ENOTSUP) | Some(libc::EXDEV) | Some(libc::ENOSYS) => {
+            fs::copy(src, dest)?;
+            set_read_only(dest)?;
+            Ok(LinkKind::Copied)
+        }
+        _ => Err(err),
+    }
+}
+
+/// Mark a freshly-placed input read-only. Safe on a clone/copy (distinct inode); it
+/// does not affect the store blob.
+#[cfg(target_os = "macos")]
+fn set_read_only(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o444))
+}
+
+/// Linux/other: hardlink (shared inode), copy across filesystems. Strict read-only
+/// enforcement is the future kernel bind-mount path, so the shared inode is left as-is.
+#[cfg(not(target_os = "macos"))]
+fn place_blob(src: &Path, dest: &Path) -> io::Result<LinkKind> {
+    match fs::hard_link(src, dest) {
+        Ok(()) => Ok(LinkKind::Hardlinked),
+        Err(e) if e.raw_os_error() == Some(EXDEV) => {
+            fs::copy(src, dest)?;
+            Ok(LinkKind::Copied)
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -163,23 +233,54 @@ mod tests {
     }
 
     #[test]
-    fn link_into_hardlinks_and_shares_inode() {
+    fn link_into_places_content() {
         let dir = tempfile::tempdir().unwrap();
         let cas = Cas::open(dir.path()).unwrap();
         let digest = cas.put(b"materialize me").unwrap();
 
         let dest = dir.path().join("sandbox/nested/file.txt");
         let kind = cas.link_into(&digest, &dest).unwrap();
-        assert_eq!(kind, LinkKind::Hardlinked);
         assert_eq!(fs::read(&dest).unwrap(), b"materialize me");
 
-        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        let src_ino = fs::metadata(cas.blob_path(&digest)).unwrap().ino();
+        let dest_ino = fs::metadata(&dest).unwrap().ino();
+
+        #[cfg(target_os = "macos")]
         {
-            use std::os::unix::fs::MetadataExt;
-            let src_ino = fs::metadata(cas.blob_path(&digest)).unwrap().ino();
-            let dest_ino = fs::metadata(&dest).unwrap().ino();
-            assert_eq!(src_ino, dest_ino, "hardlink must share the inode");
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(kind, LinkKind::Cloned);
+            assert_ne!(src_ino, dest_ino, "a CoW clone is a distinct inode");
+            let mode = fs::metadata(&dest).unwrap().permissions().mode();
+            assert_eq!(mode & 0o222, 0, "materialized input is read-only");
         }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(kind, LinkKind::Hardlinked);
+            assert_eq!(src_ino, dest_ino, "hardlink shares the inode");
+        }
+    }
+
+    /// The store must survive a misbehaving action that writes to its inputs. On
+    /// APFS, copy-on-write guarantees this even if the read-only bit is cleared.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn writing_through_a_materialized_input_cannot_corrupt_the_store() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::open(dir.path()).unwrap();
+        let digest = cas.put(b"original").unwrap();
+
+        let dest = dir.path().join("sandbox/in.txt");
+        cas.link_into(&digest, &dest).unwrap();
+
+        // Clear the read-only bit and overwrite — as a buggy build action might.
+        fs::set_permissions(&dest, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::write(&dest, b"corrupted!!!").unwrap();
+
+        // The clone diverged; the store blob is intact.
+        assert_eq!(fs::read(&dest).unwrap(), b"corrupted!!!");
+        assert_eq!(cas.get(&digest).unwrap().as_deref(), Some(&b"original"[..]));
     }
 
     #[test]

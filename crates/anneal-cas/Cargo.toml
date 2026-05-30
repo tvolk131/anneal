@@ -7,5 +7,9 @@ description = "Content-addressed store: put/get/has plus hardlink materializatio
 [dependencies]
 anneal-core = { path = "../anneal-core" }
 
+# clonefile(2) for copy-on-write materialization on APFS.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
