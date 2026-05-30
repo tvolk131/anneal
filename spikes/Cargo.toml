@@ -1,0 +1,6 @@
+# Throwaway de-risking spikes (Phase 0 of MILESTONE-1-PLAN.md).
+# Deliberately a SEPARATE workspace from the eventual anneal workspace so this
+# disposable code never entangles the real crate graph.
+[workspace]
+resolver = "2"
+members = ["starlark-spike", "materializer-spike"]
