@@ -10,6 +10,7 @@ members = [
     "crates/anneal-loader",
     "crates/anneal-analysis",
     "crates/anneal-snapshot",
+    "crates/anneal-test",
 ]
 
 # Shared package metadata, inherited by members via `field.workspace = true`.

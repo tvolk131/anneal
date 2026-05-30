@@ -120,15 +120,18 @@ impl Rule for CargoWorkspace {
 
                 // run depends on the compiled binary (an action-graph edge); its cache
                 // key is the binary's content, so it hits when the binary is unchanged.
+                // It captures the framework output to `results.txt` and always exits 0
+                // so a *test failure* is a recorded result (parsed into structured
+                // form by anneal-test), not a lost action error.
+                let run_script = "chmod u+x test-bin\n\
+                     ./test-bin > results.txt 2>&1; code=$?\n\
+                     printf 'ANNEAL_TEST_EXIT=%s\\n' \"$code\" >> results.txt\n";
                 let run = Action::builder(
                     run_id,
-                    vec![
-                        "/bin/sh".to_owned(),
-                        "-c".to_owned(),
-                        "chmod u+x test-bin && ./test-bin".to_owned(),
-                    ],
+                    vec!["/bin/sh".to_owned(), "-c".to_owned(), run_script.to_owned()],
                 )
                 .input_from_output("test-bin", "test-bin", compile_id, "test-bin")
+                .output("results.txt", "results.txt")
                 .env("PATH", "/usr/bin:/bin")
                 .configured(ctx.config().clone(), Vec::new());
                 actions.push(run.build());

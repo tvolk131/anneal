@@ -60,6 +60,7 @@ dependencies = [
  "anneal-exec",
  "anneal-loader",
  "anneal-rules",
+ "anneal-test",
  "tempfile",
 ]
 
@@ -120,6 +121,13 @@ dependencies = [
  "anneal-cas",
  "anneal-core",
  "tempfile",
+]
+
+[[package]]
+name = "anneal-test"
+version = "0.0.0"
+dependencies = [
+ "anneal-core",
 ]
 
 [[package]]
