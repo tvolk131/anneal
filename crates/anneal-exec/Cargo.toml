@@ -1,0 +1,12 @@
+[package]
+name = "anneal-exec"
+version.workspace = true
+edition.workspace = true
+description = "Execution kernel: Action model, action cache, materializer, sandbox, and the Executor interface."
+
+[dependencies]
+anneal-core = { path = "../anneal-core" }
+anneal-cas = { path = "../anneal-cas" }
+
+[dev-dependencies]
+tempfile = "3"
