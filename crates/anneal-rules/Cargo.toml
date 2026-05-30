@@ -1,0 +1,13 @@
+[package]
+name = "anneal-rules"
+version.workspace = true
+edition.workspace = true
+description = "The Rule trait (the system/rule boundary) and the first-party rules."
+
+[dependencies]
+anneal-core = { path = "../anneal-core" }
+anneal-cas = { path = "../anneal-cas" }
+anneal-exec = { path = "../anneal-exec" }
+
+[dev-dependencies]
+tempfile = "3"

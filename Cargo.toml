@@ -6,6 +6,7 @@ members = [
     "crates/anneal-core",
     "crates/anneal-cas",
     "crates/anneal-exec",
+    "crates/anneal-rules",
 ]
 
 # Shared package metadata, inherited by members via `field.workspace = true`.

@@ -27,6 +27,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "anneal-rules"
+version = "0.0.0"
+dependencies = [
+ "anneal-cas",
+ "anneal-core",
+ "anneal-exec",
+ "tempfile",
+]
+
+[[package]]
 name = "anyhow"
 version = "1.0.102"
 source = "registry+https://github.com/rust-lang/crates.io-index"
