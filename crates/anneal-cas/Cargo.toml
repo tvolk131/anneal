@@ -1,0 +1,11 @@
+[package]
+name = "anneal-cas"
+version.workspace = true
+edition.workspace = true
+description = "Content-addressed store: put/get/has plus hardlink materialization."
+
+[dependencies]
+anneal-core = { path = "../anneal-core" }
+
+[dev-dependencies]
+tempfile = "3"

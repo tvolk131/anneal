@@ -1,0 +1,8 @@
+[package]
+name = "anneal-core"
+version.workspace = true
+edition.workspace = true
+description = "Anneal vocabulary types: Digest, Label, Platform, Configuration, axes."
+
+[dependencies]
+sha2 = "0.11"

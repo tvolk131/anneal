@@ -1,0 +1,13 @@
+# The real anneal workspace. (The throwaway Phase 0 spikes under `spikes/` are a
+# separate, nested workspace and are excluded automatically.)
+[workspace]
+resolver = "2"
+members = [
+    "crates/anneal-core",
+    "crates/anneal-cas",
+]
+
+# Shared package metadata, inherited by members via `field.workspace = true`.
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
