@@ -8,6 +8,7 @@ use anneal_exec::Action;
 use crate::attrs::AttrError;
 use crate::context::RuleContext;
 use crate::providers::ProviderSet;
+use crate::schema::AttrSchema;
 
 /// What a rule produces from one configured target: the actions to run and the
 /// providers it exposes to dependents.
@@ -23,6 +24,10 @@ pub struct Analysis {
 pub trait Rule {
     /// The rule's kind as written in a `BUILD` file (e.g. `"genrule"`).
     fn kind(&self) -> &'static str;
+
+    /// The attribute schema, validated at load time (§4.3). The implicit `name`
+    /// attribute is handled by the loader and is not listed here.
+    fn schema(&self) -> &'static [AttrSchema];
 
     /// Analyze one configured target.
     fn analyze(&self, ctx: &RuleContext) -> Result<Analysis, RuleError>;

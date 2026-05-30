@@ -8,6 +8,15 @@ use anneal_exec::Action;
 use crate::context::RuleContext;
 use crate::providers::{FileSet, ProviderSet};
 use crate::rule::{Analysis, Rule, RuleError};
+use crate::schema::{AttrSchema, AttrType};
+
+const FILEGROUP_SCHEMA: &[AttrSchema] = &[AttrSchema::required("srcs", AttrType::StringList)];
+const ALIAS_SCHEMA: &[AttrSchema] = &[AttrSchema::required("actual", AttrType::Label)];
+const GENRULE_SCHEMA: &[AttrSchema] = &[
+    AttrSchema::optional("srcs", AttrType::StringList),
+    AttrSchema::required("outs", AttrType::StringList),
+    AttrSchema::required("cmd", AttrType::String),
+];
 
 /// `filegroup(name, srcs)` — groups source files into a target. No actions; exposes
 /// a [`FileSet`] of the resolved sources.
@@ -16,6 +25,10 @@ pub struct FileGroup;
 impl Rule for FileGroup {
     fn kind(&self) -> &'static str {
         "filegroup"
+    }
+
+    fn schema(&self) -> &'static [AttrSchema] {
+        FILEGROUP_SCHEMA
     }
 
     fn analyze(&self, ctx: &RuleContext) -> Result<Analysis, RuleError> {
@@ -42,6 +55,10 @@ impl Rule for Alias {
         "alias"
     }
 
+    fn schema(&self) -> &'static [AttrSchema] {
+        ALIAS_SCHEMA
+    }
+
     fn analyze(&self, ctx: &RuleContext) -> Result<Analysis, RuleError> {
         let dep = ctx.deps().first().ok_or_else(|| {
             RuleError::Message("alias requires its `actual` target to be resolved".to_owned())
@@ -62,6 +79,10 @@ pub struct GenRule;
 impl Rule for GenRule {
     fn kind(&self) -> &'static str {
         "genrule"
+    }
+
+    fn schema(&self) -> &'static [AttrSchema] {
+        GENRULE_SCHEMA
     }
 
     fn analyze(&self, ctx: &RuleContext) -> Result<Analysis, RuleError> {

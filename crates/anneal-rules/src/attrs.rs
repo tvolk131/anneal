@@ -102,6 +102,12 @@ impl AttrsBuilder {
         self
     }
 
+    /// Insert an already-typed value (used by the loader after schema coercion).
+    pub fn value(mut self, name: impl Into<String>, value: AttrValue) -> Self {
+        self.map.insert(name.into(), value);
+        self
+    }
+
     pub fn build(self) -> Attrs {
         Attrs { map: self.map }
     }

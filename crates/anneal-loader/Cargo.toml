@@ -1,0 +1,16 @@
+[package]
+name = "anneal-loader"
+version.workspace = true
+edition.workspace = true
+description = "Loads BUILD files (Starlark) into a target graph. Hides starlark-rust entirely."
+
+[dependencies]
+anneal-core = { path = "../anneal-core" }
+anneal-rules = { path = "../anneal-rules" }
+starlark = "0.14"
+anyhow = "1"
+
+[dev-dependencies]
+anneal-cas = { path = "../anneal-cas" }
+anneal-exec = { path = "../anneal-exec" }
+tempfile = "3"
