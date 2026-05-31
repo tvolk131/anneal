@@ -70,6 +70,14 @@ pub(crate) fn prepare_at(
         cas.link_into(digest, &dest).map_err(ExecError::Io)?;
     }
 
+    // Pre-create parent directories for declared outputs, so an action can write to a
+    // nested output path (e.g. `gen/config.json`) without creating the dir itself.
+    for output in action.outputs.values() {
+        if let Some(parent) = cwd.join(output).parent() {
+            std::fs::create_dir_all(parent).map_err(ExecError::Io)?;
+        }
+    }
+
     Ok(PreparedSandbox {
         root,
         cwd,

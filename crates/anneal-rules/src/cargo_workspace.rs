@@ -37,10 +37,18 @@ use anneal_exec::{Action, ActionBuilder};
 use crate::context::RuleContext;
 use crate::providers::{Artifact, ArtifactSource, ProviderSet};
 use crate::rule::{Analysis, Rule, RuleError};
-use crate::schema::AttrSchema;
+use crate::schema::{AttrSchema, AttrType};
 
 /// Directories never treated as build inputs.
 const IGNORED_DIRS: &[&str] = &["target", ".git", ".mybuild"];
+
+/// `generated` consumes other targets' file outputs (e.g. a `nickel_eval` JSON),
+/// materializing them into the workspace tree as package-local inputs the Rust code
+/// reads at build time — `include_str!`, `build.rs`, etc. (§14.1, §14.6). This is the
+/// inner-tool-only case: Cargo/rustc read the content at execution; Anneal never
+/// introspects it at analysis (a generated `Cargo.toml`, which the rule *would* parse
+/// at analysis, is the §14.6 "staged pass" case and cannot be an edge).
+const SCHEMA: &[AttrSchema] = &[AttrSchema::optional("generated", AttrType::LabelList)];
 
 pub struct CargoWorkspace;
 
@@ -50,7 +58,7 @@ impl Rule for CargoWorkspace {
     }
 
     fn schema(&self) -> &'static [AttrSchema] {
-        &[]
+        SCHEMA
     }
 
     fn analyze(&self, ctx: &RuleContext) -> Result<Analysis, RuleError> {
@@ -87,13 +95,27 @@ impl Rule for CargoWorkspace {
         let snapshot_paths = vec![PathBuf::from("target")];
         let label = ctx.label().clone();
 
+        // Generated inputs from `generated` deps (§14.6, inner-tool-only): every file
+        // a dependency provides is materialized into the build tree at its path, as a
+        // content-addressed input. Added to every *compiling* action (the test-run
+        // action only executes a binary, so it needs nothing here).
+        let generated: Vec<Artifact> = ctx
+            .deps()
+            .iter()
+            .filter_map(|dep| dep.providers.files.as_ref())
+            .flat_map(|file_set| file_set.files.iter().cloned())
+            .collect();
+
         let mut actions = Vec::new();
 
         // --- coarse build action ---
         let build_cmd = cargo_args("build", None, None, release_flag);
-        let mut build = with_sources(
-            cargo_builder(format!("cargo_workspace build {label}"), build_cmd, &path_env, &rustflags),
-            &sources,
+        let mut build = with_generated(
+            with_sources(
+                cargo_builder(format!("cargo_workspace build {label}"), build_cmd, &path_env, &rustflags),
+                &sources,
+            ),
+            &generated,
         );
         for c in crates.iter().filter(|c| c.has_lib) {
             let lib = format!("lib{}.rlib", c.name.replace('-', "_"));
@@ -114,14 +136,17 @@ impl Rule for CargoWorkspace {
                 let compile_id = format!("cargo_workspace test-compile {label} {} unit", c.name);
                 let run_id = format!("cargo_workspace test-run {label} {} unit", c.name);
 
-                let compile = with_sources(
-                    cargo_builder(
-                        compile_id.clone(),
-                        unit_compile_script(&c.name, release_flag),
-                        &path_env,
-                        &rustflags,
+                let compile = with_generated(
+                    with_sources(
+                        cargo_builder(
+                            compile_id.clone(),
+                            unit_compile_script(&c.name, release_flag),
+                            &path_env,
+                            &rustflags,
+                        ),
+                        &sources,
                     ),
-                    &sources,
+                    &generated,
                 )
                 .output("test-bin", "test-bin")
                 .configured(ctx.config().clone(), consumed.clone())
@@ -147,14 +172,17 @@ impl Rule for CargoWorkspace {
                 actions.push(run.build());
 
                 // doc: single action (no reusable binary, §12.3).
-                let doc = with_sources(
-                    cargo_builder(
-                        format!("cargo_workspace test {label} {} doc", c.name),
-                        cargo_args("test", Some(&c.name), Some("--doc"), release_flag),
-                        &path_env,
-                        &rustflags,
+                let doc = with_generated(
+                    with_sources(
+                        cargo_builder(
+                            format!("cargo_workspace test {label} {} doc", c.name),
+                            cargo_args("test", Some(&c.name), Some("--doc"), release_flag),
+                            &path_env,
+                            &rustflags,
+                        ),
+                        &sources,
                     ),
-                    &sources,
+                    &generated,
                 )
                 .configured(ctx.config().clone(), consumed.clone())
                 .snapshot(snapshot_key, snapshot_paths.clone());
@@ -163,14 +191,17 @@ impl Rule for CargoWorkspace {
 
             if c.has_tests {
                 // integration: single action for now (multi-binary split deferred).
-                let integ = with_sources(
-                    cargo_builder(
-                        format!("cargo_workspace test {label} {} integration", c.name),
-                        cargo_args("test", Some(&c.name), Some("--tests"), release_flag),
-                        &path_env,
-                        &rustflags,
+                let integ = with_generated(
+                    with_sources(
+                        cargo_builder(
+                            format!("cargo_workspace test {label} {} integration", c.name),
+                            cargo_args("test", Some(&c.name), Some("--tests"), release_flag),
+                            &path_env,
+                            &rustflags,
+                        ),
+                        &sources,
                     ),
-                    &sources,
+                    &generated,
                 )
                 .configured(ctx.config().clone(), consumed.clone())
                 .snapshot(snapshot_key, snapshot_paths.clone());
@@ -249,6 +280,24 @@ fn with_sources(mut builder: ActionBuilder, sources: &[Artifact]) -> ActionBuild
         if let ArtifactSource::Source(digest) = &artifact.source {
             let name = artifact.path.to_string_lossy().into_owned();
             builder = builder.input(name, artifact.path.clone(), *digest);
+        }
+    }
+    builder
+}
+
+/// Add generated dependency artifacts as inputs, materialized at their declared paths
+/// in the build tree. A resolved source flows in as a blob; a produced output flows in
+/// as an action-graph edge resolved at execution.
+fn with_generated(mut builder: ActionBuilder, generated: &[Artifact]) -> ActionBuilder {
+    for artifact in generated {
+        let name = artifact.path.to_string_lossy().into_owned();
+        match &artifact.source {
+            ArtifactSource::Source(digest) => {
+                builder = builder.input(name, artifact.path.clone(), *digest);
+            }
+            ArtifactSource::Output { action, name: output } => {
+                builder = builder.input_from_output(name, artifact.path.clone(), action, output);
+            }
         }
     }
     builder

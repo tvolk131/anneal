@@ -575,6 +575,17 @@ When `nextjs_app` ships, Next.js builds are **not** uniformly cacheable. Three m
 
 `.next/cache/` (incremental state, snapshot-managed) is distinct from `.next/` (build output, content-addressed).
 
+### 14.6 When a generated artifact can be an in-graph dependency
+
+A single rule governs whether a generated file can be consumed as an ordinary dependency edge or must instead be produced by a staged pass:
+
+> **Does *Anneal itself* need the generated file's content at analysis time, or does only the *inner tool* need it at execution time?**
+
+- **Inner tool only → a normal in-graph dependency.** The generated file is just a build input the wrapped tool reads at execution (a JSON a Rust crate `include_str!`s, a generated `.rs` compiled by Cargo). Anneal never inspects its content; it flows across the dependency edge as a content-addressed `Output` artifact, materialized into the consumer's tree. Caching and snapshots work normally — the artifact's digest is in the consumer's cache key, and the native tool's own dependency tracking (e.g. rustc's `include_str!` depinfo) keeps incremental builds correct.
+- **Anneal's analysis needs it → not an edge; a staged pass.** If the generated file *shapes the build* — a generated `Cargo.toml` (members, outputs), `pnpm-workspace.yaml`, or any manifest the rule parses during analysis — then an in-graph edge is impossible: analysis runs before execution, so the content does not yet exist. This is a phase-ordering wall, not a missing primitive. The clean resolution is the **materialized generated mode** ([§14.4](#144-three-modes-of-native-tool-interop)): generate and materialize the file to a stable path in a prior pass, then build against the now-real file. (A fully general alternative — deferring a target's analysis until a dependency executes — is a heavyweight mechanism deliberately out of scope.)
+
+The dividing line is exactly the loading→analysis→execution ordering: a dependency edge can carry anything the *execution* phase consumes, but nothing the *analysis* phase must read.
+
 ---
 
 ## 15. Migration and Adoption
