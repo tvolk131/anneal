@@ -179,12 +179,12 @@ The formal unit of work is the **configured target**: a `(label, configuration)`
 All artifacts live in a content-addressed store. The **materializer** bridges the CAS and the filesystem:
 
 1. Prepare a per-action sandbox root.
-2. Hardlink declared inputs from the CAS into the sandbox at expected paths.
+2. Materialize declared inputs from the CAS into the sandbox at expected paths (hardlink on Linux; copy-on-write clone on macOS).
 3. Run the action; it reads materialized inputs and writes declared output paths.
 4. Capture outputs, hash them, store in CAS, record `(action_id, output_name) → hash`.
 5. Clean up the sandbox (or retain for debugging on request).
 
-Hardlinks make setup O(1) per file with negligible disk (shared inodes). CAS and sandboxes share a filesystem so hardlinks always work; cross-filesystem falls back to copy (avoided by configuration).
+Materialization is O(1) per file with negligible disk. On **Linux**, inputs are hardlinked from the CAS (shared inodes), with strict read-only enforced by the sandbox's read-only bind mounts ([§7.3](#73-sandboxing)). On **macOS**, inputs are APFS copy-on-write clones (`clonefile`) marked read-only: a write through a materialized input copies-on-write and **cannot corrupt the store** (and the per-inode hardlink limit is sidestepped). CAS and sandboxes share one filesystem; cross-filesystem materialization falls back to copy (avoided by configuration).
 
 ---
 
@@ -240,6 +240,27 @@ Information crosses a dependency edge on exactly two channels:
 **A configured target's output is a pure function of `(label, configuration)` — never of which targets depend on it.** There is no third channel of ad-hoc per-edge parameters: a dependent cannot pass arbitrary values down to reconfigure a dependency, because that would make the dependency's output depend on its consumers and destroy the content-addressed identity that caching, deduplication, and remote sharing rest on ([§1.5](#15-core-principles), [§8](#8-caching-and-the-correctness-neutral-invariant)).
 
 So "wanting a variant of a dependency" is expressed by **depending on the target (or configuration) that produces it** — through graph topology and instantiation-time attributes, not a runtime request. Surface syntax that *looks* like edge parameterization (e.g. depend on `//x` "as JSON") is admissible only as sugar, and only when it desugars to a cache-safe form: **selecting** among outputs the dependency already offers, or depending on a **distinct configured variant** whose distinguishing parameter is part of the cache key. The dividing line is whether the parameter enters the dependency's identity (safe) or silently alters its output without doing so (forbidden). This mirrors Bazel and Buck2, which channel all downward influence through configuration and transitions and provide no per-edge parameter passing.
+
+### 5.5 Providers: outputs and metadata
+
+A target's providers carry information on four separate channels, kept apart so none degrades into an untyped grab-bag:
+
+1. **Typed metadata providers.** Structured facts *about* a target that a dependent needs but that are not files — a library's crate name and features, a toolchain's location and version, the inputs required to link against a target. Typed (`LibraryInfo`, `ToolchainInfo`, …) and read by field. **Metadata never lives in a file group.**
+2. **File outputs as a default group plus named groups.** A target's *file* outputs are a **default group** (what a dependent receives by depending on the target) plus zero or more **named groups** (selectable subsets or variants), each a `FileSet` of content-addressed artifacts. The set of named-group keys a rule offers is part of its **declared, validated interface** — not free-form strings — so selecting an unknown group is an analysis error and the menu is discoverable. This is a deliberate divergence from Bazel's `OutputGroupInfo`, whose open string keys accrete into a junk drawer of magic names.
+3. **The diagnostics channel** ([§17.2](#172-diagnostics-channel)). Observations a rule makes — lints, validation findings, deprecations, unused-input detection — flow as structured `Diagnostic` values, not as files in a group.
+4. **Configuration** ([§6](#6-configurations-and-transitions)). Outputs that exist only under a configuration (coverage data, sanitizer artifacts) are gated by the relevant axis, not exposed as permanent groups.
+
+Keeping these four apart is the deep-module discipline applied to providers: each is a narrow, typed channel that means exactly one thing, rather than one wide untyped map absorbing every concern.
+
+### 5.6 Variant menus and selection
+
+A producer often offers a *menu* of file variants — a config rendered as JSON/TOML/YAML, a schema compiled to several languages, the per-`(crate, test_type)` results of a workspace. The menu is the named output groups of [§5.5](#55-providers-outputs-and-metadata), governed by three rules:
+
+- **The rule computes the validated menu.** Its keys may come from a fixed *capability* (Nickel exports to a known set of formats), from *instance introspection* (a Cargo workspace's test types are those each crate actually has), or from an explicit attribute. An optional instance attribute may **narrow** the menu as policy (e.g. "this config is only consumed as TOML").
+- **Selection, never parameterization.** A dependent **selects** an entry from the menu the producer already determined; the requested key never flows into the producer to change what it builds. This is enforced *structurally* — a producer is analyzed without knowledge of its dependents ([§5.4](#54-dependency-information-flow)) — so the menu is fixed by `(label, configuration, attrs)`, and a selected variant is a content-addressed node keyed in part by the variant. "Implicit support for any variant" is therefore realized as the menu **defaulting to the rule's full capability**, never as a parameter passed down an edge.
+- **Granularity is a modeling choice, not a second mechanism.** Whether variants are separate targets (one per variant) or one target offering a menu is a choice over the *same* primitive: separate targets populate only their default group; a menu target populates named groups. Both select cache-safely.
+
+Building only the variants a build actually consumes requires **demand-driven output pruning** ([§21](#21-deferred-features-and-known-limitations)): the build's intent selects which groups of the requested targets are roots, and an action runs only if its output is reachable from a demanded group. Until that exists, a multi-variant producer's unconsumed variants are still built, so the near-term idiom is one target per variant (demand-driven by the dependency graph itself). Variant sets whose membership is known only after a tool runs need **tree artifacts** ([§21](#21-deferred-features-and-known-limitations)), the companion to the static menu.
 
 ---
 
@@ -754,6 +775,9 @@ If incremental builds do not beat native tooling, the thesis is not validated an
 - **Daemon / RPC** interface
 - Python (`uv_workspace`) and Go (`go_module`) rules
 - Build-mode files and per-target default modes (CLI flags only in v1)
+- **Named output groups and dependent variant selection** ([§5.5](#55-providers-outputs-and-metadata)–[§5.6](#56-variant-menus-and-selection)): the provider model is defined now, but Milestone 1 ships only the default output group; the named-group menu and edge-level selection are additive.
+- **Demand-driven output pruning**: build only the provider outputs a build actually consumes — the mechanism that makes multi-variant menus non-wasteful ([§5.6](#56-variant-menus-and-selection)). Until then, demand follows the dependency graph (one target per variant).
+- **Tree / directory artifacts**: outputs whose member set is known only at execution time (e.g. a generated package directory), the companion to the static named-group menu ([§5.6](#56-variant-menus-and-selection)). The directory-walk machinery already exists in the snapshot protocol ([§8.2](#82-the-snapshot-protocol-for-stateful-caches)).
 
 ### 21.2 Deferred further (post-v1 / v2)
 
