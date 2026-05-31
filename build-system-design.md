@@ -230,6 +230,17 @@ A rule maps a target's declared attributes to a set of (coarse) actions and prod
 
 On the **system** side: diagnostics presentation, error formatting, progress display, cache and correctness invariants, cross-cutting aggregation, worker/RE management, configuration resolution. On the **rule** side: how to invoke a tool, the tool's inputs/outputs/providers, and translation of tool output into the system's structured formats. This division is maintained by discipline now, while rules are first-party, so the boundary is established before any public API exists.
 
+### 5.4 Dependency information flow
+
+Information crosses a dependency edge on exactly two channels:
+
+- **Providers flow up** (dependency → dependent): a dependency exposes typed providers; the dependent reads them and adapts. This is the dominant flow.
+- **Configuration flows down** (the dependent's context → dependency), and only at explicit transitions ([§6.4](#64-the-three-transitions)): the sole sanctioned way for *what a dependent needs* to change *how a dependency is built*.
+
+**A configured target's output is a pure function of `(label, configuration)` — never of which targets depend on it.** There is no third channel of ad-hoc per-edge parameters: a dependent cannot pass arbitrary values down to reconfigure a dependency, because that would make the dependency's output depend on its consumers and destroy the content-addressed identity that caching, deduplication, and remote sharing rest on ([§1.5](#15-core-principles), [§8](#8-caching-and-the-correctness-neutral-invariant)).
+
+So "wanting a variant of a dependency" is expressed by **depending on the target (or configuration) that produces it** — through graph topology and instantiation-time attributes, not a runtime request. Surface syntax that *looks* like edge parameterization (e.g. depend on `//x` "as JSON") is admissible only as sugar, and only when it desugars to a cache-safe form: **selecting** among outputs the dependency already offers, or depending on a **distinct configured variant** whose distinguishing parameter is part of the cache key. The dividing line is whether the parameter enters the dependency's identity (safe) or silently alters its output without doing so (forbidden). This mirrors Bazel and Buck2, which channel all downward influence through configuration and transitions and provide no per-edge parameter passing.
+
 ---
 
 ## 6. Configurations and Transitions
