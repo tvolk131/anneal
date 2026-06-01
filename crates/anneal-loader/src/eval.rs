@@ -16,6 +16,7 @@ use starlark::environment::{GlobalsBuilder, Module};
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::syntax::{AstModule, Dialect};
+use starlark::values::dict::DictRef;
 use starlark::values::list::ListRef;
 use starlark::values::none::NoneType;
 use starlark::values::Value;
@@ -27,6 +28,10 @@ pub(crate) enum RawValue {
     Int(i64),
     Bool(bool),
     StringList(Vec<String>),
+    /// A table written `{ "key": value, … }`. Values may themselves be any
+    /// `RawValue` (including nested tables), so a rule can take structured attributes
+    /// like `scripts = { "test": { "kind": "test" } }`. Keys must be strings.
+    Dict(BTreeMap<String, RawValue>),
 }
 
 /// A target as recorded during evaluation, before schema validation.
@@ -107,6 +112,16 @@ fn raw_from_value(value: Value) -> anyhow::Result<RawValue> {
             }
         }
         return Ok(RawValue::StringList(items));
+    }
+    if let Some(dict) = DictRef::from_value(value) {
+        let mut map = BTreeMap::new();
+        for (key, val) in dict.iter() {
+            let key = key.unpack_str().ok_or_else(|| {
+                anyhow::anyhow!("dict keys must be strings, found `{}`", key.get_type())
+            })?;
+            map.insert(key.to_owned(), raw_from_value(val)?);
+        }
+        return Ok(RawValue::Dict(map));
     }
     Err(anyhow::anyhow!(
         "unsupported attribute value of type `{}`",

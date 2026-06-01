@@ -14,6 +14,10 @@ pub enum AttrType {
     LabelList,
     Int,
     Bool,
+    /// A table (`{ "key": value, … }`) whose structure the *rule* validates, not the
+    /// schema (cf. `nickel_eval` validating `format`). The loader checks only that the
+    /// value is a dict; the rule reads it via [`crate::AttrValue`] accessors.
+    Dict,
 }
 
 /// One attribute in a rule's schema. `name` is implicit (handled uniformly by the

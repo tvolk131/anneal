@@ -61,9 +61,16 @@ pub enum CachePolicy {
     Deterministic,
     /// Never cached.
     NonCacheable,
-    /// Cached with a stateful snapshot (§8.2). Implemented in Phase 3
-    /// (`anneal-snapshot`); treated as non-cacheable by the kernel until then.
+    /// Cached with a stateful snapshot (§8.2): the action **owns** the snapshot — it
+    /// restores it before running and *saves* it after — and its result is action-
+    /// cacheable (it is verified reproducible). cargo's `target/` and pnpm's `install`.
     SnapshotBased,
+    /// **Restores** a snapshot another action owns (read-only — never saves it) but is
+    /// **not** action-cacheable: the action always re-runs because its output is not
+    /// trusted reproducible (`docs/rules.md` §5). The honest default for an opaque
+    /// script that needs `node_modules` present but whose result we won't reuse. The
+    /// promotion to `SnapshotBased` is earned via verification, never asserted.
+    SnapshotAccelerated,
 }
 
 impl CachePolicy {
@@ -72,6 +79,7 @@ impl CachePolicy {
             CachePolicy::Deterministic => "deterministic",
             CachePolicy::NonCacheable => "non_cacheable",
             CachePolicy::SnapshotBased => "snapshot_based",
+            CachePolicy::SnapshotAccelerated => "snapshot_accelerated",
         }
     }
 }
@@ -241,12 +249,25 @@ impl ActionBuilder {
     }
 
     /// Use snapshot-based caching: `paths` are the mutable cache directories
-    /// (relative to the working directory) snapshotted under the coarse `key`. Sets
-    /// the cache policy to [`CachePolicy::SnapshotBased`].
+    /// (relative to the working directory) snapshotted under the coarse `key`. The
+    /// action restores **and saves** the snapshot, and is action-cacheable. Sets the
+    /// cache policy to [`CachePolicy::SnapshotBased`].
     pub fn snapshot(mut self, key: Digest, paths: Vec<PathBuf>) -> Self {
         self.action.snapshot_key = Some(key);
         self.action.snapshot_paths = paths;
         self.action.cache_policy = CachePolicy::SnapshotBased;
+        self
+    }
+
+    /// **Restore** the snapshot at `key` (its `paths`) before running, **without
+    /// saving** it back and **without** action-caching the result. For an action that
+    /// consumes a snapshot another action owns (e.g. a pnpm script reading `install`'s
+    /// `node_modules`) but whose own output is not trusted reproducible. Sets the cache
+    /// policy to [`CachePolicy::SnapshotAccelerated`].
+    pub fn snapshot_restore(mut self, key: Digest, paths: Vec<PathBuf>) -> Self {
+        self.action.snapshot_key = Some(key);
+        self.action.snapshot_paths = paths;
+        self.action.cache_policy = CachePolicy::SnapshotAccelerated;
         self
     }
 

@@ -96,7 +96,25 @@ fn coerce(ty: AttrType, raw: &RawValue) -> Result<(AttrValue, Vec<Label>), Strin
             }
             Ok((AttrValue::LabelList(labels.clone()), labels))
         }
+        // A dict is passed through structurally — the rule validates its contents
+        // (§4.3 puts domain validation in the rule). Tables introduce no dep edges.
+        (AttrType::Dict, RawValue::Dict(_)) => Ok((natural(raw), Vec::new())),
         (expected, _) => Err(format!("must be a {}", type_name(expected))),
+    }
+}
+
+/// Convert a raw value to its natural typed form with **no schema coercion** — used
+/// for the contents of a [`AttrType::Dict`], whose inner values the rule interprets.
+/// String→label coercion does not apply inside tables (they carry no dep edges).
+fn natural(raw: &RawValue) -> AttrValue {
+    match raw {
+        RawValue::String(s) => AttrValue::String(s.clone()),
+        RawValue::Int(i) => AttrValue::Int(*i),
+        RawValue::Bool(b) => AttrValue::Bool(*b),
+        RawValue::StringList(v) => AttrValue::StringList(v.clone()),
+        RawValue::Dict(m) => {
+            AttrValue::Dict(m.iter().map(|(k, v)| (k.clone(), natural(v))).collect())
+        }
     }
 }
 
@@ -108,5 +126,6 @@ fn type_name(ty: AttrType) -> &'static str {
         AttrType::LabelList => "list of labels",
         AttrType::Int => "int",
         AttrType::Bool => "bool",
+        AttrType::Dict => "dict",
     }
 }

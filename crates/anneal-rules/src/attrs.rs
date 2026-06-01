@@ -19,6 +19,35 @@ pub enum AttrValue {
     StringList(Vec<String>),
     Label(Label),
     LabelList(Vec<Label>),
+    /// A table whose structure the rule interprets. Values may nest (e.g.
+    /// `scripts = { "build": { "kind": "build", "outputs": ["dist"] } }`).
+    Dict(BTreeMap<String, AttrValue>),
+}
+
+impl AttrValue {
+    /// The string if this is a [`AttrValue::String`], else `None`.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            AttrValue::String(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The items if this is a [`AttrValue::StringList`], else `None`.
+    pub fn as_string_list(&self) -> Option<&[String]> {
+        match self {
+            AttrValue::StringList(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// The entries if this is a [`AttrValue::Dict`], else `None`.
+    pub fn as_dict(&self) -> Option<&BTreeMap<String, AttrValue>> {
+        match self {
+            AttrValue::Dict(m) => Some(m),
+            _ => None,
+        }
+    }
 }
 
 /// A target's attributes, keyed by name.
@@ -82,6 +111,16 @@ impl Attrs {
             Some(AttrValue::Label(l)) => Ok(l),
             Some(_) => Err(AttrError::wrong_type(name, "label")),
             None => Err(AttrError::Missing(name.to_owned())),
+        }
+    }
+
+    /// An optional dict attribute: `None` when absent, error when present with the
+    /// wrong type. The rule interprets the table's structure itself.
+    pub fn dict_opt(&self, name: &str) -> Result<Option<&BTreeMap<String, AttrValue>>, AttrError> {
+        match self.map.get(name) {
+            None => Ok(None),
+            Some(AttrValue::Dict(m)) => Ok(Some(m)),
+            Some(_) => Err(AttrError::wrong_type(name, "dict")),
         }
     }
 }

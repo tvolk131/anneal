@@ -239,10 +239,20 @@ impl Executor for LocalExecutor {
         guard_resolved(action)?;
 
         let key = action_digest(action);
-        let snapshot_based = matches!(action.cache_policy, CachePolicy::SnapshotBased);
-        // Deterministic and snapshot-based actions are both cacheable when sealed;
-        // permeable and native are not (§7.2). A snapshot is a separate accelerator
-        // for the case where a cacheable action actually has to run.
+        // Two orthogonal properties (§5 of docs/rules.md):
+        //   restore  — bring a snapshot into the sandbox before running
+        //   save     — write the snapshot back afterward (only the owner does)
+        // SnapshotBased owns the snapshot (restore + save); SnapshotAccelerated only
+        // consumes one (restore, no save).
+        let restore = matches!(
+            action.cache_policy,
+            CachePolicy::SnapshotBased | CachePolicy::SnapshotAccelerated
+        );
+        let save = matches!(action.cache_policy, CachePolicy::SnapshotBased);
+        // Deterministic and snapshot-based actions are cacheable when sealed; permeable,
+        // native, and snapshot-*accelerated* are not (§7.2, §8). SnapshotAccelerated is
+        // deliberately excluded: its output is not trusted reproducible, so it never
+        // skips. A snapshot is a separate accelerator for the case where an action runs.
         let cacheable = matches!(
             action.cache_policy,
             CachePolicy::Deterministic | CachePolicy::SnapshotBased
@@ -258,9 +268,11 @@ impl Executor for LocalExecutor {
             }
         }
 
-        // Cache miss: run, restoring/saving the snapshot for snapshot-based actions.
-        let root = self.sandbox_root(action, &key, snapshot_based);
-        let result = self.run_core(action, root, snapshot_based, snapshot_based)?;
+        // Cache miss (or non-cacheable): run, restoring/saving the snapshot per policy.
+        // Snapshot-involved actions get a stable sandbox path (keyed by the snapshot
+        // key) so they share an owner's snapshot directory.
+        let root = self.sandbox_root(action, &key, restore);
+        let result = self.run_core(action, root, restore, save)?;
 
         if result.exit_code == 0 && cacheable {
             self.cache.insert(
