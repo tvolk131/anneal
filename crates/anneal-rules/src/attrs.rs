@@ -22,6 +22,9 @@ pub enum AttrValue {
     /// A table whose structure the rule interprets. Values may nest (e.g.
     /// `scripts = { "build": { "kind": "build", "outputs": ["dist"] } }`).
     Dict(BTreeMap<String, AttrValue>),
+    /// A table from labels to strings (`data = { "//pkg:t": "dest" }`). The labels are
+    /// dependency edges; the strings are per-edge metadata the rule reads.
+    LabelKeyedStringDict(Vec<(Label, String)>),
 }
 
 impl AttrValue {
@@ -121,6 +124,16 @@ impl Attrs {
             None => Ok(None),
             Some(AttrValue::Dict(m)) => Ok(Some(m)),
             Some(_) => Err(AttrError::wrong_type(name, "dict")),
+        }
+    }
+
+    /// An optional label-keyed-string-dict attribute: empty when absent, error when
+    /// present with the wrong type. Returns `(label, string)` pairs in declaration order.
+    pub fn label_keyed_strings_opt(&self, name: &str) -> Result<&[(Label, String)], AttrError> {
+        match self.map.get(name) {
+            None => Ok(&[]),
+            Some(AttrValue::LabelKeyedStringDict(pairs)) => Ok(pairs),
+            Some(_) => Err(AttrError::wrong_type(name, "label-keyed string dict")),
         }
     }
 }

@@ -46,8 +46,14 @@ use crate::providers::{Artifact, ArtifactSource, FileSet, ProviderSet};
 use crate::rule::{Analysis, Rule, RuleError};
 use crate::schema::{AttrSchema, AttrType};
 
-/// `scripts` is an optional table; the rule (not the schema) validates its structure.
-const SCHEMA: &[AttrSchema] = &[AttrSchema::optional("scripts", AttrType::Dict)];
+/// `scripts` is an optional table; the rule validates its structure. `data` routes other
+/// targets' file outputs into the workspace — plain-path (§4 of `docs/pnpm-workspace.md`):
+/// `{ "//pkg:t": "dest/path" }` materializes the dep's file at `dest/path`, a direct input
+/// to the consuming scripts, which read it by relative path.
+const SCHEMA: &[AttrSchema] = &[
+    AttrSchema::optional("scripts", AttrType::Dict),
+    AttrSchema::optional("data", AttrType::LabelKeyedStringDict),
+];
 
 /// The sandbox-relative pnpm store directory, kept inside the sandbox (rather than a
 /// scrubbed `$HOME`) so the install is hermetic and the store can be snapshotted.
@@ -121,6 +127,9 @@ impl Rule for PnpmWorkspace {
         if let Some(scripts) = ctx.attrs().dict_opt("scripts")? {
             // Scripts need the actual source to run; install does not.
             let sources = ctx.source_tree(Path::new("."), IGNORED_DIRS)?;
+            // Plain-path `data` routing (§4): each routed file is a **direct input to the
+            // consuming scripts** at its per-edge destination — not routed through install.
+            let routed = resolve_data(ctx)?;
 
             for (name, spec) in scripts {
                 let spec = spec.as_dict().ok_or_else(|| {
@@ -134,15 +143,18 @@ impl Rule for PnpmWorkspace {
 
                 match kind {
                     "test" => {
-                        let action = with_sources(
-                            with_env(
-                                Action::builder(
-                                    format!("pnpm_workspace test {label} {name}"),
-                                    test_command(name),
+                        let action = with_routed(
+                            with_sources(
+                                with_env(
+                                    Action::builder(
+                                        format!("pnpm_workspace test {label} {name}"),
+                                        test_command(name),
+                                    ),
+                                    &path_env,
                                 ),
-                                &path_env,
+                                &sources,
                             ),
-                            &sources,
+                            &routed,
                         )
                         .output("results.txt", "results.txt")
                         .configured(ctx.config().clone(), Vec::new())
@@ -157,15 +169,18 @@ impl Rule for PnpmWorkspace {
                             .map(<[String]>::to_vec)
                             .unwrap_or_default();
                         let action_id = format!("pnpm_workspace build {label} {name}");
-                        let mut builder = with_sources(
-                            with_env(
-                                Action::builder(
-                                    action_id.clone(),
-                                    vec!["pnpm".to_owned(), "run".to_owned(), name.clone()],
+                        let mut builder = with_routed(
+                            with_sources(
+                                with_env(
+                                    Action::builder(
+                                        action_id.clone(),
+                                        vec!["pnpm".to_owned(), "run".to_owned(), name.clone()],
+                                    ),
+                                    &path_env,
                                 ),
-                                &path_env,
+                                &sources,
                             ),
-                            &sources,
+                            &routed,
                         );
                         for out in &outs {
                             builder = builder.output(out.clone(), PathBuf::from(out));
@@ -240,6 +255,63 @@ fn path_env(toolchain_dirs: &[PathBuf]) -> String {
 fn with_sources(mut builder: ActionBuilder, sources: &[Artifact]) -> ActionBuilder {
     for artifact in sources {
         builder = add_source(builder, artifact);
+    }
+    builder
+}
+
+/// Resolve the `data` routing (plain-path, §4): each `{ "//dep": "dest" }` entry becomes the
+/// dep's single provided file re-pathed to `dest`. The result is attached as a **direct input
+/// to the consuming scripts** (not install). M1 routes a single file per edge; a multi-file
+/// provider is a deferred (tree-artifact) case.
+fn resolve_data(ctx: &RuleContext) -> Result<Vec<Artifact>, RuleError> {
+    let mut routed = Vec::new();
+    for (dep_label, dest) in ctx.attrs().label_keyed_strings_opt("data")? {
+        let dep = ctx.deps().iter().find(|d| &d.label == dep_label).ok_or_else(|| {
+            RuleError::Message(format!(
+                "pnpm_workspace: data dependency {dep_label} was not resolved"
+            ))
+        })?;
+        let files = dep
+            .providers
+            .files
+            .as_ref()
+            .map(|fs| fs.files.as_slice())
+            .unwrap_or(&[]);
+        match files {
+            [one] => routed.push(Artifact {
+                path: PathBuf::from(dest),
+                source: one.source.clone(),
+            }),
+            [] => {
+                return Err(RuleError::Message(format!(
+                    "pnpm_workspace: data dependency {dep_label} provides no files to route"
+                )))
+            }
+            many => {
+                return Err(RuleError::Message(format!(
+                    "pnpm_workspace: data dependency {dep_label} provides {} files; plain-path \
+                     routing needs exactly one (multi-file routing is deferred)",
+                    many.len()
+                )))
+            }
+        }
+    }
+    Ok(routed)
+}
+
+/// Add routed `data` artifacts as inputs at their per-edge destination. A resolved source
+/// flows in as a blob; a produced output as an action-graph edge resolved at execution.
+fn with_routed(mut builder: ActionBuilder, routed: &[Artifact]) -> ActionBuilder {
+    for artifact in routed {
+        let name = artifact.path.to_string_lossy().into_owned();
+        match &artifact.source {
+            ArtifactSource::Source(digest) => {
+                builder = builder.input(name, artifact.path.clone(), *digest);
+            }
+            ArtifactSource::Output { action, name: output } => {
+                builder = builder.input_from_output(name, artifact.path.clone(), action, output);
+            }
+        }
     }
     builder
 }

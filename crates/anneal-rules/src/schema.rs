@@ -18,6 +18,10 @@ pub enum AttrType {
     /// schema (cf. `nickel_eval` validating `format`). The loader checks only that the
     /// value is a dict; the rule reads it via [`crate::AttrValue`] accessors.
     Dict,
+    /// A table from target **labels** to **strings** (`{ "//pkg:t": "dest" }`). Keys are
+    /// parsed as labels and become dependency edges (like [`AttrType::LabelList`]); each
+    /// value is per-edge consumer-side metadata (e.g. a routing destination, §5.4).
+    LabelKeyedStringDict,
 }
 
 /// One attribute in a rule's schema. `name` is implicit (handled uniformly by the

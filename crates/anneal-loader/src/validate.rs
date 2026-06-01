@@ -99,6 +99,22 @@ fn coerce(ty: AttrType, raw: &RawValue) -> Result<(AttrValue, Vec<Label>), Strin
         // A dict is passed through structurally — the rule validates its contents
         // (§4.3 puts domain validation in the rule). Tables introduce no dep edges.
         (AttrType::Dict, RawValue::Dict(_)) => Ok((natural(raw), Vec::new())),
+        // A label-keyed string dict: keys parse as labels (→ dep edges, like LabelList),
+        // values must be strings.
+        (AttrType::LabelKeyedStringDict, RawValue::Dict(m)) => {
+            let mut pairs = Vec::with_capacity(m.len());
+            let mut labels = Vec::with_capacity(m.len());
+            for (key, value) in m {
+                let label = Label::parse(key)
+                    .map_err(|e| format!("key `{key}` must be a valid label: {e}"))?;
+                let RawValue::String(s) = value else {
+                    return Err(format!("value for `{key}` must be a string"));
+                };
+                labels.push(label.clone());
+                pairs.push((label, s.clone()));
+            }
+            Ok((AttrValue::LabelKeyedStringDict(pairs), labels))
+        }
         (expected, _) => Err(format!("must be a {}", type_name(expected))),
     }
 }
@@ -127,5 +143,6 @@ fn type_name(ty: AttrType) -> &'static str {
         AttrType::Int => "int",
         AttrType::Bool => "bool",
         AttrType::Dict => "dict",
+        AttrType::LabelKeyedStringDict => "label-keyed string dict",
     }
 }
