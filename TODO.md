@@ -42,8 +42,31 @@
 
 ## CLI
 
-- [ ] **`mybuild` binary** (§18) — everything is currently driven via the Rust library/tests. Needs
-      build/run/test/check, query/affected/why, materialize/exec, cache, init.
+- [ ] **`mybuild` binary** (§18) — everything is currently driven via the Rust library/tests.
+  - [ ] build / run / test / check; query / aquery / affected / why; cache push/info/clean; status / version.
+  - [ ] **Config selection flags** (§6.6): `--target`, `--opt-level`, `--lto`, `--sanitizer`, `--debug-info`,
+        `--coverage` — currently a `Configuration` is hand-built in tests; no way for a user to pick one.
+  - [ ] **`materialize`** (§14.4) — write generated native packages/files to stable on-disk paths for IDEs and
+        native tooling. Also the mechanism for the §14.6 **staged pass** (generated `Cargo.toml`, etc.).
+  - [ ] **`exec`** escape hatch (§7.6) — run an arbitrary command in a sandbox (permissive by default;
+        `--hermetic`/`--no-network` opt-in).
+  - [ ] **`init` / `init --detect`** (§15.2) — interactive setup / scaffold config without touching native files.
+
+## Performance & scale
+
+- [ ] **Parallel action execution.** `execute_graph` runs actions **sequentially**; independent actions should
+      run concurrently (with snapshot-key serialization for same-key snapshot actions). Significant for the §20
+      gates.
+- [ ] **CAS / action-cache / snapshot eviction & GC** (§8.2). All three stores currently grow **unbounded**.
+      The system owns eviction policy (LRU, size/age caps); rules declare only what to prune.
+- [ ] **Materialization throughput** on a real `.mybuild` volume (Spike B carried-forward: ~4,600 clones/sec in
+      the harness). Benchmark and, if material, batch/parallelize.
+
+## Toolchains & configuration
+
+- [ ] **WORKSPACE file + `register_toolchain` / `set_default_platform`** (§19.5). Toolchains are currently
+      discovered ad-hoc by scanning `PATH` (in `cargo_workspace`/`nickel_eval`); replace with explicit,
+      content-addressed registration so the toolchain is a declared input, not ambient.
 
 ## Provider / variant model (designed §5.5–5.6, build when needed)
 
@@ -53,8 +76,17 @@
 - [ ] **Tree / directory artifacts** — outputs whose member set is known only at execution (e.g. generated
       package dirs). Dir-walk machinery already exists in the snapshot protocol.
 - [ ] **Typed metadata providers** (`RustLibraryInfo`, `ToolchainInfo`, …) — concept only so far.
-- [ ] **`data` placement policy** — consuming rule owns placement; decide default-vs-explicit + symbolic
-      reference (`$(location)` / package name / env var). Open design question (see chat).
+- [ ] **`data` placement: default + per-edge override** (DECIDED). The consuming rule owns the placement
+      *policy*; `data` accepts an optional per-edge destination — `data = [("//x:cfg", "gen/config.json")]` —
+      defaulting to the artifact's own path when omitted. A useful *default* earns its keep only where the
+      consumer can reference the result **symbolically**: pnpm by package **name**, genrule by **`$(location)`**,
+      cargo `build.rs` via **`OUT_DIR`/`CARGO_MANIFEST_DIR`**. Bare `include_str!` (a literal path, no
+      indirection) → **explicit per-edge placement**, not a default-to-conform-to. Do **not** use `env!()` in
+      source (cache-key churn, no gain).
+  - [ ] Add the optional per-edge destination to `cargo_workspace`'s `data` (default = artifact path).
+  - [ ] Update the `nickel_to_cargo` demo/test to use explicit per-edge placement — it currently relies on the
+        producer's `out` path, which couples the consumer's `include_str!` to the producer.
+  - [ ] `genrule` `$(location //x)` make-var (symbolic reference for command-driven consumers).
 
 ## Loader / analysis infrastructure
 
@@ -81,6 +113,8 @@
 
 - [ ] **Diagnostics channel** (§17.2/§19.3) — schema defined in the doc; no crate, rules don't emit `Diagnostic`s.
       (Structured *errors* for load/exec exist; the diagnostics *channel* is separate.)
+- [ ] **Stable error codes + `mybuild explain MB0023`** (§17.1) — we produce structured, located errors, but
+      there's no stable code registry or doc-linked long-form `explain`.
 
 ## Deferred by design (v1.x+ / out of Milestone 1)
 
