@@ -26,14 +26,17 @@
       digest)` — Node version dropped); (2) static introspection of `pnpm-workspace.yaml`/`package.json`(s);
       (3) script discovery + declared `scripts = { name: { kind, outputs? } }` with explicit `kind`;
       (4) script actions **non-cacheable + snapshot-accelerated**, sealed by default (Node version is the
-      *script* toolchain identity); (5) `data` routing as a `file:` dep, name-resolved, wrapper `package.json`
-      synthesized **inline** (no `js_package`), routed pkg **injected** into the store; (6) axis map (§7 of the
-      doc). Deferred within the rule: sealed+reproducibility-gated cache opt-in for scripts; external vendoring;
-      structured JS test-result parsing (exit-based first); `workspace:` member routing; explicit native-build
-      actions (`node-gyp`-at-install unsupported).
-- [ ] **The official §14.3 demo**: Nickel JSON → pnpm workspace imported **by name** (`@gen/config`);
-      composing caches (edit .ncl → consumer rebuilds; edit consumer → generator cached). (Nickel→Rust is
-      proven; TS is the named demo.)
+      *script* toolchain identity); (5) `data` routing as **plain-path** — the generated file is a direct
+      relative-path input to the consuming scripts, placed via a per-edge destination (`label_keyed_string_dict`);
+      a §14.6 Level-1 clean edge (`docs/pnpm-workspace.md` §4); (6) axis map (§7 of the doc). Deferred within the
+      rule: **name-resolution routing** (`@gen/config` by name; `file:` dep + synthesized wrapper +
+      `ctx.generated_file`) — gated on a deps-carrying generated package (the *pass-through* flavor) or the §14.1
+      differentiator needing to be visible; sealed+reproducibility-gated cache opt-in for scripts; external
+      vendoring; structured JS test-result parsing (exit-based first); explicit native-build actions
+      (`node-gyp`-at-install unsupported).
+- [ ] **The official §14.3 demo**: Nickel JSON → pnpm workspace, consumed by **relative path** (plain-path,
+      M1); composing caches (edit .ncl → consumer rebuilds; edit consumer → generator cached). (Nickel→Rust is
+      proven; TS is the named demo.) Name-by-import (`@gen/config`) is the deferred name-resolution enhancement.
 - [ ] **Nickel `import`s** (multi-file Nickel) — declare imported files as inputs (currently single self-contained `src`).
 
 ## Phase 5 — queries, CI cache, transitions

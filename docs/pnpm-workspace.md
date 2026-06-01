@@ -39,7 +39,7 @@ into two layers, and only one is pnpm's:
 ```python
 pnpm_workspace(
     name = "app",
-    data = [("//app:cfg", "@gen/config")],   # routed Nickel package, name-resolved (§4)
+    data = { "//app:cfg": "gen/config.json" },   # plain-path: route cfg → this dest (§4)
     scripts = {
         "test":  { kind = "test" },                       # result captured; coverage axis
         "build": { kind = "build", outputs = ["dist"] },  # artifact → provider; minify axis
@@ -87,37 +87,77 @@ declared non-cacheable. In M1 this is moot — all scripts are non-cacheable by 
 
 ## 4. Routing a generated artifact in (the §14.3 demo)
 
-**Decision: `file:` dependency, name-resolved, wrapper synthesized inline — no `js_package`
-rule.** The reasoning (which dissolved an earlier `js_package` proposal):
+**Decision: plain-path for M1; name-resolution is a deferred enhancement.**
 
-- The `data` edge is **the same in every case** — a file is content-addressed and
-  materialized into the sandbox. The question is only *how the TS source addresses it*.
-- **Path-reference** (`import '../gen/config.json'`) needs nothing but the **per-edge
-  destination** we already adopted for `data` — bytes land where the import looks. But it
-  exercises nothing pnpm-specific; it's the cargo `include_str!` demo in another language.
-- **Name-reference** (`import config from '@gen/config'`) is the §14.1 *generated native
-  package* differentiator: it routes through pnpm's own resolver (`file:` dep → `package.json`
-  in the target dir → `node_modules/@gen/config` symlink). This is the M1 demo.
-- Name-reference needs a generated `package.json` *inside the wrapper dir*. That file is
-  **never read by Anneal's analysis** — only pnpm reads it at execution — so generating it
-  does **not** violate the §14.6 phase wall. (Contrast: `pnpm-workspace.yaml`, which the rule
-  *does* parse, must stay static.)
-- That wrapper does **not** need a separate rule. The package **name** already lives
-  statically in the consumer's own `package.json` (`"@gen/config": "file:…"`, which Anneal
-  parses anyway), and the **location** is the per-edge destination. Both have static homes,
-  so `pnpm_workspace` synthesizes the one-line wrapper manifest inline. A per-edge
-  *destination/name* is **consumer-side mounting metadata**, not the §5.4-forbidden per-edge
-  *configuration* — it changes only the consumer's materialization, never the producer's
-  output or cache key.
+Both approaches start identically: the `data` edge — `data = { "//app:cfg": "<dest>" }`, a
+`label_keyed_string_dict` — registers the generator as a dependency, and the analyzer hands
+`pnpm_workspace` the generator's `FileSet`. They differ only in what the rule does with it, and
+— in the action graph — *where the generated file enters*. That one structural fork explains
+every trade-off.
 
-`js_package` would earn its keep only when **one** generated package is consumed by **many**
-workspaces (DRY the wrapper; make it a first-class `why`/`affected` target). For the
-single-consumer M1 demo it is pure ceremony — promote to a rule later if multi-consumer reuse
-appears; the wrapper logic already lives in one place.
+### Plain-path (M1)
 
-The demo proves **routing + composing caches across the boundary**: editing the `.ncl`
-regenerates the JSON and rebuilds the consumer; editing only the consumer leaves the Nickel
-generation cached. It does **not** prove type safety (§2.3) — Nickel emits data, not types.
+Materialize the generated file straight into the consuming script's sandbox at the per-edge
+destination; the consumer reads it by **relative path** (`require('./gen/config.json')`).
+
+```
+nickel_eval (A) ──── config.json ────▶ test-script (C)   [require('./gen/config.json')]
+install (B, manifests only) ──── node_modules ────▶ C
+```
+
+The file is a **direct `Output` input of the consumer (A → C)**; `install` (B) stays
+**config-agnostic** — editing the config never triggers a reinstall. This is a §14.6 **Level-1
+clean in-graph edge**: no wrapper, no lockfile bootstrap, no model change, tight correctness
+(the file's digest is directly in the consumer's identity). It proves the §14.3 claim outright
+— routing + composing caches across the boundary (edit `.ncl` → consumer rebuilds; edit only
+the consumer → generator stays cached). It does **not** prove type safety (§2.3) — Nickel emits
+data, not types.
+
+### Name-resolution (deferred enhancement)
+
+Wrap the file as a named package so the consumer imports it **by name**
+(`require('@gen/config')`), routed through pnpm's resolver.
+
+```
+nickel_eval (A) ──config.json──▶ install (B) ──node_modules (incl. @gen/config)──▶ C
+```
+
+Now the file is **laundered through `install` (A → B → C)**: install wires a `file:` dep into
+`node_modules`, so the generated artifact becomes part of install's identity. Costs: a wrapper
+`package.json`, parsing the consumer manifest for the `file:` path, a lockfile **bootstrap**
+(§14.6 Level 2 — the lockfile must list the `file:` dep), an extra reinstall on every config
+edit, and a new `ctx.generated_file` context primitive.
+
+### Why plain-path for M1
+
+For M1's demo — a single, **dependency-free** generated JSON — the two are **functionally
+identical**: same hermeticity, same composing caches, same proof that the boundary is crossed.
+They differ *only* in import ergonomics (path vs. name). Name-resolution's one genuine
+capability advantage is a generated package that carries its **own npm dependencies** (pnpm
+must resolve them — a loose file can't carry a dep tree), and that case is **unreachable in
+M1**: it requires a *generator that emits its own `package.json` with deps*, routing a
+multi-file package — which is the **pass-through** flavor below, and is *not* `generated_file`.
+So in M1, name-resolution buys ergonomics, not capability, at real complexity cost.
+
+**Two flavors of name-resolution** (for when we revisit it — they are often conflated):
+
+- **synthesized wrapper** — raw data + a `package.json` *we* synthesize via `generated_file`:
+  enables name-import, but **no dependencies** (we have nothing to declare). Ergonomics only.
+- **pass-through package** — the *generator* emits its **own** `package.json` (with deps); we
+  route the whole package as-is. **Dependencies work**, because they come from the generator's
+  manifest, not ours. This is the real capability case — and it needs *multi-file routing*,
+  **not** `generated_file`. By the §14.6 test it is still a clean edge (pnpm reads the
+  generated `package.json` at execution; Anneal never parses it), pulled to Level 2 only if the
+  generated package's *dependency set* changes (regenerate the lockfile). It never reaches
+  Level 3 — that's reserved for content Anneal's *analysis* must read, which routing never is.
+
+**Gate for building name-resolution:** either (a) a deps-carrying generated package actually
+appears (a real codegen client, a WASM lib with npm deps), or (b) we decide the §14.1
+*generated native package* differentiator must be **visible** in a demo. Until then plain-path
+gives up nothing M1 can demonstrate. The one reusable primitive plain-path *does* need —
+`label_keyed_string_dict` for the per-edge destination — is worth building now; `generated_file`
+and the wrapper apparatus wait for (a) or (b). (`js_package`, a first-class wrapping rule, is a
+further step beyond that, justified only by multi-consumer reuse.)
 
 ## 5. Cacheability — derived and enforced, never claimed
 
@@ -253,14 +293,6 @@ sharing**, never correctness. (Contrast a content-addressed Output, where non-de
 fatal — digest churn means it never hits.) This is precisely why `node_modules` is a *good*
 snapshot and would be a *bad* Output.
 
-**The key insight: the snapshot is safe *regardless* of byte-determinism.** Safety comes from
-**re-derivation**, not snapshot fidelity: on a cold or distrusted snapshot, `--frozen-lockfile`
-rebuilds against the integrity-checked lockfile, so a stale snapshot can never produce a *wrong*
-result — only a slower build. Determinism therefore governs only **hit-rate and cross-machine
-sharing**, never correctness. (Contrast a content-addressed Output, where non-determinism is
-fatal — digest churn means it never hits.) This is precisely why `node_modules` is a *good*
-snapshot and would be a *bad* Output.
-
 **The install→script dependency.** Unlike `cargo_workspace`, where the build action and
 test-compile actions are mere snapshot-sharing *siblings* (each runs a self-sufficient `cargo`
 subcommand that re-resolves from a cold `target/`), pnpm scripts are **true prerequisites** of
@@ -269,17 +301,22 @@ install: `pnpm run <x>` does *not* bootstrap dependencies, so it fails without a
 script (the cost of a spurious ordering edge is nil; a missing one is a broken build). The edge
 carries the install snapshot's **identity** (its key/digest) — enough for ordering and to put
 the install state in each script's cache key — while the gigabytes of `node_modules` arrive via
-`restore`, not as a materialized Output. The routing chain is therefore:
+`restore`, not as a materialized Output. (This install→script edge is independent of `data`
+routing — it exists for *every* script, purely to deliver `node_modules`.)
+
+Under **plain-path routing** (§4, the M1 choice), the generated file does **not** flow through
+install — it is a **direct input to the consuming scripts**, materialized at its per-edge
+destination. The two dependency chains are parallel, and install stays config-agnostic:
 
 ```
-nickel_eval  →  install  →  { test, build, … }
+install      ──(node_modules snapshot)──▶  { test, build, … }
+nickel_eval  ──(config.json, direct)─────▶  { test, build, … }
 ```
 
-— the generated `@gen/config` feeds *install* (the `file:` dep is wired during install), not the
-scripts directly. For the install snapshot to be self-contained, the routed package is **injected**
-(copied into the virtual store) rather than symlinked out to `.mybuild/gen/`, so the snapshot
-carries it and a script's sandbox needs nothing materialized beyond the restore. (Injection +
-the directory-member-set-known-at-execution shape intersect the deferred **tree-artifact** work.)
+(Name-resolution, the deferred enhancement, would instead route the file *through* install —
+`nickel_eval → install → scripts` — wiring a `file:` dep and, for a self-contained snapshot,
+*injecting* the package into the virtual store. Injection + the
+directory-member-set-known-at-execution shape intersect the deferred **tree-artifact** work.)
 
 ## 7. Axis interpretation (§13.6)
 
@@ -304,7 +341,9 @@ don't bust its cache key.
 - Script *discovery*; user declares `scripts = { name: { kind, outputs? } }` with explicit
   `kind`.
 - All script actions **non-cacheable + snapshot-accelerated**, sealed by default.
-- `data` routing as a `file:` dependency, name-resolved, wrapper synthesized inline.
+- `data` routing as **plain-path** (§4): the generated file is a direct relative-path input
+  to the consuming scripts, placed at a per-edge destination (`label_keyed_string_dict`). A
+  §14.6 Level-1 clean edge — no wrapper, no bootstrap.
 - The §14.3 Nickel → TS demo with composing caches.
 - Axis mapping per §7; toolchain (`node`, `pnpm`) discovered on PATH (ad-hoc, like cargo).
 
@@ -315,8 +354,13 @@ don't bust its cache key.
 - **External-dependency vendoring** (registry deps; offline store population).
 - **Separately-addressable script targets** (`//app:test`) — falls out of named output
   groups + demand-driven pruning, the *same* deferral `cargo_workspace` shares.
+- **Name-resolution routing** (`@gen/config` by name, via `file:` dep + synthesized wrapper +
+  `ctx.generated_file`) — the deferred enhancement (§4), gated on a deps-carrying generated
+  package or the §14.1 differentiator needing to be *visible* in a demo. The deps-carrying
+  capability specifically is the **pass-through** flavor (generator emits its own
+  `package.json`), needing multi-file routing — not `generated_file`.
 - **`workspace:` member routing** for a generated package — would force the §14.6 staged
-  materialize pass; `file:` sidesteps it.
+  materialize pass; `file:` (when we do name-resolution) sidesteps it.
 - **`js_package` rule** — only if multi-consumer reuse of a generated package appears (§4).
 - Structured test-result parsing for JS runners (TAP/JSON) — basic exit-based pass/fail
   first, mirroring how `cargo_workspace` got structured results after the basics.
@@ -326,8 +370,13 @@ don't bust its cache key.
 
 1. Stance **(ii)**: install inferred + auto-owned; build/test scripts declared.
 2. `kind` is **explicit** — no name-based convention.
-3. Routing is a **`file:` dependency**, **name-resolved**, wrapper **synthesized inline** in
-   `pnpm_workspace` — **no `js_package`** for M1.
+3. Routing is **plain-path for M1** (§4): the generated file is a direct relative-path input
+   to the consumer (a §14.6 Level-1 clean edge — `nickel_eval → script`, install stays
+   config-agnostic), placed via a per-edge destination (`label_keyed_string_dict`).
+   **Name-resolution** (`file:` dep + synthesized wrapper + `generated_file`) is **deferred**,
+   gated on a deps-carrying generated package or the §14.1 differentiator needing to be visible.
+   The two are functionally identical for M1's dependency-free JSON; they differ only in import
+   ergonomics. `generated_file` waits for that gate; `label_keyed_string_dict` is built now.
 4. Cacheability is a **derived, reproducibility-verified property of a sealed action**, never
    a user claim. Default **non-cacheable + snapshot**; sealed-cacheable opt-in **deferred**.
 5. **pnpm ≥ 10.0.0 required**, and **lifecycle scripts are not run at install** (no

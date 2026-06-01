@@ -29,10 +29,11 @@
 //! * **`build`** — runs the script, declares its `outputs`, and exposes them as a
 //!   provider for downstream consumers.
 //!
-//! Deferred (see `docs/pnpm-workspace.md` §8): the axis mapping (scripts consume no axes
-//! yet); a script's *own* build-incremental snapshot (`.tsbuildinfo`, a second snapshot
-//! under a different key — one `snapshot_key` per action today); the `file:` data routing;
-//! the sealed+reproducibility-gated cache opt-in.
+//! Deferred (see `docs/pnpm-workspace.md` §8): the `data` routing (plain-path for M1 — a
+//! generated file as a direct relative-path input to the consumer; name-resolution is a
+//! gated enhancement, §4); the axis mapping (scripts consume no axes yet); a script's *own*
+//! build-incremental snapshot (`.tsbuildinfo`, a second snapshot under a different key — one
+//! `snapshot_key` per action today); the sealed+reproducibility-gated cache opt-in.
 
 use std::path::{Path, PathBuf};
 
