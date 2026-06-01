@@ -82,7 +82,7 @@ Every design decision around stateful caching is subordinate to this invariant. 
 
 **Native tools are opaque inner engines.** For a `cargo_workspace`, Anneal does **not** model every rustc invocation. Cargo remains an opaque inner scheduler; Anneal models coarse actions (build, check, test-compile, test-run, codegen, materialization). See [§3.2](#32-target-graph-vs-action-graph).
 
-**Package-level ownership.** The unit of ownership is the package (a Cargo workspace, a pnpm workspace), matching how ecosystems already organize code.
+**Package-level ownership; exclusive ownership, shared dependency.** The unit of ownership is the package (a Cargo workspace, a pnpm workspace), matching how ecosystems already organize code. Ownership is **exclusive**: every path resolves to exactly one owning target — `owner(path)` is the nearest enclosing package (a filesystem walk, [§11.3](#113-first-class-affected-and-why-milestone-1)), and within a package a file is the declared source of at most one target. A generated path is owned solely by its producer; a collision (two producers, or a generated path shadowing a source) is a build error ([§14.4](#144-three-modes-of-native-tool-interop)). But **dependency is shared**: any number of targets may *consume* a file — they depend on the *owning target* (e.g. a `filegroup`) and receive it through its provider, never by co-claiming the raw path. Exclusive ownership keeps `owner(path)` total, so affected-target selection is sound; shared dependency keeps reuse ergonomic.
 
 **System provides policy; rules provide mechanism.** Cross-cutting concerns (diagnostics, test-result aggregation, caching, configuration) are handled uniformly by the system. Rules describe how to invoke specific tools.
 
@@ -320,7 +320,7 @@ Actions declare a mode: **`sealed`** (hermetic, strict input isolation; default 
 - **macOS**: `sandbox-exec` profiles. Best-effort (~95% in practice), not strict — see [§22](#22-open-questions-and-risks). Optional Linux-VM mode for strict needs.
 - **No Windows in v1.**
 
-The materializer is shared across platforms; only the isolation layer differs.
+The materializer is shared across platforms; only the isolation layer differs. See [`docs/sandboxing.md`](docs/sandboxing.md) for the full materialization/isolation model, the per-platform hermeticity guarantees, and the use of read-tracking to **enforce** declared inputs (catch under-declaration) rather than to relax invalidation.
 
 ### 7.4 Strict environment hermeticity
 

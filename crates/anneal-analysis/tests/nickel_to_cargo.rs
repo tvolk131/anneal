@@ -50,7 +50,7 @@ fn fixture(greeting: &str) -> tempfile::TempDir {
     std::fs::write(
         app.join("BUILD"),
         "nickel_eval(name = \"cfg\", src = \"config.ncl\", out = \"gen/config.json\")\n\
-         cargo_workspace(name = \"app\", generated = [\"//app:cfg\"])\n",
+         cargo_workspace(name = \"app\", data = [\"//app:cfg\"])\n",
     )
     .unwrap();
 
