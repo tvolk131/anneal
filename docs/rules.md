@@ -177,6 +177,26 @@ the value safe. The safe default is therefore **non-cacheable**, because reprodu
 unproven until measured — and non-cacheable is cheap, because the engine's own incremental
 state is restored via snapshot (see below), so a non-cached action still re-runs fast.
 
+**No consumer cacheability foot-gun — graduation is a system action.** Pushing this to its
+conclusion: a rule must expose **no knob a consumer can use to assert cacheability**, because
+that would be the unverifiable claim that poisons the cache. Three properties keep this airtight:
+
+1. **There is no `cacheable = true` attribute.** A consumer cannot declare a result reproducible.
+2. **A consumer's levers move only *toward* non-cacheable** — e.g. marking an action `permeable`
+   (needs network) makes it *definitely* non-cacheable. There is no lever in the other direction.
+3. **`sealed` is safe to expose even though it's a consumer-expressible constraint**, because it
+   is *enforced*, not trusted: a sealed action that attempts an undeclared read or network
+   **fails loudly** — it can break a build, but it cannot silently produce a wrong cache entry.
+
+So "graduating" an action to cacheable is never a consumer assertion. The engineer's job is to
+make the action *deserve* the cache — declare its inputs/outputs honestly so it can run sealed,
+and remove nondeterminism (`SOURCE_DATE_EPOCH`, fixed seeds) so it is reproducible. The
+**system** then grants the cache only after its off-hot-path verification *observes* byte-identity.
+The rule author ships the enforcement and the gate; the consumer expresses intent and honesty;
+the system is the sole grantor. (The one residual hole is platform — best-effort sealing on
+macOS — but it is the *existing* posture that already applies to cargo, and no consumer knob can
+widen it.)
+
 ## 5. Two kinds of cache, and what "snapshot" means
 
 A rule has two distinct correctness-neutral accelerators (§8), and confusing them causes
@@ -198,6 +218,32 @@ an opaque script: we never trust a skip, but we still restore the engine's scrat
 the unavoidable re-run is cheap. The only thing a true action-cache hit buys *over* this is
 eliminating engine startup — a real win for slow-to-start tools (tsc), but an *optimization*
 that must pass the reproducibility gate to turn on, not a default anyone backs into.
+
+### Two snapshot policies: `SnapshotBased` (earned) vs. `SnapshotAccelerated` (default)
+
+The kernel encodes that default as a `CachePolicy` distinct from cargo's. Both restore a
+correctness-neutral snapshot (the §1.4 floor holds for either — that is *not* the difference);
+they differ on two orthogonal axes:
+
+| | `SnapshotBased` (cargo, pnpm `install`) | `SnapshotAccelerated` (pnpm scripts) |
+|---|---|---|
+| **Action-cacheable?** (skip via a recorded result) | **yes** — output is verified reproducible | **no** — output not trusted reproducible; always re-runs |
+| **Snapshot ownership** | **writer** — restores *and saves* (co-maintains the cache, neutrally) | **reader** — restores a snapshot another action owns; never saves |
+
+- **Primary axis — reproducibility → cacheability.** `SnapshotBased` may *skip* the action
+  (reuse a recorded output); this is sound only because the action is verified reproducible. A
+  script's output (timestamps, build IDs, randomness) is not trusted, so `SnapshotAccelerated`
+  *never* skips — it restores the snapshot only to be able to *run*.
+- **Secondary axis — read vs. write.** A `SnapshotBased` writer must keep the shared snapshot
+  neutral (the `CARGO_INCREMENTAL=0` discipline). A `SnapshotAccelerated` reader takes a snapshot
+  it does not own (a script reading `install`'s `node_modules`) and **does not save** — so it
+  cannot corrupt the shared snapshot; read-only sidesteps the trust question structurally.
+
+They are **stages, not castes.** `SnapshotAccelerated` is the correct policy *until* reproducibility
+is proven; the deferred verification gate is the promotion path to (effectively) `SnapshotBased`.
+And the two axes are genuinely orthogonal — `SnapshotAccelerated` bundles {non-cacheable, read-only}
+because that is exactly the script case, but a fully general design would treat *cacheable?* and
+*saves?* as independent. The bundling is a known simplification, not a hidden one.
 
 ### Snapshot vs. content-addressed Output — re-derivable, not deletable
 

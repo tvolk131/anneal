@@ -150,20 +150,33 @@ via snapshot:
 
 - **What "non-cacheable" means:** no action-cache lookup; the script *always re-runs*. We
   never trust a skip we haven't proven safe.
-- **What is snapshotted:** the inner build tool's **incremental accelerator dirs** —
-  `.tsbuildinfo`, `node_modules/.vite/`, `node_modules/.cache/` — declared per-workspace.
-  *Not* the outputs (those are *captured* into the CAS so providers work, but re-produced
-  each run), *not* the source, *not* `node_modules` (that is the separate install snapshot).
-  Governed by §1.4 and gated by the neutrality harness; an engine whose incremental mode
-  isn't output-neutral has it disabled and snapshots nothing.
+- **What a script restores (v1):** `install`'s `node_modules` snapshot, **read-only** — so the
+  script can see its dependencies. Declared outputs are *captured* into the CAS so providers
+  work (re-produced each run); the source is materialized as inputs.
+- **A script's *own* build-incremental snapshot is deferred.** The inner tool's accelerator
+  dirs (`.tsbuildinfo`, `node_modules/.vite/`) would be a **second** snapshot the script
+  *saves* under a *different* key (source/toolchain-coarse, unlike `node_modules`'
+  lockfile-coarse key). An action carries one `snapshot_key` today, so v1 restores `install`'s
+  snapshot and re-runs the tool without warming its own incremental cache; multi-snapshot
+  support is a follow-up. (Any such build snapshot is governed by §1.4 and the neutrality
+  harness; a non-output-neutral incremental mode is disabled rather than snapshotted.)
 - **The cost we accept:** a non-cacheable producer re-runs every time, so a *non-deterministic*
   one churns its output digest and forces downstream misses. A deterministic one keeps a
   stable digest and downstream still hits. We do not *promise* the latter — that is the point
   of non-cacheable.
+- **Kernel policy:** script actions use `CachePolicy::SnapshotAccelerated` (`docs/rules.md`
+  §5) — restore a snapshot to run, never action-cache. They share `install`'s `snapshot_key`
+  to restore `node_modules` (read-only; they never save it), which is the concrete form of
+  "the edge carries the install-snapshot identity" (§6). `install` itself stays
+  `SnapshotBased` (cacheable; it owns and saves the snapshot).
 - **What a real cache hit would add:** eliminating engine startup entirely (valuable for slow
   tsc/vitest starts, with no persistent worker in M1 — §10). That is the **deferred,
-  documented opt-in**: `sealed` + passing the reproducibility gate → `cacheable`. Not built
-  in M1; not a bit anyone flips casually.
+  documented opt-in**: passing the reproducibility gate promotes a script to (effectively)
+  `SnapshotBased`. **There is no `cacheable` attribute** — graduation is a *system* action
+  after verification, never a consumer assertion (`docs/rules.md` §4). A consumer's only
+  cacheability-relevant lever is marking a script `permeable` (needs network) — which moves it
+  *toward* non-cacheable, never toward an unsafe cache. So a BUILD author has no foot-gun that
+  could poison the cache.
 
 This is deliberately conservative: install caching (the slow part, the §15.1 CI wedge) is
 the safe high-value win; user scripts are correct-and-fast by default; the only thing
