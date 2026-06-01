@@ -155,6 +155,14 @@ fn build_globals(builder: &mut GlobalsBuilder) {
     ) -> anyhow::Result<NoneType> {
         record(eval, "nickel_eval", name, kwargs)
     }
+
+    fn pnpm_workspace<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(kwargs)] kwargs: SmallMap<String, Value<'v>>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> anyhow::Result<NoneType> {
+        record(eval, "pnpm_workspace", name, kwargs)
+    }
 }
 
 /// Parse and evaluate one `BUILD` file, returning the raw target declarations.

@@ -200,5 +200,9 @@ pub fn builtin_rules() -> RuleRegistry {
         Box::new(crate::cargo_workspace::CargoWorkspace),
     );
     rules.insert("nickel_eval", Box::new(crate::nickel_eval::NickelEval));
+    rules.insert(
+        "pnpm_workspace",
+        Box::new(crate::pnpm_workspace::PnpmWorkspace),
+    );
     RuleRegistry { rules }
 }
