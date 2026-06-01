@@ -20,10 +20,17 @@
 
 ## Phase 4 — cross-language routing (in progress)
 
-- [ ] **`pnpm_workspace`** — the second native ecosystem and the §14.3 Nickel→TS consumer. node_modules
-      materialization, pnpm offline store snapshot, "generated native package" shaping (package.json).
-- [ ] **The official §14.3 demo**: Nickel JSON → pnpm workspace imported as a module; composing caches
-      (edit .ncl → consumer rebuilds; edit consumer → generator cached). (Nickel→Rust is proven; TS is the named demo.)
+- [ ] **`pnpm_workspace`** — the second native ecosystem and the §14.3 Nickel→TS consumer. Full scope +
+      design in **`docs/pnpm-workspace.md`**. M1 build order: (1) `install` action (resolve+install, cached +
+      `node_modules`/store snapshot); (2) static introspection of `pnpm-workspace.yaml`/`package.json`(s);
+      (3) script discovery + declared `scripts = { name: { kind, outputs? } }` with explicit `kind`;
+      (4) script actions **non-cacheable + snapshot-accelerated**, sealed by default; (5) `data` routing as a
+      `file:` dep, name-resolved, wrapper `package.json` synthesized **inline** (no `js_package`); (6) axis map
+      (§6 of the doc). Deferred within the rule: sealed+reproducibility-gated cache opt-in for scripts; external
+      vendoring; structured JS test-result parsing (exit-based first); `workspace:` member routing.
+- [ ] **The official §14.3 demo**: Nickel JSON → pnpm workspace imported **by name** (`@gen/config`);
+      composing caches (edit .ncl → consumer rebuilds; edit consumer → generator cached). (Nickel→Rust is
+      proven; TS is the named demo.)
 - [ ] **Nickel `import`s** (multi-file Nickel) — declare imported files as inputs (currently single self-contained `src`).
 
 ## Phase 5 — queries, CI cache, transitions

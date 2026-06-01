@@ -224,7 +224,7 @@ First-party rules are themselves implemented against an **internal rule API**. T
 
 ### 5.2 Rules produce actions
 
-A rule maps a target's declared attributes to a set of (coarse) actions and produces/consumes typed *providers* along dependency edges (FileSet, TestSuite, ToolchainInfo, LibraryInfo, BinaryInfo, Diagnostic).
+A rule maps a target's declared attributes to a set of (coarse) actions and produces/consumes typed *providers* along dependency edges (FileSet, TestSuite, ToolchainInfo, LibraryInfo, BinaryInfo, Diagnostic). For the rule model developed from first principles — the analyze-phase contract, the eight obligations, the inference↔declaration spectrum, and the hermeticity-vs-determinism line that governs cacheability — see `docs/rules.md`.
 
 ### 5.3 The system/rule boundary
 
@@ -510,6 +510,8 @@ Each native rule supports building primary artifacts, idiomatic test execution, 
 ### 13.4 `cargo_workspace` mechanics
 
 The rule introspects `Cargo.toml` and each crate's structure, generating per-`(crate, test_type)` test targets and coarse build actions. **Cargo is an opaque inner engine** — Anneal does not model rustc invocations. The build system is itself a Cargo workspace, so `cargo build` works directly, though direct Cargo use is not a first-class supported workflow (see [§14.4](#144-three-modes-of-native-tool-interop)).
+
+`pnpm_workspace` is the harder rule — pnpm is a package-manager + script-runner, not a toolchain, so the rule splits into an inferred install layer and a declared script layer. Its full Milestone-1 scope and design reasoning (the `file:` name-resolved routing, the explicit `kind`, and the non-cacheable-by-default / sealed-and-reproducibility-gated cacheability model) live in `docs/pnpm-workspace.md`.
 
 ### 13.5 v1.x rules
 
