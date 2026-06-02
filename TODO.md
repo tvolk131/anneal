@@ -95,12 +95,25 @@
         materialize+capture are ~2% each. Separately, load+analyze adds a roughly-fixed ~10 ms to a cold
         `anneal build`. Trivial crates *exaggerate* this (no compile time to amortize), but `save` scales with
         `target/` **byte** size, and real `target/` dirs are large — so this is the overhead-gate lever at scale.
-  - [ ] **Optimize the two target/-handling phases** (only if realistic workloads confirm it matters):
-        batch/parallel CAS puts in `save`; background/deferred sandbox `teardown`; incremental snapshot
-        (re-`put` only changed files instead of walking all of `target/`). Ties to §8.2 + the carried-forward
-        materialization-throughput item.
-  - [ ] **Single-package-change scenario** — the canonical incremental case (edit one crate, rebuild): Anneal
-        restores `target/`, runs incremental cargo, re-saves the full snapshot. Add to the harness.
+  - [ ] **Attack the O(`target/`) incremental overhead** (the lever for the "must beat" gate; prioritize once a
+        realistic workload confirms the absolute cost matters). Biggest: **warm-sandbox reuse for snapshot
+        *owners*** — keep the build action's `target/` working dir in place across incremental rebuilds (skip
+        restore + teardown, ~25 ms @ N=16), instead of the fresh-sandbox + snapshot round-trip every run. Tension:
+        this is exactly the stable `snap-K` sandbox path dropped for parallelism — but the build *owner* is
+        single-per-workspace and has no parallel-consumer problem, so owners can reuse while consumers stay
+        unique. Plus **incremental snapshot save** (re-`put` only changed files, attacks the ~7 ms save) and
+        background teardown / batch-parallel CAS puts. Ties to §1.4 / §8.2 + the materialization-throughput item.
+  - [x] **Single-package-change scenario** — the canonical incremental case, added to the harness (edit one
+        crate, rebuild). **This is the §20.3 "incremental must *beat*" gate, and on this fixture Anneal *loses*,
+        worse as the workspace grows: +50% (N=4) → +160% (N=32) → +265% (N=64) vs native cargo.** Structural
+        reason (confirmed by the incremental phase breakdown): native cargo does **O(change)** work — recompile
+        one crate, keep `target/` in place — while Anneal does **O(full `target/`)** work every build: restore the
+        whole snapshot (~16 ms @ N=16) + recompile + save the whole snapshot (~7 ms) + teardown the sandbox
+        (~9 ms). So the overhead is independent of how small the change is, and the ratio diverges with `target/`
+        size. **Caveat:** trivial crates make native incremental ~instant (≈cargo's fixed startup), so there's no
+        real compile to amortize the O(`target/`) overhead against; on real crates (seconds/recompile) the
+        absolute overhead may be acceptable — *or not*, if `target/` is GB-scale. **Only a realistic-`target/`
+        workload resolves this** (→ real-repo benchmark).
   - [ ] **Realistic workloads** — crates with real compile time (and eventually external deps) so the overhead
         gate is assessed where compile dominates, not snapshot bookkeeping.
   - [ ] **pnpm harness**, then competitor baselines (sccache, Turborepo/Nx, Bazel) and real cross-machine CI

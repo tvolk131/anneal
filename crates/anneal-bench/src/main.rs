@@ -48,14 +48,42 @@ fn main() {
     let anneal_cold = timed(1, || run_anneal_build(&exec, root, &label));
     let anneal_warm = timed(3, || run_anneal_build(&exec, root, &label));
 
-    report(n, cargo_cold, cargo_noop, anneal_cold, anneal_warm);
+    // --- single-package change (the canonical incremental case, §20.3 "must beat") ---
+    // Both caches are now warm. Edit one crate and rebuild: native cargo recompiles
+    // just that crate; Anneal restores the full target/ snapshot, recompiles
+    // incrementally, then re-saves the full snapshot. Distinct edits each round so
+    // neither side serves a stale cache; take the fastest.
+    let mut cargo_change = Duration::MAX;
+    let mut anneal_change = Duration::MAX;
+    for i in 0..3 {
+        edit_one_crate(&ws, i);
+        cargo_change = cargo_change.min(timed(1, || assert!(cargo_build(&ws).success(), "cargo incremental failed")));
+        anneal_change = anneal_change.min(timed(1, || run_anneal_build(&exec, root, &label)));
+    }
 
-    // --- phase breakdown of a single cold build (fresh, timing-enabled store) ---
-    let profile_exec = LocalExecutor::new(root.join(".anneal-profile"))
+    report(n, cargo_cold, cargo_noop, anneal_cold, anneal_warm, cargo_change, anneal_change);
+
+    // --- phase breakdowns: a cold build, then an incremental rebuild, on a fresh,
+    // timing-enabled store (isolated from the comparison runs above). ---
+    let profile = LocalExecutor::new(root.join(".anneal-profile"))
         .expect("open profile store")
         .record_timings();
-    run_anneal_build(&profile_exec, root, &label);
-    report_phases(&profile_exec.take_timings());
+    run_anneal_build(&profile, root, &label); // cold (from scratch)
+    let cold_phases = profile.take_timings();
+    edit_one_crate(&ws, 99); // warm snapshot now exists; this rebuild is incremental
+    run_anneal_build(&profile, root, &label);
+    let incremental_phases = profile.take_timings();
+    report_phases("Cold build", &cold_phases);
+    report_phases("Single-package change (incremental)", &incremental_phases);
+}
+
+/// Append a unique function to `crate0`'s source — a content change that busts the
+/// action cache (and triggers an incremental recompile of exactly that crate).
+fn edit_one_crate(ws: &Path, marker: usize) {
+    let path = ws.join("crate0/src/lib.rs");
+    let mut src = std::fs::read_to_string(&path).unwrap();
+    src.push_str(&format!("pub fn touched_{marker}() {{}}\n"));
+    std::fs::write(&path, src).unwrap();
 }
 
 /// Run the full Anneal build pipeline for `//ws:ws`, executing just the coarse
@@ -146,7 +174,16 @@ fn make_fixture(ws: &Path, n: usize) {
     assert!(ok, "cargo generate-lockfile failed");
 }
 
-fn report(n: usize, cargo_cold: Duration, cargo_noop: Duration, anneal_cold: Duration, anneal_warm: Duration) {
+#[allow(clippy::too_many_arguments)]
+fn report(
+    n: usize,
+    cargo_cold: Duration,
+    cargo_noop: Duration,
+    anneal_cold: Duration,
+    anneal_warm: Duration,
+    cargo_change: Duration,
+    anneal_change: Duration,
+) {
     let ms = |d: Duration| d.as_secs_f64() * 1000.0;
     let pct = |a: Duration, base: Duration| (a.as_secs_f64() - base.as_secs_f64()) / base.as_secs_f64() * 100.0;
     let times = |slow: Duration, fast: Duration| slow.as_secs_f64() / fast.as_secs_f64();
@@ -159,6 +196,10 @@ fn report(n: usize, cargo_cold: Duration, cargo_noop: Duration, anneal_cold: Dur
         ms(anneal_cold), ms(cargo_cold), pct(anneal_cold, cargo_cold),
     );
     println!(
+        "| Single-package change | {:.1} ms | {:.1} ms | {:+.0}% vs native |",
+        ms(anneal_change), ms(cargo_change), pct(anneal_change, cargo_change),
+    );
+    println!(
         "| No-op rebuild | {:.1} ms | {:.1} ms | {:.1}× faster |",
         ms(anneal_warm), ms(cargo_noop), times(cargo_noop, anneal_warm),
     );
@@ -167,14 +208,14 @@ fn report(n: usize, cargo_cold: Duration, cargo_noop: Duration, anneal_cold: Dur
         ms(anneal_warm), ms(cargo_cold), times(cargo_cold, anneal_warm),
     );
     println!(
-        "\n_Cold = overhead gate (must match within margin). No-op & fresh-checkout = \
-         the cache wins. Library pipeline; excludes CLI process startup._"
+        "\n_Cold & single-change = overhead gates. No-op & fresh-checkout = the cache \
+         wins. Library pipeline; excludes CLI process startup._"
     );
 }
 
-/// Print where a cold build's wall-clock goes, phase by phase. `run` is the inner
-/// cargo invocation (≈ the native baseline); everything else is Anneal's wrapping.
-fn report_phases(timings: &[PhaseTimings]) {
+/// Print where a build's wall-clock goes, phase by phase. `run` is the inner cargo
+/// invocation (≈ the native baseline); everything else is Anneal's wrapping.
+fn report_phases(title: &str, timings: &[PhaseTimings]) {
     let Some(t) = timings.iter().find(|t| t.action.starts_with("cargo_workspace build")) else {
         return;
     };
@@ -182,7 +223,7 @@ fn report_phases(timings: &[PhaseTimings]) {
     let pct = |d: std::time::Duration| d.as_secs_f64() / t.total.as_secs_f64() * 100.0;
     let wrap = t.total.saturating_sub(t.run);
 
-    println!("\n## Cold-build phase breakdown (single run)\n");
+    println!("\n## {title} — phase breakdown (single run)\n");
     println!("| Phase | Time | % of total |");
     println!("|---|---:|---:|");
     for (name, d) in [
