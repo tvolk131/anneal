@@ -102,9 +102,14 @@
         action's `target/` working dir in place across incremental rebuilds (skip restore + teardown, ~25 ms
         @ N=16) instead of the fresh-sandbox + snapshot round-trip every run; owners reuse (one per key) while
         consumers stay unique+parallel. Plus **incremental + background snapshot save** (re-`put` only changed
-        files, attacks the ~7 ms save). **Validate first:** the mtime experiment (§5.5) — restore a warm
-        `target/`, touch one source, confirm cargo does *minimal* incremental, not full or under-rebuild. Ties to
-        §1.4 / §8.2 + the materialization-throughput item.
+        files, attacks the ~7 ms save). Ties to §1.4 / §8.2 + the materialization-throughput item.
+    - [x] **mtime experiment — done, design assumption confirmed + hazard found.** Warm `target/` + changed
+          source with a **fresh** mtime → cargo recompiles *only* that crate (the optimization is viable). But
+          cargo's freshness is **mtime-based and content-blind** (rust 1.95): the *same* content change behind a
+          **stale** mtime is **silently skipped → stale artifact** (a correctness bug, triggered concretely by
+          reverting a file to an old CAS blob). **Hard requirement for the sync:** force-touch every
+          content-changed file to a fresh mtime; changed files need distinct-inode placement (macOS `clonefile`
+          ok; Linux needs a **copy** for changed files, not a hardlink). Captured in `docs/sandboxing.md` §5.5.
   - [x] **Single-package-change scenario** — the canonical incremental case, added to the harness (edit one
         crate, rebuild). **This is the §20.3 "incremental must *beat*" gate, and on this fixture Anneal *loses*,
         worse as the workspace grows: +50% (N=4) → +160% (N=32) → +265% (N=64) vs native cargo.** Structural

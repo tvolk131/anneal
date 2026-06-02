@@ -220,15 +220,30 @@ input paths — never `target/`**:
 
 The diff is O(changed files), from digests analysis already computed.
 
-**The sharp edge is mtime — validate empirically before building.** Cargo's fingerprints
-are mtime-sensitive: a changed file must end up **newer** than the `target/` artifacts (so
-cargo recompiles it), an unchanged file must keep its mtime (so cargo skips it). The
-wrinkle is materialization (§2): a Linux **hardlink shares the inode**, so we cannot set a
-per-sandbox mtime without corrupting the shared CAS blob's mtime and every other sandbox
-sharing it. So changed-file sync needs **distinct-inode placement** — macOS `clonefile`
-already gives it; Linux needs a copy (or a post-link `touch`). Getting this wrong means
-cargo either silently skips a changed file (a correctness bug) or rebuilds everything (no
-speedup).
+**The sharp edge is mtime — and an experiment confirmed it is a hard requirement, not a
+nicety.** Cargo's freshness check is **mtime-based and content-blind** (verified, rust
+1.95): given a warm `target/`, editing a source with a *fresh* mtime recompiles exactly
+that crate (✓ the optimization works), but the *same content change behind a stale mtime
+is silently skipped* — cargo keeps the wrong artifact. Holding content constant and
+flipping only the mtime (stale→fresh) flips cargo skip→recompile, isolating mtime as the
+sole trigger.
+
+This is a **correctness** hazard, not just a perf one, and it has a concrete trigger: the
+sync materializes from the CAS, and a blob's mtime is *whenever it was first `put`*.
+New content → a new blob, mtime≈now (fine) — but **reverting a file to earlier content**
+pulls an *old* blob (old mtime), so a plain clone/hardlink carries a stale mtime and cargo
+misses the revert. Therefore:
+
+- **Every file the sync writes because its content differs MUST be force-touched to a fresh
+  mtime** (newer than the warm `target/`), regardless of the blob's own mtime. Unchanged
+  files stay untouched so they keep old mtimes and cargo skips them.
+- Because a Linux **hardlink shares the inode** (can't set a per-sandbox mtime without
+  corrupting the shared CAS blob and every other sandbox sharing it), changed files in a
+  warm dir need **distinct-inode placement** — macOS `clonefile` already gives it; Linux
+  needs a **copy** for changed files, then `touch`.
+
+(A future cargo `checksum`-based freshness mode would make cargo content-aware and retire
+this hazard, but it is not the default and cannot be relied on.)
 
 ### 5.6 At rest — the warm dir holds *both* snapshot and code
 
