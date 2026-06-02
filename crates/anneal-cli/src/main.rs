@@ -92,6 +92,10 @@ struct ConfigArgs {
     /// `on` | `off`.
     #[arg(long, global = true, value_name = "STATE")]
     coverage: Option<String>,
+    /// Max actions to run concurrently. Defaults to the machine's parallelism.
+    /// Scheduling-only — it never affects cache keys or results.
+    #[arg(long, global = true, value_name = "N")]
+    jobs: Option<usize>,
 }
 
 fn main() {
@@ -113,8 +117,8 @@ fn run(cli: Cli) -> Result<i32, String> {
     };
     let config = build_config(&cli.config)?;
     match cli.command {
-        Command::Build { target } => build(&target, &config, &root),
-        Command::Test { target } => test(&target, &config, &root),
+        Command::Build { target } => build(&target, &config, &root, cli.config.jobs),
+        Command::Test { target } => test(&target, &config, &root, cli.config.jobs),
         Command::Affected { since } => affected(&since, &root),
         Command::Why { from, to, since } => why(&from, to.as_deref(), since.as_deref(), &root),
     }
@@ -243,8 +247,8 @@ fn git_changed_files(root: &Path, since: &str) -> Result<Vec<PathBuf>, String> {
 }
 
 /// Analyze and execute a target's action graph; return the process exit code.
-fn build(target: &str, config: &Configuration, root: &Path) -> Result<i32, String> {
-    let (actions, results, exec) = analyze_and_run(target, config, root)?;
+fn build(target: &str, config: &Configuration, root: &Path, jobs: Option<usize>) -> Result<i32, String> {
+    let (actions, results, exec) = analyze_and_run(target, config, root, jobs)?;
     report_actions(&actions, &results);
 
     let failed = results.iter().filter(|r| !r.success()).count();
@@ -260,8 +264,8 @@ fn build(target: &str, config: &Configuration, root: &Path) -> Result<i32, Strin
 }
 
 /// Build, then summarize the actions that produced a test result (`results.txt`).
-fn test(target: &str, config: &Configuration, root: &Path) -> Result<i32, String> {
-    let (actions, results, exec) = analyze_and_run(target, config, root)?;
+fn test(target: &str, config: &Configuration, root: &Path, jobs: Option<usize>) -> Result<i32, String> {
+    let (actions, results, exec) = analyze_and_run(target, config, root, jobs)?;
     report_actions(&actions, &results);
 
     // Test actions are rule-agnostic: any action that captured `results.txt` and wrote
@@ -301,6 +305,7 @@ fn analyze_and_run(
     target: &str,
     config: &Configuration,
     root: &Path,
+    jobs: Option<usize>,
 ) -> Result<(Vec<Action>, Vec<ActionResult>, LocalExecutor), String> {
     let label = Label::parse(target).map_err(|e| format!("invalid target {target:?}: {e}"))?;
     let registry = builtin_rules();
@@ -308,6 +313,10 @@ fn analyze_and_run(
     let graph = load_closure(root, &label, &registry).map_err(|e| e.to_string())?;
     let exec = LocalExecutor::new(root.join(".anneal"))
         .map_err(|e| format!("opening .anneal store: {e}"))?;
+    let exec = match jobs {
+        Some(j) => exec.jobs(j),
+        None => exec,
+    };
     let analyzed = Analyzer::new(&graph, &registry, config, root, exec.cas())
         .analyze(&label)
         .map_err(|e| e.to_string())?;

@@ -9,9 +9,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs;
 use std::io;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::process::{Child, ExitStatus};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use anneal_cas::Cas;
@@ -57,6 +60,9 @@ pub struct LocalExecutor {
     snapshots: SnapshotStore,
     sandboxes: PathBuf,
     retain_sandboxes: bool,
+    /// Max actions to run concurrently in [`execute_graph`]. Defaults to the machine's
+    /// available parallelism.
+    parallelism: usize,
 }
 
 impl LocalExecutor {
@@ -76,6 +82,7 @@ impl LocalExecutor {
             snapshots,
             sandboxes,
             retain_sandboxes: false,
+            parallelism: default_parallelism(),
         })
     }
 
@@ -90,26 +97,235 @@ impl LocalExecutor {
         self
     }
 
-    /// Execute an action graph: `actions` in dependency order (producers before
-    /// consumers, as `anneal-analysis` emits). Each action's [`InputSource::Output`]
-    /// references are resolved against the outputs produced earlier in the run, then
-    /// the resolved action is executed (and cached) like any other. Returns the
-    /// per-action results, aligned with `actions`.
-    pub fn execute_graph(&self, actions: &[Action]) -> Result<Vec<ActionResult>, ExecError> {
-        // (producing action name, output name) -> content digest
-        let mut produced: HashMap<(String, String), Digest> = HashMap::new();
-        let mut results = Vec::with_capacity(actions.len());
-
-        for action in actions {
-            let resolved = resolve_action(action, &produced)?;
-            let result = self.execute(&resolved)?;
-            for (output_name, digest) in &result.outputs {
-                produced.insert((action.name().to_owned(), output_name.clone()), *digest);
-            }
-            results.push(result);
-        }
-        Ok(results)
+    /// Cap the number of actions [`execute_graph`] runs concurrently. Clamped to at
+    /// least 1. Defaults to the machine's available parallelism.
+    pub fn jobs(mut self, jobs: usize) -> Self {
+        self.parallelism = jobs.max(1);
+        self
     }
+
+    /// Execute an action graph, running independent actions **concurrently** (up to
+    /// [`LocalExecutor::jobs`]). The input order need not be topological: the
+    /// dependency DAG is derived from each action's edges (see [`build_edges`]), and an
+    /// action runs only once all its dependencies have completed. Each action's
+    /// [`InputSource::Output`] references are resolved against the outputs produced by
+    /// the run before it executes (and is cached) like any other. Returns the
+    /// per-action results, **aligned with `actions`** regardless of scheduling order.
+    ///
+    /// On the first execution *error* (a dangling reference, spawn/IO failure — not a
+    /// merely non-zero exit, which is a normal result) the scheduler stops dispatching
+    /// new work, lets in-flight actions drain, and returns that error.
+    pub fn execute_graph(&self, actions: &[Action]) -> Result<Vec<ActionResult>, ExecError> {
+        if actions.is_empty() {
+            return Ok(Vec::new());
+        }
+        let edges = build_edges(actions)?;
+        let workers = self.parallelism.min(actions.len()).max(1);
+
+        let state = Mutex::new(SchedState::new(actions.len(), &edges));
+        let progress = Condvar::new();
+
+        thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    while let Some((idx, resolved)) = next_task(&state, &progress, actions) {
+                        let outcome = self.execute(&resolved);
+                        complete(&state, &progress, &edges, idx, actions[idx].name(), outcome);
+                    }
+                });
+            }
+        });
+
+        let mut state = state.into_inner().unwrap();
+        if let Some(err) = state.failed.take() {
+            return Err(err);
+        }
+        // Every action completed successfully → every slot is filled.
+        Ok(state.results.into_iter().map(Option::unwrap).collect())
+    }
+}
+
+/// The dependency DAG of an action graph, as forward and reverse adjacency by index.
+struct Edges {
+    /// `deps[i]` = indices `i` depends on (its dependencies must finish before it runs).
+    deps: Vec<Vec<usize>>,
+    /// `dependents[i]` = indices that depend on `i` (unblocked when `i` finishes).
+    dependents: Vec<Vec<usize>>,
+}
+
+/// Derive the dependency edges of an action graph from two sources (§ parallel-execution
+/// design): **data edges** — an [`InputSource::Output`] makes the consumer depend on the
+/// producer — and **snapshot-owner edges** — a [`CachePolicy::SnapshotConsuming`] action
+/// depends on the [`CachePolicy::SnapshotBased`] action that *owns* (saves) the snapshot
+/// for its `snapshot_key`, since it cannot restore a snapshot that has not been saved.
+/// This is the one place snapshot ordering is reconstructed; promoting it to a declared
+/// edge in the action model is deferred (see TODO).
+fn build_edges(actions: &[Action]) -> Result<Edges, ExecError> {
+    // action name -> index, for resolving data edges.
+    let mut by_name: HashMap<&str, usize> = HashMap::with_capacity(actions.len());
+    for (i, a) in actions.iter().enumerate() {
+        by_name.insert(a.name(), i);
+    }
+    // snapshot key -> the index of its owning SnapshotBased action.
+    let mut owner_of: HashMap<Digest, usize> = HashMap::new();
+    for (i, a) in actions.iter().enumerate() {
+        if a.cache_policy == CachePolicy::SnapshotBased {
+            if let Some(key) = a.snapshot_key {
+                owner_of.insert(key, i);
+            }
+        }
+    }
+
+    let mut deps: Vec<Vec<usize>> = vec![Vec::new(); actions.len()];
+    let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); actions.len()];
+    let add_edge = |from: usize, to: usize, deps: &mut Vec<Vec<usize>>, dependents: &mut Vec<Vec<usize>>| {
+        // `from` depends on `to`; dedup so a multi-output producer is listed once.
+        if from != to && !deps[from].contains(&to) {
+            deps[from].push(to);
+            dependents[to].push(from);
+        }
+    };
+
+    for (i, a) in actions.iter().enumerate() {
+        // Data edges.
+        for input in a.inputs.values() {
+            if let InputSource::Output { action: producer, name } = &input.source {
+                let &p = by_name.get(producer.as_str()).ok_or_else(|| ExecError::UnresolvedInput {
+                    action: producer.clone(),
+                    output: name.clone(),
+                })?;
+                add_edge(i, p, &mut deps, &mut dependents);
+            }
+        }
+        // Snapshot-owner edge.
+        if a.cache_policy == CachePolicy::SnapshotConsuming {
+            if let Some(key) = a.snapshot_key {
+                if let Some(&owner) = owner_of.get(&key) {
+                    add_edge(i, owner, &mut deps, &mut dependents);
+                }
+                // No owner in this graph → a cold-start restore, which the snapshot
+                // store handles gracefully; nothing to order against.
+            }
+        }
+    }
+
+    Ok(Edges { deps, dependents })
+}
+
+/// Mutable scheduler state, guarded by one mutex; workers coordinate via a condvar.
+struct SchedState {
+    /// Remaining unfinished dependencies per action; an action is ready at 0.
+    pending: Vec<usize>,
+    /// Indices ready to dispatch (all dependencies finished).
+    ready: Vec<usize>,
+    /// Producer output → content digest, accumulated as actions complete.
+    produced: HashMap<(String, String), Digest>,
+    /// Per-index results, filled on completion; `None` until then.
+    results: Vec<Option<ActionResult>>,
+    /// Actions still to complete (success path). Reaches 0 iff the whole graph ran.
+    remaining: usize,
+    /// Actions currently executing.
+    running: usize,
+    /// First execution error; once set, no new work is dispatched.
+    failed: Option<ExecError>,
+}
+
+impl SchedState {
+    fn new(n: usize, edges: &Edges) -> Self {
+        let pending: Vec<usize> = edges.deps.iter().map(Vec::len).collect();
+        // Seed the ready set with every action that has no dependencies.
+        let ready: Vec<usize> = (0..n).filter(|&i| pending[i] == 0).collect();
+        SchedState {
+            pending,
+            ready,
+            produced: HashMap::new(),
+            results: (0..n).map(|_| None).collect(),
+            remaining: n,
+            running: 0,
+            failed: None,
+        }
+    }
+}
+
+/// Claim the next ready action under the lock, resolving its [`InputSource::Output`]
+/// inputs against outputs produced so far. Blocks until work is available, and returns
+/// `None` when the worker should exit: the graph is done, an error was recorded, or no
+/// progress is possible (a cycle — defensive; analysis emits a DAG).
+fn next_task(
+    state: &Mutex<SchedState>,
+    progress: &Condvar,
+    actions: &[Action],
+) -> Option<(usize, Action)> {
+    let mut st = state.lock().unwrap();
+    loop {
+        if st.failed.is_some() || st.remaining == 0 {
+            return None;
+        }
+        if let Some(idx) = st.ready.pop() {
+            match resolve_action(&actions[idx], &st.produced) {
+                Ok(resolved) => {
+                    st.running += 1;
+                    return Some((idx, resolved));
+                }
+                Err(e) => {
+                    // A dependency finished without producing the referenced output
+                    // (e.g. it exited non-zero). Treat as a graph error and stop.
+                    st.failed.get_or_insert(e);
+                    progress.notify_all();
+                    return None;
+                }
+            }
+        }
+        if st.running == 0 {
+            // Nothing ready and nothing running, yet work remains: the only way that
+            // happens is an unsatisfiable dependency cycle.
+            st.failed.get_or_insert(ExecError::DependencyCycle);
+            progress.notify_all();
+            return None;
+        }
+        st = progress.wait(st).unwrap();
+    }
+}
+
+/// Record an action's outcome under the lock and unblock its dependents. A non-zero
+/// exit is a normal result (its empty output set surfaces later as an `UnresolvedInput`
+/// for any consumer that needed it); only an `Err` aborts the run.
+fn complete(
+    state: &Mutex<SchedState>,
+    progress: &Condvar,
+    edges: &Edges,
+    idx: usize,
+    name: &str,
+    outcome: Result<ActionResult, ExecError>,
+) {
+    let mut st = state.lock().unwrap();
+    st.running -= 1;
+    match outcome {
+        Err(e) => {
+            st.failed.get_or_insert(e);
+        }
+        Ok(result) => {
+            for (output_name, digest) in &result.outputs {
+                st.produced.insert((name.to_owned(), output_name.clone()), *digest);
+            }
+            if st.failed.is_none() {
+                for &dep in &edges.dependents[idx] {
+                    st.pending[dep] -= 1;
+                    if st.pending[dep] == 0 {
+                        st.ready.push(dep);
+                    }
+                }
+            }
+            st.results[idx] = Some(result);
+            st.remaining -= 1;
+        }
+    }
+    progress.notify_all();
+}
+
+/// The machine's available parallelism, or 1 if it cannot be determined.
+fn default_parallelism() -> usize {
+    std::thread::available_parallelism().map(NonZeroUsize::get).unwrap_or(1)
 }
 
 /// Return a copy of `action` with every [`InputSource::Output`] replaced by the
@@ -203,19 +419,20 @@ impl LocalExecutor {
         })
     }
 
-    /// The sandbox root for an action. Snapshot-based actions get a **stable** path
-    /// (keyed by the snapshot key) so cold and warm runs use an identical working
-    /// directory — outputs are then reproducible and directly comparable. Normal
-    /// actions get a unique path so independent runs never collide.
-    fn sandbox_root(&self, action: &Action, key: &Digest, snapshot_based: bool) -> PathBuf {
-        if snapshot_based {
-            let tag = action.snapshot_key.unwrap_or(*key);
-            self.sandboxes.join(format!("snap-{}", &tag.to_hex()[..16]))
-        } else {
-            let nonce = SANDBOX_COUNTER.fetch_add(1, Ordering::Relaxed);
-            self.sandboxes
-                .join(format!("{}-{}", &key.to_hex()[..16], nonce))
-        }
+    /// The sandbox root for an action: a **unique** path per run, including for
+    /// snapshot actions. A snapshot is restored from the immutable store into this
+    /// private directory, so snapshot-*consuming* actions sharing one key never share a
+    /// working directory and can run concurrently (the owner-ordering edge in
+    /// [`build_edges`] guarantees the snapshot exists first). The cold-vs-warm
+    /// reproducibility comparison uses a stable, caller-named path via
+    /// [`LocalExecutor::run_uncached`] instead, so it is unaffected.
+    ///
+    /// Note: `nonce` is process-local, so two concurrent `anneal` processes can still
+    /// collide on this path — closed later by the workspace lock (see TODO).
+    fn sandbox_root(&self, key: &Digest) -> PathBuf {
+        let nonce = SANDBOX_COUNTER.fetch_add(1, Ordering::Relaxed);
+        self.sandboxes
+            .join(format!("{}-{}", &key.to_hex()[..16], nonce))
     }
 
     /// Run an action **outside the action cache**, in a caller-named sandbox, with
@@ -269,9 +486,8 @@ impl Executor for LocalExecutor {
         }
 
         // Cache miss (or non-cacheable): run, restoring/saving the snapshot per policy.
-        // Snapshot-involved actions get a stable sandbox path (keyed by the snapshot
-        // key) so they share an owner's snapshot directory.
-        let root = self.sandbox_root(action, &key, restore);
+        // Each run gets a unique sandbox; the snapshot is restored from the store.
+        let root = self.sandbox_root(&key);
         let result = self.run_core(action, root, restore, save)?;
 
         if result.exit_code == 0 && cacheable {
@@ -332,6 +548,8 @@ pub enum ExecError {
     UnresolvedInput { action: String, output: String },
     /// The action exceeded its timeout and was killed.
     Timeout { timeout_ms: u64 },
+    /// The action graph contains a dependency cycle, so no execution order exists.
+    DependencyCycle,
 }
 
 impl fmt::Display for ExecError {
@@ -347,6 +565,9 @@ impl fmt::Display for ExecError {
             }
             ExecError::Timeout { timeout_ms } => {
                 write!(f, "action exceeded its {timeout_ms}ms timeout")
+            }
+            ExecError::DependencyCycle => {
+                write!(f, "action graph contains a dependency cycle")
             }
         }
     }

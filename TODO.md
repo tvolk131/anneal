@@ -98,11 +98,31 @@
 
 ## Performance & scale
 
-- [ ] **Parallel action execution.** `execute_graph` runs actions **sequentially**; independent actions should
-      run concurrently (with snapshot-key serialization for same-key snapshot actions). Significant for the §20
-      gates.
+- [x] **Parallel action execution.** `execute_graph` now schedules the action DAG **concurrently** (bounded
+      `std::thread::scope` worker pool, `--jobs` / `available_parallelism`). DAG derived in `build_edges` from
+      `InputSource::Output` data edges **+ snapshot-owner edges** (each `SnapshotConsuming` action depends on the
+      `SnapshotBased` owner of its `snapshot_key`); input slice need not be topological; **unique sandbox per
+      action** (dropped the shared stable `snap-K` path — the snapshot is an immutable shared read from the store
+      into each private sandbox, so consumers parallelize freely, ordered only by the owner edge); results aligned
+      with the input by index; a dependency cycle → `ExecError::DependencyCycle`; an execution *error* aborts new
+      dispatch and drains in-flight (a non-zero *exit* stays a normal result). Tests in `parallel_scheduler.rs`
+      (out-of-order diamond, rendezvous proving real overlap, error/cycle paths). Deferred: lifting the
+      snapshot-owner edge into the action model (see triggers below); see also the multi-process hardening item.
+- [ ] **Multi-process safety: coarse `.anneal/` lock + sandbox-name collision** (hardening; not needed for the
+      single-process parallel scheduler). (a) Normal sandbox names are `<keyhex16>-<nonce>` where `nonce` is a
+      per-**process** in-memory `AtomicU64` from 0 → **two `anneal` processes collide** on the same path and
+      `rm -rf` each other (latent today, snapshot-independent). Fold a `pid`/random token into the name. (b) Add a
+      workspace-level **RW advisory lock** (flock on a lockfile): builds take **shared**, GC takes **exclusive**
+      (Cargo/Bazel pattern). Subsumes every cross-process concern: the CAS is already corruption-safe
+      (content-addressed + atomic temp→rename), so only deletion (GC) needs exclusivity, not all CAS access.
 - [ ] **CAS / action-cache / snapshot eviction & GC** (§8.2). All three stores currently grow **unbounded**.
-      The system owns eviction policy (LRU, size/age caps); rules declare only what to prune.
+      The system owns eviction policy (LRU, size/age caps); rules declare only what to prune. Design: blobs are
+      **shared** across action-cache entries and snapshots, so deletion is **not** the inverse of write — removing
+      a pointer (snapshot index entry / action-cache entry) is an atomic unlink, but removing a **blob** is
+      **reachability-gated GC** (mark-and-sweep over all live pointers → referenced digests; a blob is deletable
+      only when unreachable from every root). Run GC **stop-the-world under the exclusive workspace lock** so it
+      can't race a concurrent build committing a new referrer to a blob it's about to sweep (the git/Nix/Bazel
+      GC-vs-write race). Builds hold the shared lock; GC holds exclusive.
 - [ ] **Materialization throughput** on a real `.anneal` volume (Spike B carried-forward: ~4,600 clones/sec in
       the harness). Benchmark and, if material, batch/parallelize.
 
