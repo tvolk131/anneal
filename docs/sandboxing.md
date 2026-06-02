@@ -262,21 +262,32 @@ holds **both** the materialized source tree and `target/` — and keeping the co
 whole point:
 
 ```
-.anneal/warm/<snapshot_key>/
+.anneal/warm/<snapshot_key>/   ← the working tree — a FAITHFUL checkout, nothing extra
 ├── Cargo.toml, Cargo.lock, crate*/src/*.rs   ← declared inputs (source; mostly shared inodes/CoW; ~free)
 ├── target/ …                                 ← warm snapshot state (real bytes; the bulk)
-├── .home/  .tmp/                             ← scratch (clearable)
-├── .anneal-inputs                            ← path→digest manifest of the declared inputs (§5.5's diff baseline)
-└── .anneal-committed                         ← commit record, root-level + engine-agnostic (§5.4)
+└── .home/  .tmp/                             ← scratch (clearable)
+.anneal/warm-meta/<snapshot_key>/   ← executor-only bookkeeping, kept OUT of the working tree
+├── inputs                                    ← path→digest manifest (the §5.5 diff baseline)
+└── committed                                 ← commit record — existence is the signal (§5.4)
 ```
+
+The working tree should be **indistinguishable from a real checkout** — only source +
+`target/` + scratch — so the native tool behaves exactly as it would locally. Anneal's
+manifest and commit record are *our* bookkeeping, read by the **executor during sync**,
+never by the rule's analysis (which globs the user's *repo*, not the warm dir), so they sit
+**beside** the tree keyed by the same `snapshot_key`, not in it. (Root-level dotfiles also
+work — cargo ignores them and the snapshot save only touches `target/` — but the sibling
+layout keeps the "faithful checkout" property crisp.) The commit record's **existence** is
+the whole signal (§5.4); equivalently it folds into `inputs` via atomic-rename-on-commit,
+so "manifest present = committed."
 
 **Declared inputs** are exactly the action's `inputs` map — the rule's enumerated source
 set (the package tree globbed, minus `IGNORED_DIRS` like `target`/`.git`/`.anneal`) plus
 any routed `data` — the *same* set the action cache key is computed over. `target/` is the
 **snapshot, not an input** (it is kept warm, never diffed as source); declared outputs,
-undeclared files, and the (ambient) toolchain are likewise outside the diff. So
-`.anneal-inputs` is the per-path itemization of the set the cache key aggregates, and the
-sync's universe is precisely `Action.inputs`.
+undeclared files, and the (ambient) toolchain are likewise outside the diff. So the
+manifest is the per-path itemization of the set the cache key aggregates, and the sync's
+universe is precisely `Action.inputs`.
 
 If it held only `target/` and the code were re-laid every build, **every source file would
 get a fresh mtime → cargo would see everything as newer than `target/` → full rebuild**,
