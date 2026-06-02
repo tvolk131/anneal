@@ -40,7 +40,7 @@ use crate::rule::{Analysis, Rule, RuleError};
 use crate::schema::{AttrSchema, AttrType};
 
 /// Directories never treated as build inputs.
-const IGNORED_DIRS: &[&str] = &["target", ".git", ".mybuild"];
+const IGNORED_DIRS: &[&str] = &["target", ".git", ".anneal"];
 
 /// `data` consumes other targets' file outputs — a `nickel_eval`'s generated JSON, or
 /// a `filegroup`'s plain source files — materializing them into the workspace tree as

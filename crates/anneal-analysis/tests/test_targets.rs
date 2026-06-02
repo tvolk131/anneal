@@ -66,7 +66,7 @@ fn unit_test_compile_run_split_with_run_cache_hit() {
     let root = tmp.path();
     let registry = builtin_rules();
     let cfg = debug_config();
-    let exec = LocalExecutor::new(root.join(".mybuild")).unwrap();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
     let label = Label::parse("//ws:ws").unwrap();
 
     let analyze = || -> Vec<Action> {

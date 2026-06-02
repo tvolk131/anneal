@@ -69,7 +69,7 @@ fn cargo_workspace_builds_hermetically_and_caches() {
     let registry = builtin_rules();
     let graph = load_package(root, "ws", &registry).unwrap();
     let cfg = config(OptLevel::Debug);
-    let exec = LocalExecutor::new(root.join(".mybuild")).unwrap();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
 
     let analyzer = Analyzer::new(&graph, &registry, &cfg, root, exec.cas());
     let label = anneal_core::Label::parse("//ws:ws").unwrap();
@@ -96,7 +96,7 @@ fn editing_a_source_busts_the_cache() {
     let root = tmp.path();
     let registry = builtin_rules();
     let cfg = config(OptLevel::Debug);
-    let exec = LocalExecutor::new(root.join(".mybuild")).unwrap();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
     let label = anneal_core::Label::parse("//ws:ws").unwrap();
 
     // Build once.
@@ -132,7 +132,7 @@ fn profile_axis_changes_the_build() {
     let tmp = cargo_fixture();
     let root = tmp.path();
     let registry = builtin_rules();
-    let exec = LocalExecutor::new(root.join(".mybuild")).unwrap();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
     let label = anneal_core::Label::parse("//ws:ws").unwrap();
     let graph = load_package(root, "ws", &registry).unwrap();
 

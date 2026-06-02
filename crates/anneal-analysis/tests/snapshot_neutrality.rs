@@ -72,7 +72,7 @@ fn snapshot_restored_build_is_correctness_neutral() {
     let root = tmp.path();
     let registry = builtin_rules();
     let cfg = debug_config();
-    let exec = LocalExecutor::new(root.join(".mybuild")).unwrap();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
     let label = Label::parse("//ws:ws").unwrap();
 
     // Analyze + return the coarse build action for the current sources.

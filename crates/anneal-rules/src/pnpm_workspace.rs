@@ -60,7 +60,7 @@ const SCHEMA: &[AttrSchema] = &[
 const STORE_DIR: &str = ".pnpm-store";
 
 /// Directories never treated as build inputs.
-const IGNORED_DIRS: &[&str] = &["node_modules", ".git", ".mybuild"];
+const IGNORED_DIRS: &[&str] = &["node_modules", ".git", ".anneal"];
 
 pub struct PnpmWorkspace;
 

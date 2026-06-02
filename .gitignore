@@ -3,7 +3,7 @@
 /spikes/target
 
 # Anneal-owned directory (§15.3)
-.mybuild/
+.anneal/
 
 # Direnv / nix
 .direnv/

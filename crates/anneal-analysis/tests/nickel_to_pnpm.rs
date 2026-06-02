@@ -108,7 +108,7 @@ fn pnpm_test_reads_the_nickel_generated_json() {
     let tmp = fixture("hello");
     let root = tmp.path();
     let cfg = debug();
-    let exec = LocalExecutor::new(root.join(".mybuild")).unwrap();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
 
     let (actions, results) = run(&exec, root, &cfg);
 
@@ -128,7 +128,7 @@ fn composing_caches_across_the_boundary() {
     let tmp = fixture("hello");
     let root = tmp.path();
     let cfg = debug();
-    let exec = LocalExecutor::new(root.join(".mybuild")).unwrap();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
 
     // Cold build.
     let (a1, r1) = run(&exec, root, &cfg);

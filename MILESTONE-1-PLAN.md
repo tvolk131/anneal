@@ -132,7 +132,7 @@ ecosystem boundary (§14.1–14.3), with composing caches.
 - `pnpm_workspace` (node_modules materialization; pnpm-store snapshot).
 - Routing: Nickel JSON shaped as a generated native package (with `package.json`) →
   consumed by pnpm as an ordinary workspace dependency; content-addressed under
-  `.mybuild/gen/` (§14.2).
+  `.anneal/gen/` (§14.2).
 
 **Exit criterion:** edit Nickel source → consumer regenerates + rebuilds; edit only
 the consumer → generator stays cached. Demonstrated as a test.
@@ -184,7 +184,7 @@ anneal-rules        Rule trait + all first-party rules (each rule a deep submodu
 anneal-diagnostics  structured errors + Diagnostic + rust-style rendering
 anneal-query        query / affected / why
    |
-anneal-cli (mybuild)  thin orchestration — allowed to be a coordinator
+anneal-cli (anneal)  thin orchestration — allowed to be a coordinator
 ```
 
 | Crate | Narrow interface | Hidden complexity |

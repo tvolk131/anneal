@@ -60,7 +60,7 @@ fn build_action_for(root: &std::path::Path, axes: AxisValues, exec: &LocalExecut
 fn a_consumed_axis_changes_the_build_cache_key() {
     let tmp = fixture();
     let root = tmp.path();
-    let exec = LocalExecutor::new(root.join(".mybuild")).unwrap();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
 
     // debug_info is consumed and maps to RUSTFLAGS, so changing it must change the key.
     let full = build_action_for(root, AxisValues::default(), &exec);
@@ -83,7 +83,7 @@ fn a_consumed_axis_changes_the_build_cache_key() {
 fn coverage_build_compiles_through_the_kernel() {
     let tmp = fixture();
     let root = tmp.path();
-    let exec = LocalExecutor::new(root.join(".mybuild")).unwrap();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
 
     // -Cinstrument-coverage is stable; the instrumented build should succeed.
     let action = build_action_for(

@@ -59,7 +59,7 @@ fn pnpm_workspace_emits_one_installing_action_that_succeeds() {
     let root = tmp.path();
     let registry = builtin_rules();
     let cfg = debug();
-    let exec = LocalExecutor::new(root.join(".mybuild")).unwrap();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
     let label = Label::parse("//app:app").unwrap();
 
     let graph = load_package(root, "app", &registry).unwrap();
@@ -87,7 +87,7 @@ fn install_is_snapshot_cacheable_across_runs() {
     let root = tmp.path();
     let registry = builtin_rules();
     let cfg = debug();
-    let exec = LocalExecutor::new(root.join(".mybuild")).unwrap();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
     let label = Label::parse("//app:app").unwrap();
 
     let run = |exec: &LocalExecutor| {

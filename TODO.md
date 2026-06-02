@@ -2,7 +2,7 @@
 
 > Running list of what's not yet built, beyond what's already in `build-system-design.md` §21.
 > Status as of: cargo_workspace, nickel_eval, pnpm_workspace (install + scripts + plain-path data routing) done;
-> Nickel→Rust and Nickel→TS (§14.3, plain-path) routing demos proven. Next: the `mybuild` CLI, then Phase 5.
+> Nickel→Rust and Nickel→TS (§14.3, plain-path) routing demos proven. Next: the `anneal` CLI, then Phase 5.
 > Section refs (§) point at `build-system-design.md`.
 
 ## Correctness & enforcement (do alongside the relevant feature)
@@ -56,7 +56,7 @@
 
 ## CLI
 
-- [x] **`mybuild` binary** (§18) — crate `anneal-cli`, thin orchestration over
+- [x] **`anneal` binary** (§18) — crate `anneal-cli`, thin orchestration over
       `load_package → Analyzer → execute_graph`. **Done so far:** `build` and `test` (single package;
       `test` summarizes via the rule-agnostic `ANNEAL_TEST_EXIT` marker), `--version`, clean exit codes
       (0 ok / 1 failed / 2 usage), and **config-selection flags** (§6.6): `--platform`, `--opt-level`,
@@ -80,7 +80,7 @@
       gates.
 - [ ] **CAS / action-cache / snapshot eviction & GC** (§8.2). All three stores currently grow **unbounded**.
       The system owns eviction policy (LRU, size/age caps); rules declare only what to prune.
-- [ ] **Materialization throughput** on a real `.mybuild` volume (Spike B carried-forward: ~4,600 clones/sec in
+- [ ] **Materialization throughput** on a real `.anneal` volume (Spike B carried-forward: ~4,600 clones/sec in
       the harness). Benchmark and, if material, batch/parallelize.
 
 ## Toolchains & configuration
@@ -134,7 +134,7 @@
 
 - [ ] **Diagnostics channel** (§17.2/§19.3) — schema defined in the doc; no crate, rules don't emit `Diagnostic`s.
       (Structured *errors* for load/exec exist; the diagnostics *channel* is separate.)
-- [ ] **Stable error codes + `mybuild explain MB0023`** (§17.1) — we produce structured, located errors, but
+- [ ] **Stable error codes + `anneal explain MB0023`** (§17.1) — we produce structured, located errors, but
       there's no stable code registry or doc-linked long-form `explain`.
 
 ## Deferred by design (v1.x+ / out of Milestone 1)

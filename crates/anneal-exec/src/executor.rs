@@ -60,7 +60,7 @@ pub struct LocalExecutor {
 }
 
 impl LocalExecutor {
-    /// Open a local executor rooted at `store_root` (e.g. `.mybuild/`). The CAS,
+    /// Open a local executor rooted at `store_root` (e.g. `.anneal/`). The CAS,
     /// action cache, snapshot store, and sandbox roots are created underneath and
     /// share one volume so hardlink materialization works (§3.4).
     pub fn new(store_root: impl Into<PathBuf>) -> io::Result<Self> {

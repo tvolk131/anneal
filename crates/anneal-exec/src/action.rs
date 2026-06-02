@@ -39,7 +39,7 @@ pub enum ExecutionMode {
     /// Relaxed isolation for actions needing access beyond declared inputs.
     /// Not cacheable.
     Permeable,
-    /// Direct execution with no isolation (used by `mybuild exec`). Not cacheable.
+    /// Direct execution with no isolation (used by `anneal exec`). Not cacheable.
     Native,
 }
 

@@ -39,7 +39,7 @@ fn host() -> Configuration {
 fn evaluates_to_json_by_default_and_exposes_it() {
     let tmp = workspace("nickel_eval(name = \"config\", src = \"config.ncl\", out = \"config.json\")\n");
     let root = tmp.path();
-    let exec = LocalExecutor::new(root.join(".mybuild")).unwrap();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
 
     let g = analyze(root, "//cfg:config", &host(), &exec).unwrap();
     assert_eq!(g.action_count(), 1);
@@ -68,7 +68,7 @@ fn produces_toml_when_requested() {
         "nickel_eval(name = \"config\", src = \"config.ncl\", format = \"toml\", out = \"config.toml\")\n",
     );
     let root = tmp.path();
-    let exec = LocalExecutor::new(root.join(".mybuild")).unwrap();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
 
     let g = analyze(root, "//cfg:config", &host(), &exec).unwrap();
     let result = exec.execute(&g.actions().next().unwrap().clone()).unwrap();
@@ -88,7 +88,7 @@ fn format_changes_the_cache_key() {
          nickel_eval(name = \"t\", src = \"config.ncl\", format = \"toml\", out = \"c.toml\")\n",
     );
     let root = tmp.path();
-    let exec = LocalExecutor::new(root.join(".mybuild")).unwrap();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
 
     let pick = |target: &str| -> Action {
         analyze(root, target, &host(), &exec)
@@ -106,7 +106,7 @@ fn format_changes_the_cache_key() {
 fn is_configuration_invariant() {
     let tmp = workspace("nickel_eval(name = \"config\", src = \"config.ncl\", out = \"config.json\")\n");
     let root = tmp.path();
-    let exec = LocalExecutor::new(root.join(".mybuild")).unwrap();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
 
     let cfg_a = Configuration::new(
         Platform::new("linux", "x86_64-unknown-linux-gnu"),
@@ -129,7 +129,7 @@ fn is_configuration_invariant() {
 fn unsupported_format_is_rejected_at_the_rule_boundary() {
     let tmp = workspace("nickel_eval(name = \"bad\", src = \"config.ncl\", format = \"xml\")\n");
     let root = tmp.path();
-    let exec = LocalExecutor::new(root.join(".mybuild")).unwrap();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
 
     let err = analyze(root, "//cfg:bad", &host(), &exec).unwrap_err();
     let msg = err.to_string();

@@ -72,7 +72,7 @@ hardlink limits, cross-filesystem fallback?
    inode with **no limit hit** (`nlink=50002`). APFS's ceiling is far above any realistic
    CAS dedup factor; a popular blob can be materialized into as many sandboxes as needed.
 4. **Same-filesystem requirement** — verified via `st_dev` comparison; CAS and sandbox
-   must share a volume (they do under `.mybuild/`). The **EXDEV → copy fallback** path is
+   must share a volume (they do under `.anneal/`). The **EXDEV → copy fallback** path is
    implemented and detected by errno 18. (Couldn't force a cross-volume case in this
    environment — every probed path shared `st_dev` — but the detection + fallback code
    path is in place.)
@@ -86,12 +86,12 @@ hardlink limits, cross-filesystem fallback?
   run — slower than a pure metadata op should be, likely TMPDIR/sandbox overhead. A build
   materializing thousands of inputs could spend seconds purely linking. *This is not the
   §22 limit concern (that's retired), but it feeds the §20 benchmark gates.* Action:
-  measure on a real `.mybuild/` volume; if material, consider batching / parallel
+  measure on a real `.anneal/` volume; if material, consider batching / parallel
   materialization. Note the realistic pattern is 1 link each into many inodes, not 50k
   into one, so this number is a pessimistic stress figure.
 - **CAS and sandbox roots must be co-located on one volume.** The materializer must assert
   `st_dev` equality at setup and fall back to copy (already coded) — and the installer /
-  `init` should place `.mybuild/cas` and sandbox roots on the same filesystem by
+  `init` should place `.anneal/cas` and sandbox roots on the same filesystem by
   construction (§3.4 "avoided by configuration").
 - **Atomic store** via temp-file + rename is required (a concurrent build must never read a
   half-written blob) — confirmed working; keep it in the real CAS.

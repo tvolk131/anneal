@@ -76,7 +76,7 @@ fn declared_scripts_run_against_the_installed_workspace() {
     let root = tmp.path();
     let registry = builtin_rules();
     let cfg = debug();
-    let exec = LocalExecutor::new(root.join(".mybuild")).unwrap();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
     let label = Label::parse("//app:app").unwrap();
 
     let graph = load_package(root, "app", &registry).unwrap();

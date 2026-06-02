@@ -24,7 +24,7 @@ impl Fixture {
         let tmp = tempfile::tempdir().unwrap();
         let package_dir = tmp.path().join("pkg");
         std::fs::create_dir_all(&package_dir).unwrap();
-        let exec = LocalExecutor::new(tmp.path().join(".mybuild")).unwrap();
+        let exec = LocalExecutor::new(tmp.path().join(".anneal")).unwrap();
         Fixture {
             _tmp: tmp,
             package_dir,

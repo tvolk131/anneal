@@ -69,7 +69,7 @@ fn cargo_crate_embeds_nickel_generated_json() {
     let root = tmp.path();
     let registry = builtin_rules();
     let cfg = debug();
-    let exec = LocalExecutor::new(root.join(".mybuild")).unwrap();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
     let label = Label::parse("//app:app").unwrap();
 
     let graph = load_package(root, "app", &registry).unwrap();
@@ -117,7 +117,7 @@ fn editing_nickel_source_rebuilds_the_consuming_workspace() {
     let root = tmp.path();
     let registry = builtin_rules();
     let cfg = debug();
-    let exec = LocalExecutor::new(root.join(".mybuild")).unwrap();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
     let label = Label::parse("//app:app").unwrap();
 
     // Run just the producer + the build action and return the build's result.

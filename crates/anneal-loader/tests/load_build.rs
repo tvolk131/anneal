@@ -139,7 +139,7 @@ genrule(
     let decl = graph.get(&Label::parse("//greeter:greeting").unwrap()).unwrap();
 
     // 2. Analyze the loaded target through its rule.
-    let exec = LocalExecutor::new(root.join(".mybuild")).unwrap();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
     let config = Configuration::new(Platform::new("host", "host"), AxisValues::default());
     let ctx = RuleContext::new(
         decl.label.clone(),

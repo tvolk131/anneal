@@ -51,7 +51,7 @@ fn run_and_collect(lib_rs: &str) -> TestResult {
     let root = tmp.path();
     let registry = builtin_rules();
     let cfg = debug_config();
-    let exec = LocalExecutor::new(root.join(".mybuild")).unwrap();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
     let label = Label::parse("//ws:ws").unwrap();
 
     let graph = load_package(root, "ws", &registry).unwrap();

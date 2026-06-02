@@ -42,7 +42,7 @@ genrule(
     let registry = builtin_rules();
     let graph = load_package(root, "pkg", &registry).unwrap();
     let config = host_config();
-    let exec = LocalExecutor::new(root.join(".mybuild")).unwrap();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
 
     let analyzer = Analyzer::new(&graph, &registry, &config, root, exec.cas());
     let combined = Label::parse("//pkg:combined").unwrap();
@@ -91,7 +91,7 @@ genrule(
     let registry = builtin_rules();
     let graph = load_package(root, "pkg", &registry).unwrap();
     let config = host_config();
-    let exec = LocalExecutor::new(root.join(".mybuild")).unwrap();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
 
     let analyzer = Analyzer::new(&graph, &registry, &config, root, exec.cas());
     let g = analyzer.analyze(&Label::parse("//pkg:second").unwrap()).unwrap();

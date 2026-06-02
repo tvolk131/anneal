@@ -312,7 +312,7 @@ Local and remote execution share one interface; `LocalExecutor` and `RemoteExecu
 
 ### 7.2 Execution modes
 
-Actions declare a mode: **`sealed`** (hermetic, strict input isolation; default for cacheable actions), **`permeable`** (relaxed isolation for actions needing access beyond declared inputs; not cacheable), **`native`** (direct execution, used by `mybuild exec`).
+Actions declare a mode: **`sealed`** (hermetic, strict input isolation; default for cacheable actions), **`permeable`** (relaxed isolation for actions needing access beyond declared inputs; not cacheable), **`native`** (direct execution, used by `anneal exec`).
 
 ### 7.3 Sandboxing
 
@@ -338,9 +338,9 @@ This is a deliberate rejection, not an oversight. We considered adding "minimal 
 
 A proper first-class secrets concept (declaration, cache-key exclusion, scrubbing, per-action sandboxing, provenance) is planned post-Milestone-1. Until then, Anneal targets open-source and public-dependency repositories. This is an honest limitation stated plainly rather than a rushed mechanism that compromises the hermeticity that the whole system rests on.
 
-### 7.6 The `mybuild exec` escape hatch
+### 7.6 The `anneal exec` escape hatch
 
-For commands not natively wrapped, `mybuild exec <command>` runs in a sandbox. Default mode is permissive (workspace inputs available, network allowed, scrubbed environment), **non-cacheable**, and **not part of the action graph**. `--hermetic --inputs=... --no-network` opts into rule-like strictness; `--explain` shows the sandbox configuration. Common-subcommand wrappers (`mybuild cargo expand`, etc.) are deferred — purely additive.
+For commands not natively wrapped, `anneal exec <command>` runs in a sandbox. Default mode is permissive (workspace inputs available, network allowed, scrubbed environment), **non-cacheable**, and **not part of the action graph**. `--hermetic --inputs=... --no-network` opts into rule-like strictness; `--explain` shows the sandbox configuration. Common-subcommand wrappers (`anneal cargo expand`, etc.) are deferred — purely additive.
 
 ---
 
@@ -380,7 +380,7 @@ A co-shipped GitHub Action wraps the cache protocol: **restore** relevant entrie
 
 ### 8.6 Provenance and `cache push`
 
-Local CAS entries are tagged with creation timestamp and producing action digest, enabling `mybuild cache push` (upload local entries to a remote CAS — useful after offline work). Ships in v1 as a minimal "upload everything not already remote."
+Local CAS entries are tagged with creation timestamp and producing action digest, enabling `anneal cache push` (upload local entries to a remote CAS — useful after offline work). Ships in v1 as a minimal "upload everything not already remote."
 
 ---
 
@@ -428,8 +428,8 @@ Workers are **per-action, not per-rule**: an action declares worker eligibility 
 
 ### 11.1 Two query layers
 
-- **Target queries** (`mybuild query`): operate on the target graph; configuration optional.
-- **Action queries** (`mybuild aquery`): operate on the action graph; require analysis.
+- **Target queries** (`anneal query`): operate on the target graph; configuration optional.
+- **Action queries** (`anneal aquery`): operate on the action graph; require analysis.
 
 Configuration is an optional parameter on target queries rather than a separate command, justified by our simpler configuration model.
 
@@ -462,7 +462,7 @@ For a Cargo workspace, the rule generates one test target per `(crate, test_type
 //workspace:crate_a_test_doc          → cargo test --package crate_a --doc
 ```
 
-This gives per-type cache granularity, per-type resource declarations, and per-type parallelism, mapping directly to Cargo flags. Granularity stops at the test-type level; individual functions are addressed via framework filters (`--filter`). Convenience: `mybuild test //workspace:crate_a` and `mybuild test //workspace/...` expand appropriately.
+This gives per-type cache granularity, per-type resource declarations, and per-type parallelism, mapping directly to Cargo flags. Granularity stops at the test-type level; individual functions are addressed via framework filters (`--filter`). Convenience: `anneal test //workspace:crate_a` and `anneal test //workspace/...` expand appropriately.
 
 The trade is a modest cold-cache/workspace-wide-change overhead (~5–20%, mitigated by the shared `target/` snapshot) for major incremental and selection wins. A batch-invocation optimization (single `cargo test --workspace` when many targets are requested at once) is available later if benchmarks justify it.
 
@@ -480,7 +480,7 @@ Deferred to v1.x: **sharding** (`shard_count`, results merged), **flakiness retr
 
 ### 12.6 Caching and failure inspection
 
-Cacheable per-target (default on for unit-test-shaped, off for resource-dependent tests). Under lazy materialization (v1.x, with RE), failed-test artifacts stay remote until requested via `mybuild test --inspect`. In Milestone 1 (local only) artifacts are already on disk.
+Cacheable per-target (default on for unit-test-shaped, off for resource-dependent tests). Under lazy materialization (v1.x, with RE), failed-test artifacts stay remote until requested via `anneal test --inspect`. In Milestone 1 (local only) artifacts are already on disk.
 
 ---
 
@@ -505,7 +505,7 @@ Two native ecosystems (compiled Rust, npm-world TypeScript) plus a pure generato
 
 ### 13.3 Per-rule completeness
 
-Each native rule supports building primary artifacts, idiomatic test execution, structured results, cache integration (action + conservative snapshot), the configuration axes (per-rule interpretation), and sandboxed execution. Each does **not** wrap every tool workflow (`cargo publish` is not wrapped — use `mybuild exec`) or every edge case (complex Cargo feature unification may be imperfect initially).
+Each native rule supports building primary artifacts, idiomatic test execution, structured results, cache integration (action + conservative snapshot), the configuration axes (per-rule interpretation), and sandboxed execution. Each does **not** wrap every tool workflow (`cargo publish` is not wrapped — use `anneal exec`) or every edge case (complex Cargo feature unification may be imperfect initially).
 
 ### 13.4 `cargo_workspace` mechanics
 
@@ -549,7 +549,7 @@ The value: **generated artifacts are routed into native ecosystem tools as if th
 
 ### 14.2 Storage and materialization
 
-Generated artifacts are content-addressed in the CAS and materialized to conventional paths under `.mybuild/gen/`. The source tree is not polluted; `.gitignore` has a single entry (`.mybuild/`). Because outputs are content-addressed, a generator whose output is semantically unchanged does not invalidate consumers; diamond dependencies share one generation.
+Generated artifacts are content-addressed in the CAS and materialized to conventional paths under `.anneal/gen/`. The source tree is not polluted; `.gitignore` has a single entry (`.anneal/`). Because outputs are content-addressed, a generator whose output is semantically unchanged does not invalidate consumers; diamond dependencies share one generation.
 
 ### 14.3 Milestone 1 cross-language demonstration: Nickel → TypeScript
 
@@ -562,10 +562,10 @@ A `nickel_eval` target produces a JSON artifact shaped as a generated native pac
 To resolve the apparent tension between "native tools keep working" and "raw `cargo build` isn't guaranteed":
 
 - **Pure native mode**: existing `cargo build`, `pnpm build` work unchanged — for projects with no generated inputs and no reliance on sandbox-controlled env.
-- **Materialized generated mode**: `mybuild materialize` writes generated native packages/files to stable paths so IDEs and native tools see them; native tooling then works against the materialized tree.
-- **Fully mediated mode**: builds relying on sandboxed env or generated inputs go through `mybuild`.
+- **Materialized generated mode**: `anneal materialize` writes generated native packages/files to stable paths so IDEs and native tools see them; native tooling then works against the materialized tree.
+- **Fully mediated mode**: builds relying on sandboxed env or generated inputs go through `anneal`.
 
-This makes the tradeoff explicit rather than contradictory. If a file exists at a generator-managed path that the system did not generate, the build **fails with a clear error** rather than silently overwriting (`--force` overrides; `mybuild adopt-paths` reconciles).
+This makes the tradeoff explicit rather than contradictory. If a file exists at a generator-managed path that the system did not generate, the build **fails with a clear error** rather than silently overwriting (`--force` overrides; `anneal adopt-paths` reconciles).
 
 ### 14.5 Next.js cacheability modes (v1.x)
 
@@ -587,7 +587,7 @@ The answer sorts cases into three levels of increasing cost. The first two need 
 
 **Level 1 — clean in-graph edge (no model change).** The generated file is content the *inner tool* reads at execution; Anneal never inspects it. It flows across the dependency edge as a content-addressed `Output`, materialized into the consumer. Caching and snapshots work normally — the artifact's digest is in the consumer's cache key, and the native tool's own dependency tracking (e.g. rustc's `include_str!` depinfo) keeps incremental builds correct. *Examples:* a JSON a Rust crate `include_str!`s; a generated `.rs` compiled by Cargo; a generated config routed into a pnpm workspace by relative path (plain-path — see `docs/pnpm-workspace.md` §4).
 
-**Level 2 — materialized-generated staged pass (no engine change, but a prior pass).** Anneal's *analysis* still never reads the generated content, but a *checked-in manifest the build depends on* must reflect it — so that manifest is regenerated against the materialized artifact in a prior pass, then the build runs against the now-real files (the **materialized generated mode**, [§14.4](#144-three-modes-of-native-tool-interop)). This is *not* a resolution-model change: each analysis stays pure; the pipeline merely runs in stages. *Examples:* a generated package whose *own dependency set* must be hoisted into `pnpm-lock.yaml` (regenerate the lockfile first); a generated `Cargo.toml` handled via an explicit `mybuild materialize` step.
+**Level 2 — materialized-generated staged pass (no engine change, but a prior pass).** Anneal's *analysis* still never reads the generated content, but a *checked-in manifest the build depends on* must reflect it — so that manifest is regenerated against the materialized artifact in a prior pass, then the build runs against the now-real files (the **materialized generated mode**, [§14.4](#144-three-modes-of-native-tool-interop)). This is *not* a resolution-model change: each analysis stays pure; the pipeline merely runs in stages. *Examples:* a generated package whose *own dependency set* must be hoisted into `pnpm-lock.yaml` (regenerate the lockfile first); a generated `Cargo.toml` handled via an explicit `anneal materialize` step.
 
 **Level 3 — deferred/dynamic analysis (a resolution-model change).** Anneal's *analysis itself* must read the generated content to shape the action graph — e.g. a generated `Cargo.toml` whose `members` determine which per-crate actions even exist, parsed *automatically* rather than via an explicit materialize step. Because analysis now depends on execution outputs, this collapses the analysis→execution phase separation and de-purifies analysis caching, demanding a DICE-style incremental engine. This is the heavyweight mechanism "wrap, don't decompose" was specifically chosen to avoid; it is deliberately out of scope (deferred indefinitely, possibly permanently).
 
@@ -603,12 +603,12 @@ Users move through stages: install alongside existing tooling (zero risk) → tr
 
 ### 15.2 Onboarding
 
-- `mybuild init` — interactive setup.
-- `mybuild init --detect` — scans for `Cargo.toml`, `pnpm-workspace.yaml`, etc., and scaffolds configuration without touching existing files.
+- `anneal init` — interactive setup.
+- `anneal init --detect` — scans for `Cargo.toml`, `pnpm-workspace.yaml`, etc., and scaffolds configuration without touching existing files.
 
 ### 15.3 Coexistence
 
-Anneal owns `.mybuild/`; it does not claim native tool directories. The three interop modes ([§14.4](#144-three-modes-of-native-tool-interop)) make coexistence explicit. Lockfile-as-IR and package-level ownership mean users don't restructure code or mirror dependency graphs into BUILD files.
+Anneal owns `.anneal/`; it does not claim native tool directories. The three interop modes ([§14.4](#144-three-modes-of-native-tool-interop)) make coexistence explicit. Lockfile-as-IR and package-level ownership mean users don't restructure code or mirror dependency graphs into BUILD files.
 
 ### 15.4 Deferred migration tooling
 
@@ -634,7 +634,7 @@ Registry note: the bare `anneal` names on crates.io and npm are taken by unrelat
 
 ### 16.3 Versioning
 
-Semantic versioning post-1.0 (major = breaking user-visible API; minor = additive; patch = fixes). A `.mybuild-version` launcher convention (rustup-style) is planned; v1 may ship without the launcher but the CLI is structured so adding it is non-breaking. Long-term support for major versions.
+Semantic versioning post-1.0 (major = breaking user-visible API; minor = additive; patch = fixes). A `.anneal-version` launcher convention (rustup-style) is planned; v1 may ship without the launcher but the CLI is structured so adding it is non-breaking. Long-term support for major versions.
 
 ---
 
@@ -642,7 +642,7 @@ Semantic versioning post-1.0 (major = breaking user-visible API; minor = additiv
 
 ### 17.1 Structured errors
 
-Errors are structured values, not strings: stable code (`MB0023`), category, source location pointing at user-written content (not internal rule library code), causal chain, short message, and doc-linked long-form explanation (`mybuild explain MB0023`). Source locations are preserved through rule evaluation. Multiple independent errors report together; causally-related ones may collapse (with `--verbose` to expand). CLI display is Rust-compiler-style. The structured-error architecture is a commitment; message prose iterates indefinitely.
+Errors are structured values, not strings: stable code (`MB0023`), category, source location pointing at user-written content (not internal rule library code), causal chain, short message, and doc-linked long-form explanation (`anneal explain MB0023`). Source locations are preserved through rule evaluation. Multiple independent errors report together; causally-related ones may collapse (with `--verbose` to expand). CLI display is Rust-compiler-style. The structured-error architecture is a commitment; message prose iterates indefinitely.
 
 ### 17.2 Diagnostics channel
 
@@ -750,7 +750,7 @@ register_toolchain(name = "node_20", version = "20.10.0")
 set_default_platform("linux-x86_64")
 ```
 
-Plus an optional, gitignored, user-level `.mybuild/config.toml` for machine-specific settings. Exact toolchain-registration API finalized during implementation.
+Plus an optional, gitignored, user-level `.anneal/config.toml` for machine-specific settings. Exact toolchain-registration API finalized during implementation.
 
 ---
 

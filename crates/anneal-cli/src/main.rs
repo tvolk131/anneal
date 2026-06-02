@@ -1,4 +1,4 @@
-//! `mybuild` — the Anneal command-line interface (§18).
+//! `anneal` — the Anneal command-line interface (§18).
 //!
 //! Deliberately a **thin coordinator** (the plan's crate decomposition allows this one
 //! crate to be a coordinator): it parses flags, builds a [`Configuration`] from the
@@ -25,7 +25,7 @@ use clap::{Args, Parser, Subcommand};
 
 /// Anneal — a native-tool-preserving build system.
 #[derive(Parser)]
-#[command(name = "mybuild", version, about)]
+#[command(name = "anneal", version, about)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -161,8 +161,8 @@ fn analyze_and_run(
     let label = Label::parse(target).map_err(|e| format!("invalid target {target:?}: {e}"))?;
     let registry = builtin_rules();
     let graph = load_package(root, label.package(), &registry).map_err(|e| e.to_string())?;
-    let exec = LocalExecutor::new(root.join(".mybuild"))
-        .map_err(|e| format!("opening .mybuild store: {e}"))?;
+    let exec = LocalExecutor::new(root.join(".anneal"))
+        .map_err(|e| format!("opening .anneal store: {e}"))?;
     let analyzed = Analyzer::new(&graph, &registry, config, root, exec.cas())
         .analyze(&label)
         .map_err(|e| e.to_string())?;
