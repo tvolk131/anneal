@@ -31,6 +31,11 @@ mod executor;
 mod materializer;
 mod sandbox;
 mod verify;
+// The warm-sandbox sync engine (docs/sandboxing.md §5). Landed and unit-tested on its
+// own; the executor wiring (warm-dir lifecycle, commit record, fallback) is the next
+// increment, at which point this `allow` comes off.
+#[allow(dead_code)]
+mod warm;
 
 pub use action::{Action, ActionBuilder, CachePolicy, ExecutionMode, Input, InputSource};
 pub use cache::action_digest;
