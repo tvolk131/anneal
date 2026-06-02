@@ -30,8 +30,10 @@ mod eval;
 mod graph;
 mod validate;
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
+use anneal_core::Label;
 use anneal_rules::RuleRegistry;
 
 pub use error::LoadError;
@@ -66,4 +68,38 @@ pub fn load_package(
         .map_err(|e| LoadError::io(format!("reading {}: {e}", path.display())))?;
     let filename = format!("{package}/BUILD");
     load_package_str(package, &filename, &source, registry)
+}
+
+/// Load the transitive **package closure** needed to analyze `target`.
+///
+/// Starts from `target`'s package, then loads any package introduced by a
+/// cross-package dependency edge, repeating until the closure is covered, merging
+/// every package's targets into one [`TargetGraph`]. Only **reachable** packages are
+/// loaded — building one target in a large monorepo does not parse every `BUILD` file
+/// (§4: cross-package on-demand loading is a loader concern; analysis stays a
+/// single-graph consumer). The requested target's existence is the analyzer's check.
+pub fn load_closure(
+    workspace_root: &Path,
+    target: &Label,
+    registry: &RuleRegistry,
+) -> Result<TargetGraph, LoadError> {
+    let mut combined = TargetGraph::default();
+    let mut loaded: BTreeSet<String> = BTreeSet::new();
+    let mut pending: Vec<String> = vec![target.package().to_owned()];
+
+    while let Some(package) = pending.pop() {
+        if !loaded.insert(package.clone()) {
+            continue; // already merged (a package reached by more than one edge)
+        }
+        let package_graph = load_package(workspace_root, &package, registry)?;
+        for decl in package_graph.into_decls() {
+            for dep in &decl.deps {
+                if !loaded.contains(dep.package()) {
+                    pending.push(dep.package().to_owned());
+                }
+            }
+            combined.insert(decl);
+        }
+    }
+    Ok(combined)
 }

@@ -65,8 +65,8 @@
         `status`. (`affected`/`why` need multi-package loading.)
   - [ ] **Structured per-test output** in `test` (libtest/JSON parse via `anneal-test`) — currently
         pass/fail per test action only.
-  - [ ] **Multi-package targets** — the CLI loads only the package named in the label (single-package
-        loader); cross-package deps need the multi-package loader.
+  - [x] **Multi-package targets** — the CLI now loads the target's transitive package closure
+        (`load_closure`), so cross-package deps build.
   - [ ] **`materialize`** (§14.4) — write generated native packages/files to stable on-disk paths for IDEs and
         native tooling. Also the mechanism for the §14.6 **staged pass** (generated `Cargo.toml`, etc.).
   - [ ] **`exec`** escape hatch (§7.6) — run an arbitrary command in a sandbox (permissive by default;
@@ -111,8 +111,11 @@
 
 ## Loader / analysis infrastructure
 
-- [ ] **Multi-package workspace loading** — load several BUILD files into one TargetGraph (currently single
-      package). Prereq for cross-package deps, `affected`, and the ownership `owner(path)` walk.
+- [x] **Multi-package workspace loading** — `load_closure(root, target, registry)` walks the transitive
+      package closure from a target (loads only reachable packages, merges into one TargetGraph); the analyzer
+      is unchanged (single-graph consumer). The CLI uses it, so cross-package targets build. Remaining: the
+      ownership `owner(path)` walk + `affected` build on this (Phase 5); whole-workspace enumeration (for
+      `query //...`) is separate from this on-demand closure.
 - [ ] **`load()` of `*.bzl` libraries** (§4.4) — shared Starlark, reserved but not implemented.
 - [ ] **Restricted user-facing subset linter** (§4.2).
 - [ ] **starlark-rust monorepo-scale perf** validation (Spike A deferred check, §22).

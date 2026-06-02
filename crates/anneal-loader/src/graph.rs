@@ -49,4 +49,10 @@ impl TargetGraph {
     pub(crate) fn insert(&mut self, decl: TargetDecl) {
         self.targets.insert(decl.label.clone(), decl);
     }
+
+    /// Consume the graph, yielding its targets. Used by the workspace loader to merge
+    /// per-package graphs into one transitive-closure graph.
+    pub(crate) fn into_decls(self) -> impl Iterator<Item = TargetDecl> {
+        self.targets.into_values()
+    }
 }

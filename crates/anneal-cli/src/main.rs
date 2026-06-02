@@ -19,7 +19,7 @@ use anneal_core::{
     AxisValues, Configuration, Coverage, DebugInfo, Label, Lto, OptLevel, Platform, Sanitizer,
 };
 use anneal_exec::{Action, ActionResult, LocalExecutor};
-use anneal_loader::load_package;
+use anneal_loader::load_closure;
 use anneal_rules::builtin_rules;
 use clap::{Args, Parser, Subcommand};
 
@@ -160,7 +160,8 @@ fn analyze_and_run(
 ) -> Result<(Vec<Action>, Vec<ActionResult>, LocalExecutor), String> {
     let label = Label::parse(target).map_err(|e| format!("invalid target {target:?}: {e}"))?;
     let registry = builtin_rules();
-    let graph = load_package(root, label.package(), &registry).map_err(|e| e.to_string())?;
+    // Load the target's transitive package closure (cross-package deps included).
+    let graph = load_closure(root, &label, &registry).map_err(|e| e.to_string())?;
     let exec = LocalExecutor::new(root.join(".anneal"))
         .map_err(|e| format!("opening .anneal store: {e}"))?;
     let analyzed = Analyzer::new(&graph, &registry, config, root, exec.cas())
