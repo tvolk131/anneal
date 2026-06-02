@@ -3,7 +3,7 @@
 //! Milestone-1 scope: [`owner`] (the file → package map) and [`affected`] (the
 //! reverse-dependency closure of a change). `why` arrives next.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 use anneal_core::Label;
@@ -115,6 +115,67 @@ pub fn affected(workspace_root: &Path, graph: &TargetGraph, changed: &[PathBuf])
         workspace_wide: false,
         unowned: Vec::new(),
     }
+}
+
+/// A shortest forward-dependency path from `from` to **any** target in `targets`, or
+/// `None` if none is reachable. The path includes both endpoints (`from` first, the
+/// matched target last); if `from` is itself in `targets`, the path is just `[from]`.
+///
+/// **Deterministic and stable under cosmetic dep reordering:** the BFS explores each
+/// node's dependencies in **sorted-label order** and uses maps only for membership /
+/// parent lookup (never to *order* exploration), so the chosen path is independent of
+/// declaration order and `HashMap` iteration order. Among equal-length paths, the one
+/// through the earlier-sorting dependency wins.
+pub fn shortest_path(
+    graph: &TargetGraph,
+    from: &Label,
+    targets: &BTreeSet<Label>,
+) -> Option<Vec<Label>> {
+    if targets.contains(from) {
+        return Some(vec![from.clone()]);
+    }
+    let mut parent: HashMap<Label, Label> = HashMap::new();
+    let mut visited: BTreeSet<Label> = BTreeSet::new();
+    let mut queue: VecDeque<Label> = VecDeque::new();
+    visited.insert(from.clone());
+    queue.push_back(from.clone());
+
+    while let Some(node) = queue.pop_front() {
+        let Some(decl) = graph.get(&node) else { continue };
+        let mut deps: Vec<&Label> = decl.deps.iter().collect();
+        deps.sort();
+        for dep in deps {
+            if !visited.insert(dep.clone()) {
+                continue;
+            }
+            parent.insert(dep.clone(), node.clone());
+            if targets.contains(dep) {
+                return Some(reconstruct(&parent, from, dep));
+            }
+            queue.push_back(dep.clone());
+        }
+    }
+    None
+}
+
+/// A shortest dependency path from `from` to `to` (`why <from> <to>`), or `None`.
+pub fn why(graph: &TargetGraph, from: &Label, to: &Label) -> Option<Vec<Label>> {
+    let mut target = BTreeSet::new();
+    target.insert(to.clone());
+    shortest_path(graph, from, &target)
+}
+
+/// Reconstruct the path `from → … → to` by following parent pointers back from `to`.
+fn reconstruct(parent: &HashMap<Label, Label>, from: &Label, to: &Label) -> Vec<Label> {
+    let mut path = vec![to.clone()];
+    let mut cur = to.clone();
+    while &cur != from {
+        let p = parent[&cur].clone();
+        path.push(p.clone());
+        cur = p;
+    }
+    path.reverse();
+    path
 }
 
 #[cfg(test)]
@@ -239,5 +300,70 @@ mod affected_tests {
         assert_eq!(result.unowned, vec![PathBuf::from("flake.nix")]);
         // Every target is affected.
         assert_eq!(result.targets.len(), 4);
+    }
+}
+
+#[cfg(test)]
+mod why_tests {
+    use super::*;
+    use anneal_loader::load_workspace;
+    use anneal_rules::builtin_rules;
+
+    fn label(s: &str) -> Label {
+        Label::parse(s).unwrap()
+    }
+
+    fn path_str(graph: &TargetGraph, from: &str, to: &str) -> Option<Vec<String>> {
+        why(graph, &label(from), &label(to)).map(|p| p.iter().map(|l| l.to_string()).collect())
+    }
+
+    #[test]
+    fn finds_a_path_and_reports_none_when_unreachable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let write = |pkg: &str, build: &str| {
+            let dir = tmp.path().join(pkg);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("BUILD"), build).unwrap();
+        };
+        write("base", "genrule(name = \"base\", outs = [\"b\"], cmd = \"echo > $(OUTS)\")\n");
+        write("lib", "genrule(name = \"lib\", deps = [\"//base:base\"], outs = [\"l\"], cmd = \"echo > $(OUTS)\")\n");
+        write("app", "genrule(name = \"app\", deps = [\"//lib:lib\"], outs = [\"a\"], cmd = \"echo > $(OUTS)\")\n");
+        write("other", "genrule(name = \"other\", outs = [\"o\"], cmd = \"echo > $(OUTS)\")\n");
+        let graph = load_workspace(tmp.path(), &builtin_rules()).unwrap();
+
+        assert_eq!(
+            path_str(&graph, "//app:app", "//base:base"),
+            Some(vec!["//app:app".into(), "//lib:lib".into(), "//base:base".into()]),
+        );
+        // No path to an independent target.
+        assert_eq!(path_str(&graph, "//app:app", "//other:other"), None);
+        // A target trivially reaches itself.
+        assert_eq!(path_str(&graph, "//app:app", "//app:app"), Some(vec!["//app:app".into()]));
+    }
+
+    #[test]
+    fn tie_break_is_deterministic_via_sorted_labels() {
+        // `app` reaches `base` through two equal-length routes (`ma` and `mz`). The
+        // sorted-label rule must always pick the one through the earlier label (`ma`),
+        // regardless of the order deps are declared in the BUILD file.
+        let tmp = tempfile::tempdir().unwrap();
+        let write = |pkg: &str, build: &str| {
+            let dir = tmp.path().join(pkg);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("BUILD"), build).unwrap();
+        };
+        write("base", "genrule(name = \"base\", outs = [\"b\"], cmd = \"echo > $(OUTS)\")\n");
+        write("ma", "genrule(name = \"m\", deps = [\"//base:base\"], outs = [\"x\"], cmd = \"echo > $(OUTS)\")\n");
+        write("mz", "genrule(name = \"m\", deps = [\"//base:base\"], outs = [\"x\"], cmd = \"echo > $(OUTS)\")\n");
+        // Declare deps in NON-sorted order (mz before ma) to prove the result is
+        // independent of declaration order.
+        write("app", "genrule(name = \"app\", deps = [\"//mz:m\", \"//ma:m\"], outs = [\"a\"], cmd = \"echo > $(OUTS)\")\n");
+        let graph = load_workspace(tmp.path(), &builtin_rules()).unwrap();
+
+        assert_eq!(
+            path_str(&graph, "//app:app", "//base:base"),
+            Some(vec!["//app:app".into(), "//ma:m".into(), "//base:base".into()]),
+            "sorted-label tie-break picks the `ma` route despite `mz` being declared first",
+        );
     }
 }

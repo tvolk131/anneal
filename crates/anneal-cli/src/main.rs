@@ -12,6 +12,7 @@
 //! commands are the next increment (§11.3). All logic lives in the libraries; this file
 //! only orchestrates and formats.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
@@ -51,6 +52,18 @@ enum Command {
         /// The git ref to diff against (e.g. `origin/main`, a commit SHA).
         #[arg(long)]
         since: String,
+    },
+    /// Explain a dependency relationship: the shortest path from one target to
+    /// another (`why <from> <to>`), or why a target is affected by a change
+    /// (`why <from> --since <ref>`).
+    Why {
+        /// The target to explain.
+        from: String,
+        /// Show the dependency path to this target.
+        to: Option<String>,
+        /// Instead, explain why `from` is affected by changes since this ref.
+        #[arg(long, conflicts_with = "to")]
+        since: Option<String>,
     },
 }
 
@@ -103,7 +116,84 @@ fn run(cli: Cli) -> Result<i32, String> {
         Command::Build { target } => build(&target, &config, &root),
         Command::Test { target } => test(&target, &config, &root),
         Command::Affected { since } => affected(&since, &root),
+        Command::Why { from, to, since } => why(&from, to.as_deref(), since.as_deref(), &root),
     }
+}
+
+/// Explain a dependency relationship (§11.3). With `<to>`: the shortest path from `from`
+/// to `to`. With `--since`: why `from` is affected by changes since the ref (the path to
+/// the nearest changed target in `from`'s dependency closure). Uses `from`'s forward
+/// closure only — no whole-workspace load.
+fn why(from: &str, to: Option<&str>, since: Option<&str>, root: &Path) -> Result<i32, String> {
+    let from_label = Label::parse(from).map_err(|e| format!("invalid target {from:?}: {e}"))?;
+    let registry = builtin_rules();
+    let graph = load_closure(root, &from_label, &registry).map_err(|e| e.to_string())?;
+
+    match (to, since) {
+        (Some(to), _) => {
+            let to_label = Label::parse(to).map_err(|e| format!("invalid target {to:?}: {e}"))?;
+            match anneal_query::why(&graph, &from_label, &to_label) {
+                Some(path) => print_path(&path),
+                None => println!("no path from {from_label} to {to_label}"),
+            }
+            Ok(0)
+        }
+        (None, Some(since)) => why_affected(&graph, &from_label, since, root),
+        (None, None) => Err("specify a <to> target or --since <ref>".to_owned()),
+    }
+}
+
+/// `why <from> --since <ref>`: the path from `from` to the nearest changed target.
+fn why_affected(
+    graph: &anneal_loader::TargetGraph,
+    from: &Label,
+    since: &str,
+    root: &Path,
+) -> Result<i32, String> {
+    let changed = git_changed_files(root, since)?;
+    let mut changed_packages: BTreeSet<String> = BTreeSet::new();
+    let mut unowned: Vec<PathBuf> = Vec::new();
+    for path in &changed {
+        match anneal_query::owner(root, path) {
+            Some(pkg) => {
+                changed_packages.insert(pkg);
+            }
+            None => unowned.push(path.clone()),
+        }
+    }
+    if !unowned.is_empty() {
+        println!(
+            "{from} is affected: an unowned file changed (e.g. {}), so the whole workspace is \
+             conservatively affected",
+            unowned[0].display()
+        );
+        return Ok(0);
+    }
+
+    // The changed targets within `from`'s dependency closure.
+    let changed_targets: BTreeSet<Label> = graph
+        .targets()
+        .filter(|t| changed_packages.contains(t.label.package()))
+        .map(|t| t.label.clone())
+        .collect();
+
+    match anneal_query::shortest_path(graph, from, &changed_targets) {
+        Some(path) => {
+            println!("{from} is affected by changes since {since}:");
+            print_path(&path);
+            Ok(0)
+        }
+        None => {
+            println!("{from} is not affected by changes since {since}");
+            Ok(0)
+        }
+    }
+}
+
+/// Render a dependency path as `a → b → c`.
+fn print_path(path: &[Label]) {
+    let rendered: Vec<String> = path.iter().map(|l| l.to_string()).collect();
+    println!("  {}", rendered.join(" → "));
 }
 
 /// Print the targets affected by changes since `since` (§11.3): `git diff` → owning

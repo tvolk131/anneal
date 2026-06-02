@@ -80,3 +80,73 @@ fn unknown_target_and_bad_flags_exit_2() {
     let bad_flag = anneal(ws.path(), &["build", "//pkg:gen", "--opt-level", "bogus"]);
     assert_eq!(bad_flag.status.code(), Some(2), "an invalid axis value is a usage error");
 }
+
+/// A `base → lib → app` chain across three packages, with a tracked file in `base`.
+fn chain_workspace() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let write = |pkg: &str, build: &str| {
+        let dir = tmp.path().join(pkg);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("BUILD"), build).unwrap();
+    };
+    write("base", "genrule(name = \"base\", outs = [\"b\"], cmd = \"echo > $(OUTS)\")\n");
+    write("lib", "genrule(name = \"lib\", deps = [\"//base:base\"], outs = [\"l\"], cmd = \"echo > $(OUTS)\")\n");
+    write("app", "genrule(name = \"app\", deps = [\"//lib:lib\"], outs = [\"a\"], cmd = \"echo > $(OUTS)\")\n");
+    std::fs::write(tmp.path().join("base/data.txt"), "orig").unwrap();
+    tmp
+}
+
+#[test]
+fn why_shows_a_path_and_requires_a_query() {
+    let ws = chain_workspace();
+    let out = anneal(ws.path(), &["why", "//app:app", "//base:base"]);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("//app:app → //lib:lib → //base:base"),
+        "stdout:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    // No path between unrelated targets is reported, not an error.
+    let none = anneal(ws.path(), &["why", "//base:base", "//app:app"]);
+    assert!(String::from_utf8_lossy(&none.stdout).contains("no path"));
+    // Neither <to> nor --since is a usage error.
+    let bad = anneal(ws.path(), &["why", "//app:app"]);
+    assert_eq!(bad.status.code(), Some(2));
+}
+
+#[test]
+fn affected_and_why_since_track_a_git_change() {
+    let ws = chain_workspace();
+    let root = ws.path();
+    let git = |args: &[&str]| {
+        let ok = Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t", "-c", "init.defaultBranch=main"])
+            .args(args)
+            .current_dir(root)
+            .status()
+            .expect("git available")
+            .success();
+        assert!(ok, "git {args:?} failed");
+    };
+    git(&["init", "-q"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "base"]);
+    // Modify a tracked file in `base`.
+    std::fs::write(root.join("base/data.txt"), "changed").unwrap();
+
+    // affected --since lists base and everything that transitively depends on it.
+    let aff = anneal(root, &["affected", "--since", "HEAD"]);
+    assert!(aff.status.success(), "stderr: {}", String::from_utf8_lossy(&aff.stderr));
+    let aff_out = String::from_utf8_lossy(&aff.stdout);
+    for label in ["//app:app", "//base:base", "//lib:lib"] {
+        assert!(aff_out.contains(label), "affected should include {label}; got:\n{aff_out}");
+    }
+
+    // why --since explains app's affectedness with the path to the change.
+    let why = anneal(root, &["why", "//app:app", "--since", "HEAD"]);
+    assert!(
+        String::from_utf8_lossy(&why.stdout).contains("//app:app → //lib:lib → //base:base"),
+        "stdout:\n{}",
+        String::from_utf8_lossy(&why.stdout)
+    );
+}

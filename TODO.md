@@ -53,9 +53,10 @@
 - [x] **`affected --since=<commit>`** (§11.3) — the primary CI primitive. `owner(path)` + whole-workspace
       load + reverse-dependency closure (`anneal-query`); `anneal affected --since <ref>`. Package granularity;
       unowned change → conservative workspace-wide.
-- [ ] **`why <from> <to>` + `why <target> --since`** (§11.3) — shortest dependency path (2a), explaining an
-      affected result. **Determinism:** BFS exploring deps in **sorted-label order** (no HashMap-order
-      dependence; stable under cosmetic dep reordering); first-reached path wins.
+- [x] **`why <from> <to>` + `why <target> --since`** (§11.3) — shortest dependency path (2a):
+      `anneal-query::shortest_path`/`why` + `anneal why`. Deterministic via **sorted-label BFS** (stable under
+      cosmetic dep reordering; no HashMap-order dependence), tested. Uses `from`'s forward closure, not a
+      whole-workspace load.
 - [ ] **`why --all` — connecting subgraph** (2c, deferred): the union of *all* paths from A to B as a DAG
       (Bazel's `allpaths`) — complete and graph-size-bounded (vs. the combinatorial explosion of enumerating
       every path), for dependency-entanglement analysis. Needs graph rendering (tree-indent or dot). Worth doing,
