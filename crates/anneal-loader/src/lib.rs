@@ -103,3 +103,64 @@ pub fn load_closure(
     }
     Ok(combined)
 }
+
+/// Load **every** package in the workspace into one [`TargetGraph`] by walking the tree
+/// for `BUILD` files.
+///
+/// Unlike [`load_closure`] (on-demand from a single target), this enumerates the *whole*
+/// workspace — required for reverse-dependency queries like `affected`, which must know
+/// every target that *could* depend on a changed one (§11.3). Directories like `.git`,
+/// the `.anneal` store, `target/`, and `node_modules` are skipped.
+pub fn load_workspace(
+    workspace_root: &Path,
+    registry: &RuleRegistry,
+) -> Result<TargetGraph, LoadError> {
+    let mut packages = Vec::new();
+    collect_packages(workspace_root, Path::new(""), &mut packages)?;
+
+    let mut combined = TargetGraph::default();
+    for package in packages {
+        for decl in load_package(workspace_root, &package, registry)?.into_decls() {
+            combined.insert(decl);
+        }
+    }
+    Ok(combined)
+}
+
+/// Directories never descended into while scanning for `BUILD` files.
+const WORKSPACE_IGNORED_DIRS: &[&str] = &[".git", ".hg", ".svn", ".anneal", "target", "node_modules"];
+
+/// Recursively collect package paths (directories containing a `BUILD` file), relative to
+/// the workspace root and `/`-separated. Symlinked directories are not followed.
+fn collect_packages(root: &Path, rel: &Path, out: &mut Vec<String>) -> Result<(), LoadError> {
+    let dir = root.join(rel);
+    if dir.join("BUILD").is_file() {
+        out.push(package_path(rel));
+    }
+    let entries =
+        std::fs::read_dir(&dir).map_err(|e| LoadError::io(format!("scanning {}: {e}", dir.display())))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| LoadError::io(format!("scanning {}: {e}", dir.display())))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| LoadError::io(format!("scanning {}: {e}", dir.display())))?;
+        // `file_type` does not follow symlinks, so a symlinked dir reports as a symlink
+        // (not a dir) and is skipped — avoiding symlink cycles.
+        if file_type.is_dir() {
+            let name = entry.file_name();
+            if WORKSPACE_IGNORED_DIRS.iter().any(|ig| std::ffi::OsStr::new(ig) == name) {
+                continue;
+            }
+            collect_packages(root, &rel.join(name), out)?;
+        }
+    }
+    Ok(())
+}
+
+/// A relative path as a `/`-separated package path (empty string for the root package).
+fn package_path(rel: &Path) -> String {
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}

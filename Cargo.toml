@@ -11,6 +11,7 @@ members = [
     "crates/anneal-analysis",
     "crates/anneal-snapshot",
     "crates/anneal-test",
+    "crates/anneal-query",
     "crates/anneal-cli",
 ]
 

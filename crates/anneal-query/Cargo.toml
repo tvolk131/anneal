@@ -1,0 +1,12 @@
+[package]
+name = "anneal-query"
+version.workspace = true
+edition.workspace = true
+description = "Graph queries: ownership, affected-target selection, and `why` (§11)."
+
+[dependencies]
+anneal-core = { path = "../anneal-core" }
+anneal-loader = { path = "../anneal-loader" }
+
+[dev-dependencies]
+tempfile = "3"
