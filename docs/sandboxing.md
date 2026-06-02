@@ -170,9 +170,23 @@ Plus the usual: explicit `anneal clean`, and **eviction** (each warm dir is ≈ 
 
 ### 5.5 The sync — a delete/add/replace diff over declared inputs only
 
-The warm dir holds *last* build's sources; the new build must see *this* build's. We
-reconcile the new **declared input set** against the recorded `.anneal-inputs` manifest
-(`path → content-digest`), touching **only declared input paths — never `target/`**:
+The warm dir holds *last* build's sources; the new build must see *this* build's. **The
+diff runs once, at reuse time** (the first step of a build that reuses the sandbox) — not
+continuously, and there is no filesystem watcher.
+
+Two clarifications about *what* is compared and *where edits come from*:
+
+- Edits originate in the **workspace** (the developer's repo), never in the sandbox. The
+  warm dir at `.anneal/warm/<key>/` is Anneal-managed and only mutated by this sync; the
+  developer never hand-edits it. The diff *propagates* a workspace edit into the sandbox.
+- It is a **`path → content-digest` map comparison, not a byte/tree diff.** The *new* side
+  is the freshly-hashed declared inputs that analysis computes anyway (for the action
+  cache key), so it is ~free; the *old* side is the `.anneal-inputs` manifest written after
+  the last build. A changed file is re-materialized *whole* (cargo recompiles at file
+  granularity regardless).
+
+We reconcile the new declared input set against the manifest, touching **only declared
+input paths — never `target/`**:
 
 | Manifest vs. new build | Action | Why |
 |---|---|---|
