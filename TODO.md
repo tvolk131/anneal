@@ -56,10 +56,17 @@
 
 ## CLI
 
-- [ ] **`mybuild` binary** (§18) — everything is currently driven via the Rust library/tests.
-  - [ ] build / run / test / check; query / aquery / affected / why; cache push/info/clean; status / version.
-  - [ ] **Config selection flags** (§6.6): `--target`, `--opt-level`, `--lto`, `--sanitizer`, `--debug-info`,
-        `--coverage` — currently a `Configuration` is hand-built in tests; no way for a user to pick one.
+- [x] **`mybuild` binary** (§18) — crate `anneal-cli`, thin orchestration over
+      `load_package → Analyzer → execute_graph`. **Done so far:** `build` and `test` (single package;
+      `test` summarizes via the rule-agnostic `ANNEAL_TEST_EXIT` marker), `--version`, clean exit codes
+      (0 ok / 1 failed / 2 usage), and **config-selection flags** (§6.6): `--platform`, `--opt-level`,
+      `--lto`, `--debug-info`, `--sanitizer`, `--coverage`.
+  - [ ] **`run` / `check`**; `query` / `aquery` / **`affected` / `why`** (Phase 5); `cache` push/info/clean;
+        `status`. (`affected`/`why` need multi-package loading.)
+  - [ ] **Structured per-test output** in `test` (libtest/JSON parse via `anneal-test`) — currently
+        pass/fail per test action only.
+  - [ ] **Multi-package targets** — the CLI loads only the package named in the label (single-package
+        loader); cross-package deps need the multi-package loader.
   - [ ] **`materialize`** (§14.4) — write generated native packages/files to stable on-disk paths for IDEs and
         native tooling. Also the mechanism for the §14.6 **staged pass** (generated `Cargo.toml`, etc.).
   - [ ] **`exec`** escape hatch (§7.6) — run an arbitrary command in a sandbox (permissive by default;

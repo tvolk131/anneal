@@ -1,0 +1,278 @@
+//! `mybuild` — the Anneal command-line interface (§18).
+//!
+//! Deliberately a **thin coordinator** (the plan's crate decomposition allows this one
+//! crate to be a coordinator): it parses flags, builds a [`Configuration`] from the
+//! universal-axis selectors (§6.6), and drives the existing pipeline —
+//! `load_package → Analyzer → LocalExecutor::execute_graph` — then reports.
+//!
+//! # Milestone-1 scope
+//!
+//! Two commands, `build` and `test`, over a **single package** (the one named by the
+//! target label) — multi-package workspace loading and the `query`/`affected`/`why`
+//! commands are the next increment (§11.3). All logic lives in the libraries; this file
+//! only orchestrates and formats.
+
+use std::path::{Path, PathBuf};
+
+use anneal_analysis::Analyzer;
+use anneal_core::{
+    AxisValues, Configuration, Coverage, DebugInfo, Label, Lto, OptLevel, Platform, Sanitizer,
+};
+use anneal_exec::{Action, ActionResult, LocalExecutor};
+use anneal_loader::load_package;
+use anneal_rules::builtin_rules;
+use clap::{Args, Parser, Subcommand};
+
+/// Anneal — a native-tool-preserving build system.
+#[derive(Parser)]
+#[command(name = "mybuild", version, about)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+    #[command(flatten)]
+    config: ConfigArgs,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Build a target: analyze it and run its action graph.
+    Build {
+        /// The target label, e.g. `//app:app`.
+        target: String,
+    },
+    /// Build a target and summarize its test results.
+    Test {
+        /// The target label, e.g. `//app:app`.
+        target: String,
+    },
+}
+
+/// The universal configuration axes (§6.2, §6.6), selectable per invocation. Each is
+/// global so it can appear before or after the subcommand.
+#[derive(Args)]
+struct ConfigArgs {
+    /// Workspace root (defaults to the current directory).
+    #[arg(long, global = true, value_name = "DIR")]
+    workspace_root: Option<PathBuf>,
+    /// Target platform triple (§6.6 `--target`). Defaults to a host placeholder.
+    #[arg(long, global = true, value_name = "TRIPLE")]
+    platform: Option<String>,
+    /// `debug` | `release` | `release-with-debuginfo`.
+    #[arg(long, global = true, value_name = "LEVEL")]
+    opt_level: Option<String>,
+    /// `off` | `thin` | `full`.
+    #[arg(long, global = true, value_name = "MODE")]
+    lto: Option<String>,
+    /// `none` | `line-tables-only` | `full`.
+    #[arg(long, global = true, value_name = "LEVEL")]
+    debug_info: Option<String>,
+    /// `none` | `address` | `thread` | `memory` | `undefined`.
+    #[arg(long, global = true, value_name = "KIND")]
+    sanitizer: Option<String>,
+    /// `on` | `off`.
+    #[arg(long, global = true, value_name = "STATE")]
+    coverage: Option<String>,
+}
+
+fn main() {
+    let cli = Cli::parse();
+    let code = match run(cli) {
+        Ok(code) => code,
+        Err(message) => {
+            eprintln!("error: {message}");
+            2
+        }
+    };
+    std::process::exit(code);
+}
+
+fn run(cli: Cli) -> Result<i32, String> {
+    let root = match &cli.config.workspace_root {
+        Some(dir) => dir.clone(),
+        None => std::env::current_dir().map_err(|e| format!("cannot read current dir: {e}"))?,
+    };
+    let config = build_config(&cli.config)?;
+    match cli.command {
+        Command::Build { target } => build(&target, &config, &root),
+        Command::Test { target } => test(&target, &config, &root),
+    }
+}
+
+/// Analyze and execute a target's action graph; return the process exit code.
+fn build(target: &str, config: &Configuration, root: &Path) -> Result<i32, String> {
+    let (actions, results, exec) = analyze_and_run(target, config, root)?;
+    report_actions(&actions, &results);
+
+    let failed = results.iter().filter(|r| !r.success()).count();
+    let cached = results.iter().filter(|r| r.cache_hit).count();
+    let _ = exec; // keep the executor (and its stores) alive through reporting
+    if failed > 0 {
+        eprintln!("build FAILED — {failed}/{} action(s) failed", actions.len());
+        Ok(1)
+    } else {
+        println!("build ok — {} action(s) ({cached} cached)", actions.len());
+        Ok(0)
+    }
+}
+
+/// Build, then summarize the actions that produced a test result (`results.txt`).
+fn test(target: &str, config: &Configuration, root: &Path) -> Result<i32, String> {
+    let (actions, results, exec) = analyze_and_run(target, config, root)?;
+    report_actions(&actions, &results);
+
+    // Test actions are rule-agnostic: any action that captured `results.txt` and wrote
+    // the `ANNEAL_TEST_EXIT` marker (cargo's test-run, pnpm's test kind). Structured
+    // per-case parsing is a later increment; here we report pass/fail per test action.
+    let mut passed = 0usize;
+    let mut failed = 0usize;
+    let mut saw_test = false;
+    for (action, result) in actions.iter().zip(&results) {
+        if let Some(ok) = test_outcome(&exec, result) {
+            saw_test = true;
+            if ok {
+                passed += 1;
+            } else {
+                failed += 1;
+                println!("  FAIL  {}", action.name());
+            }
+        }
+    }
+
+    // A non-zero action exit (a build/compile failure) also fails the run.
+    let action_failures = results.iter().filter(|r| !r.success()).count();
+    if !saw_test && action_failures == 0 {
+        println!("no test targets found for {target}");
+        return Ok(0);
+    }
+    println!("tests: {passed} passed, {failed} failed");
+    if failed > 0 || action_failures > 0 {
+        Ok(1)
+    } else {
+        Ok(0)
+    }
+}
+
+/// The shared pipeline: parse the label, load its package, analyze, execute the graph.
+fn analyze_and_run(
+    target: &str,
+    config: &Configuration,
+    root: &Path,
+) -> Result<(Vec<Action>, Vec<ActionResult>, LocalExecutor), String> {
+    let label = Label::parse(target).map_err(|e| format!("invalid target {target:?}: {e}"))?;
+    let registry = builtin_rules();
+    let graph = load_package(root, label.package(), &registry).map_err(|e| e.to_string())?;
+    let exec = LocalExecutor::new(root.join(".mybuild"))
+        .map_err(|e| format!("opening .mybuild store: {e}"))?;
+    let analyzed = Analyzer::new(&graph, &registry, config, root, exec.cas())
+        .analyze(&label)
+        .map_err(|e| e.to_string())?;
+    let actions: Vec<Action> = analyzed.actions().cloned().collect();
+    let results = exec.execute_graph(&actions).map_err(|e| e.to_string())?;
+    Ok((actions, results, exec))
+}
+
+/// Print one line per action: its cache/run status and name.
+fn report_actions(actions: &[Action], results: &[ActionResult]) {
+    for (action, result) in actions.iter().zip(results) {
+        let status = if result.cache_hit {
+            "CACHED"
+        } else if result.success() {
+            "ok"
+        } else {
+            "FAIL"
+        };
+        println!("  {status:>6}  {}", action.name());
+    }
+}
+
+/// If `result` captured a `results.txt`, read the `ANNEAL_TEST_EXIT` marker and return
+/// whether the test passed. `None` for non-test actions.
+fn test_outcome(exec: &LocalExecutor, result: &ActionResult) -> Option<bool> {
+    let digest = result.outputs.get("results.txt")?;
+    let bytes = exec.cas().get(digest).ok().flatten()?;
+    let text = String::from_utf8_lossy(&bytes);
+    for line in text.lines() {
+        if let Some(code) = line.strip_prefix("ANNEAL_TEST_EXIT=") {
+            return Some(code.trim() == "0");
+        }
+    }
+    None
+}
+
+/// Build a [`Configuration`] from the axis selectors, defaulting to the host config.
+fn build_config(args: &ConfigArgs) -> Result<Configuration, String> {
+    let mut axes = AxisValues::default();
+    if let Some(s) = &args.opt_level {
+        axes.opt_level = parse_opt_level(s)?;
+    }
+    if let Some(s) = &args.lto {
+        axes.lto = parse_lto(s)?;
+    }
+    if let Some(s) = &args.debug_info {
+        axes.debug_info = parse_debug_info(s)?;
+    }
+    if let Some(s) = &args.sanitizer {
+        axes.sanitizer = parse_sanitizer(s)?;
+    }
+    if let Some(s) = &args.coverage {
+        axes.coverage = parse_coverage(s)?;
+    }
+    // A host placeholder triple matches the analysis/test defaults; `--platform`
+    // overrides it (cross-compilation wiring into the inner tools is a later step).
+    let platform = match &args.platform {
+        Some(triple) => Platform::new(triple.clone(), triple.clone()),
+        None => Platform::new("host", "host"),
+    };
+    Ok(Configuration::new(platform, axes))
+}
+
+/// Normalize a flag value to the canonical `as_str` form (hyphens → underscores).
+fn norm(s: &str) -> String {
+    s.trim().replace('-', "_")
+}
+
+fn parse_opt_level(s: &str) -> Result<OptLevel, String> {
+    match norm(s).as_str() {
+        "debug" => Ok(OptLevel::Debug),
+        "release" => Ok(OptLevel::Release),
+        "release_with_debuginfo" => Ok(OptLevel::ReleaseWithDebugInfo),
+        other => Err(format!("invalid --opt-level {other:?}")),
+    }
+}
+
+fn parse_lto(s: &str) -> Result<Lto, String> {
+    match norm(s).as_str() {
+        "off" => Ok(Lto::Off),
+        "thin" => Ok(Lto::Thin),
+        "full" => Ok(Lto::Full),
+        other => Err(format!("invalid --lto {other:?}")),
+    }
+}
+
+fn parse_debug_info(s: &str) -> Result<DebugInfo, String> {
+    match norm(s).as_str() {
+        "none" => Ok(DebugInfo::None),
+        "line_tables_only" => Ok(DebugInfo::LineTablesOnly),
+        "full" => Ok(DebugInfo::Full),
+        other => Err(format!("invalid --debug-info {other:?}")),
+    }
+}
+
+fn parse_sanitizer(s: &str) -> Result<Sanitizer, String> {
+    match norm(s).as_str() {
+        "none" => Ok(Sanitizer::None),
+        "address" => Ok(Sanitizer::Address),
+        "thread" => Ok(Sanitizer::Thread),
+        "memory" => Ok(Sanitizer::Memory),
+        "undefined" => Ok(Sanitizer::Undefined),
+        other => Err(format!("invalid --sanitizer {other:?}")),
+    }
+}
+
+fn parse_coverage(s: &str) -> Result<Coverage, String> {
+    match norm(s).as_str() {
+        "on" => Ok(Coverage::On),
+        "off" => Ok(Coverage::Off),
+        other => Err(format!("invalid --coverage {other:?}")),
+    }
+}

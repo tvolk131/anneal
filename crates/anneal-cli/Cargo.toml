@@ -1,0 +1,20 @@
+[package]
+name = "anneal-cli"
+version.workspace = true
+edition.workspace = true
+description = "The `mybuild` command-line interface — thin orchestration over the build system (§18)."
+
+[[bin]]
+name = "mybuild"
+path = "src/main.rs"
+
+[dependencies]
+anneal-core = { path = "../anneal-core" }
+anneal-loader = { path = "../anneal-loader" }
+anneal-analysis = { path = "../anneal-analysis" }
+anneal-rules = { path = "../anneal-rules" }
+anneal-exec = { path = "../anneal-exec" }
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
