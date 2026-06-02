@@ -1,0 +1,17 @@
+[package]
+name = "anneal-bench"
+version.workspace = true
+edition.workspace = true
+description = "Benchmark harness comparing Anneal against native tooling (§20)."
+
+[[bin]]
+name = "anneal-bench"
+path = "src/main.rs"
+
+[dependencies]
+anneal-core = { path = "../anneal-core" }
+anneal-loader = { path = "../anneal-loader" }
+anneal-analysis = { path = "../anneal-analysis" }
+anneal-rules = { path = "../anneal-rules" }
+anneal-exec = { path = "../anneal-exec" }
+tempfile = "3"

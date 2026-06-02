@@ -74,8 +74,28 @@
 
 ## Phase 6 — validation
 
-- [ ] **Benchmark gates** (§20) — the actual "thesis validated" bar. Untouched. Incremental must *beat*;
-      cold/workspace-wide must *match*; CI cold-start must *beat*.
+- [ ] **Benchmark gates** (§20) — the actual "thesis validated" bar. Incremental must *beat*; cold/workspace-wide
+      must *match*; CI cold-start must *beat*.
+  - [x] **First cargo harness** — `crates/anneal-bench` drives the library pipeline over N dependency-free crates
+        vs. the exact native cargo invocation the rule wraps. Three gates: cold (overhead), no-op, and
+        fresh-checkout-with-warm-cache (the locally-measurable CI cold-start beat — populated `.anneal/` restores
+        from CAS while cargo with no `target/` rebuilds). Run: `cargo run -p anneal-bench --release [-- N]`.
+        **Cache wins confirmed**: no-op ~10–55× faster, fresh-checkout ~90–300× faster (cache hit skips cargo
+        entirely). **Finding to chase**: cold overhead is **not fixed — it grows with crate count** (+20% at N=2 →
+        +45% at N=32 on trivial crates), because Anneal = `cargo` + materialize-sources + **save `target/`
+        snapshot**, and the snapshot save scales with `target/` size while trivial crates give it nothing to
+        amortize against. Trivial crates are the *pessimal* case for the overhead gate; realistic compile times
+        would shrink the %, but the absolute snapshot cost on a large `target/` is real (ties to §8.2 / deferred
+        deep snapshot pruning).
+  - [ ] **Instrument the phase breakdown** (materialize / cargo / snapshot-save / capture) to confirm the snapshot
+        save is the dominant cold-overhead term, then decide whether it needs optimization (batching, parallel
+        CAS puts — cf. the carried-forward materialization-throughput item).
+  - [ ] **Single-package-change scenario** — the canonical incremental case (edit one crate, rebuild): Anneal
+        restores `target/`, runs incremental cargo, re-saves the full snapshot. Add to the harness.
+  - [ ] **Realistic workloads** — crates with real compile time (and eventually external deps) so the overhead
+        gate is assessed where compile dominates, not snapshot bookkeeping.
+  - [ ] **pnpm harness**, then competitor baselines (sccache, Turborepo/Nx, Bazel) and real cross-machine CI
+        cold-start (needs the remote cache, v1.x).
 
 ## CLI
 

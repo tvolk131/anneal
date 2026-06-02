@@ -65,6 +65,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "anneal-bench"
+version = "0.0.0"
+dependencies = [
+ "anneal-analysis",
+ "anneal-core",
+ "anneal-exec",
+ "anneal-loader",
+ "anneal-rules",
+ "tempfile",
+]
+
+[[package]]
 name = "anneal-cas"
 version = "0.0.0"
 dependencies = [
