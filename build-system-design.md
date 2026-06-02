@@ -94,6 +94,16 @@ Anneal adopts the action-graph model, content-addressed execution, and (via Star
 
 Deliberate divergences: surface simplicity over surface power (five fixed axes, three transitions, no custom transitions in v1); wrap-don't-replace for ecosystems (consume native lockfiles rather than reimplement resolution); package-level rather than file-level ownership; a correctness-neutral snapshot protocol for stateful caches; strict env hermeticity with sandbox-provided standard variables; and — critically — native tools modeled as opaque coarse engines rather than decomposed into fine-grained actions.
 
+### 1.7 Relationship to Nix
+
+Anneal shares low-level mechanism with Nix — a content-addressed store ([§3.4](#34-cas-and-materializer)), hermetic actions as pure functions of declared inputs ([§1.5](#15-core-principles)), sandboxing ([§7.3](#73-sandboxing)), and reproducible-build guarantees — so the "isn't this just Nix?" question is fair and is answered here rather than left implicit. It is not Nix: the two operate at different layers and solve different problems, and they compose rather than compete.
+
+The distinction is the **sealed unit** and the **relationship to native tooling**. Nix seals the *dependency closure* — compiler, system libraries, transitive packages — and to do so it **replaces** the system package manager; Nix becomes the source of truth for what is installed. Anneal seals the *build action* over a monorepo and **wraps** the native package managers: Cargo and pnpm remain the source of truth for resolution, consumed via their lockfiles ([§1.5](#15-core-principles)) and run as opaque inner engines ([§3.2](#32-target-graph-vs-action-graph)). Nix models a graph of packages; Anneal models a graph of build actions with configuration transitions, affected-test selection, and queries ([§3](#3-system-architecture), [§11](#11-query-system)). Nix has no notion of an incremental inner loop — it rebuilds derivations wholesale — whereas preserving Cargo's and pnpm's incremental engines is Anneal's core hypothesis ([§1.4](#14-core-hypothesis-and-the-central-invariant)).
+
+The sharpest divergence is **statefulness**. Nix's identity is statelessness: every derivation is pure and a mutable `target/` directory is by design impossible. Anneal's headline contribution is the opposite bet — deliberately snapshot and restore mutable native caches while *proving* the restore is correctness-neutral ([§1.4](#14-core-hypothesis-and-the-central-invariant), [§8](#8-caching-and-the-correctness-neutral-invariant)). The snapshot protocol is, in this sense, anti-Nix.
+
+These layers compose cleanly. Nix can sit *underneath* Anneal — pinning the toolchain and system dependencies, which is exactly what this project's committed `flake.nix` already does for the contributor environment ([§16](#16-distribution-and-bootstrap)) — while Anneal sits *above* the native package managers, orchestrating cross-language composition. The one-line framing: **Nix makes the inputs to a build reproducible; Anneal makes the build graph across language ecosystems reproducible and incremental, while keeping Cargo and pnpm in charge of their own inner loops.**
+
 ---
 
 ## 2. Milestone Structure
