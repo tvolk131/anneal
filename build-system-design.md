@@ -374,6 +374,8 @@ Three rule-author operations:
 
 Snapshots are content-addressed in the same CAS, keyed at a **coarser** granularity than action cache keys — e.g., `(toolchain, lockfile, target_triple, profile)` — coarse enough that small source edits hit the same snapshot, fine enough that a toolchain bump invalidates it. Eviction policy (LRU, size/age caps) belongs to the system; the rule declares only *what* to prune.
 
+A planned acceleration keeps a snapshot **in place** as a reusable per-key working directory (a "warm sandbox") rather than round-tripping it through the CAS every build — the lever for the incremental-build benchmark gate ([§20.3](#203-pass-criteria)). It is the snapshot protocol under the same §1.4 invariant; the lifecycle mechanics (reusability conditions, the dirty-state guard, the source-sync diff, and the at-rest structure) are developed in `docs/sandboxing.md` §5.
+
 ### 8.3 Pruning scope (v1: conservative)
 
 `prune` is intentionally modest in v1. **v1 snapshots are conservative whole-cache snapshots.** Supported pruning is **safe and coarse**: deleting whole stale snapshot generations, or removing unreachable entries from a content-addressed store (e.g., pnpm store entries with no referencing lockfile).

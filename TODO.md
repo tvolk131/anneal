@@ -96,13 +96,15 @@
         `anneal build`. Trivial crates *exaggerate* this (no compile time to amortize), but `save` scales with
         `target/` **byte** size, and real `target/` dirs are large — so this is the overhead-gate lever at scale.
   - [ ] **Attack the O(`target/`) incremental overhead** (the lever for the "must beat" gate; prioritize once a
-        realistic workload confirms the absolute cost matters). Biggest: **warm-sandbox reuse for snapshot
-        *owners*** — keep the build action's `target/` working dir in place across incremental rebuilds (skip
-        restore + teardown, ~25 ms @ N=16), instead of the fresh-sandbox + snapshot round-trip every run. Tension:
-        this is exactly the stable `snap-K` sandbox path dropped for parallelism — but the build *owner* is
-        single-per-workspace and has no parallel-consumer problem, so owners can reuse while consumers stay
-        unique. Plus **incremental snapshot save** (re-`put` only changed files, attacks the ~7 ms save) and
-        background teardown / batch-parallel CAS puts. Ties to §1.4 / §8.2 + the materialization-throughput item.
+        realistic workload confirms the absolute cost matters). **Design captured in `docs/sandboxing.md` §5**
+        (reusability-iff conditions, three-tier fallback, dirty-state clean-commit marker, source-sync diff,
+        at-rest structure, mtime edge). Biggest: **warm-sandbox reuse for snapshot *owners*** — keep the build
+        action's `target/` working dir in place across incremental rebuilds (skip restore + teardown, ~25 ms
+        @ N=16) instead of the fresh-sandbox + snapshot round-trip every run; owners reuse (one per key) while
+        consumers stay unique+parallel. Plus **incremental + background snapshot save** (re-`put` only changed
+        files, attacks the ~7 ms save). **Validate first:** the mtime experiment (§5.5) — restore a warm
+        `target/`, touch one source, confirm cargo does *minimal* incremental, not full or under-rebuild. Ties to
+        §1.4 / §8.2 + the materialization-throughput item.
   - [x] **Single-package-change scenario** — the canonical incremental case, added to the harness (edit one
         crate, rebuild). **This is the §20.3 "incremental must *beat*" gate, and on this fixture Anneal *loses*,
         worse as the workspace grows: +50% (N=4) → +160% (N=32) → +265% (N=64) vs native cargo.** Structural

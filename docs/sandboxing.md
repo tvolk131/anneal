@@ -96,3 +96,147 @@ when `Y` changes" (discovered inputs / depfiles) — is rejected:
 So read-tracking is a *defensive* tool here (catch missing declarations), not a
 *performance* tool (skip work). The performance case is outsourced to the inner engines
 by the wrap-don't-decompose architecture.
+
+## 5. Warm sandbox reuse — *designed, not yet built*
+
+> Motivated by the §20 benchmark: on the canonical **incremental** case (edit one crate,
+> rebuild), the current fresh-sandbox model loses to native cargo and loses *worse* as the
+> workspace grows (+50% at 4 crates → +265% at 64). The phase breakdown shows why — see
+> the end of this section. This is the design for closing that gap. It is the
+> sandbox-lifecycle counterpart to the snapshot protocol (`build-system-design.md` §8.2).
+
+### 5.1 The reframe
+
+Every build today does `fresh sandbox → materialize sources → restore target/ (from CAS)
+→ run → save target/ (to CAS) → rm -rf`. The `restore` and `rm -rf` are pure tax: we
+reconstruct `target/` from the content-addressed store, use it, destroy it, and
+reconstruct it again next time. Native cargo never does this — it leaves `target/` on
+disk. **Warm reuse is the snapshot protocol with the snapshot kept *in place* instead of
+round-tripped through the CAS.** The critical path collapses to `sync(O(change)) +
+recompile(O(change))` ≈ native.
+
+Because it is the snapshot protocol in another form, it inherits the **same correctness
+invariant** (§1.4: warm output must equal cold output), guarded by the same verification
+harness — with one *new* risk (dirty in-place state, §5.4).
+
+### 5.2 Layering — a local accelerator *in front of* the CAS snapshot
+
+Warm reuse does **not** replace the CAS snapshot. The CAS snapshot is still needed for
+what the warm dir cannot do: serving snapshot **consumers** (test actions restore
+`target/` read-only into their own fresh sandboxes), **cross-machine sharing**, and **CI
+cold-start**. So a three-tier fallback:
+
+1. **Warm dir present & valid** → reuse in place (fastest; the new path).
+2. **No warm dir, CAS snapshot exists** → restore into a fresh dir, run, *keep it warm*.
+   (today's behavior, plus retention.)
+3. **Neither** → cold build, then save snapshot + keep warm.
+
+The owner still saves to CAS — but that save can move **off the critical path**
+(background, and incremental: re-`put` only changed files). The warm dir is purely a
+single-machine, single-key incremental accelerator.
+
+### 5.3 Reusable **iff all** of
+
+A warm dir is identified by its **`snapshot_key`** — `(toolchain, lockfile, triple,
+profile/axes)`, deliberately **not** source content — so it is a valid cargo-incremental
+base for *any* source state under the same key. It is reusable iff:
+
+- **Same `snapshot_key`.** A different key (toolchain bump, lockfile change, profile
+  switch) maps to a different (or absent) warm dir, so wrong-key reuse never happens — no
+  detection needed.
+- **The action is a snapshot *owner*** (`SnapshotBased`). Consumers (`SnapshotConsuming`
+  test runs) keep their unique, fresh, restore-from-CAS sandboxes; they read the snapshot
+  read-only and must not touch the owner's mutable warm dir. This is the reconciliation
+  with parallel execution: **owners reuse (one per key, naturally serialized); consumers
+  stay unique and parallel** — the per-key stable path is exactly the `snap-K` path that
+  was dropped from `sandbox_root` for parallelism, reintroduced *for owners only*.
+- **Left clean** by the previous build (§5.4).
+- **Not concurrently held** (single-writer lock per key — cheap: one owner per key per
+  graph, and identical-config builds wouldn't run concurrently anyway).
+
+### 5.4 Invalidation — two axes
+
+- **Wrong world.** `snapshot_key` changed. Handled structurally by the key *being* the
+  dir's identity (§5.3); no diffing.
+- **Dirty state.** This is the one risk warm reuse adds over the CAS protocol: a CAS
+  snapshot is only `save`d after a clean exit-0 build, so a restored snapshot is always a
+  consistent post-success state, whereas an in-place dir can be left half-written by a
+  crash, a timeout-kill, or a non-zero exit. Mitigation: a **clean-commit marker** written
+  only after success; on entry, a missing/stale marker means "untrustworthy" → fall back
+  to tier 2 (re-restore the last good CAS snapshot) or tier 3 (cold).
+
+Plus the usual: explicit `anneal clean`, and **eviction** (each warm dir is ≈ one real
+`target/`, so disk pressure must GC them — ties into the eviction work).
+
+### 5.5 The sync — a delete/add/replace diff over declared inputs only
+
+The warm dir holds *last* build's sources; the new build must see *this* build's. We
+reconcile the new **declared input set** against the recorded `.anneal-inputs` manifest
+(`path → content-digest`), touching **only declared input paths — never `target/`**:
+
+| Manifest vs. new build | Action | Why |
+|---|---|---|
+| present, same digest | **leave untouched** | keeps old mtime → cargo fingerprint skips it |
+| present, different digest | **re-materialize** | new content + fresh mtime → cargo recompiles |
+| in new, absent from dir | **add** | new source file |
+| in manifest, not in new | **delete** | a stale `.rs` left behind is a phantom compile — *correctness*, not tidiness |
+
+The diff is O(changed files), from digests analysis already computed.
+
+**The sharp edge is mtime — validate empirically before building.** Cargo's fingerprints
+are mtime-sensitive: a changed file must end up **newer** than the `target/` artifacts (so
+cargo recompiles it), an unchanged file must keep its mtime (so cargo skips it). The
+wrinkle is materialization (§2): a Linux **hardlink shares the inode**, so we cannot set a
+per-sandbox mtime without corrupting the shared CAS blob's mtime and every other sandbox
+sharing it. So changed-file sync needs **distinct-inode placement** — macOS `clonefile`
+already gives it; Linux needs a copy (or a post-link `touch`). Getting this wrong means
+cargo either silently skips a changed file (a correctness bug) or rebuilds everything (no
+speedup).
+
+### 5.6 At rest — the warm dir holds *both* snapshot and code
+
+A common first instinct is that a reusable sandbox at rest holds only the snapshot. It
+holds **both** the materialized source tree and `target/` — and keeping the code is the
+whole point:
+
+```
+.anneal/warm/<snapshot_key>/
+├── Cargo.toml, Cargo.lock, crate*/src/*.rs   ← source (mostly shared inodes/CoW; ~free)
+├── target/ …                                 ← warm build state (real bytes; the bulk)
+├── .home/  .tmp/                             ← scratch (clearable)
+├── .anneal-inputs                            ← path→digest manifest, for §5.5's diff
+└── target/.anneal-committed                  ← clean-commit marker (§5.4)
+```
+
+If it held only `target/` and the code were re-laid every build, **every source file would
+get a fresh mtime → cargo would see everything as newer than `target/` → full rebuild**,
+defeating the optimization. The code must persist *in place* so unchanged files keep their
+mtimes and only the genuine change is disturbed. So a warm sandbox is, by construction, an
+ordinary cargo working directory that we sync deltas into. Contrast the at-rest forms:
+
+- **CAS snapshot** (today): `target/` as content-addressed blobs + manifest — durable,
+  deduplicated, shareable, but **must be reconstructed** to use.
+- **Warm sandbox** (proposed): `target/` + source as a **ready-to-run directory** — zero
+  reconstruction, but not shareable and not deduplicated.
+
+Complementary, hence the §5.2 layering. One honest cost: a fresh sandbox wipes undeclared
+writes every run; a warm dir accumulates them, slightly weakening the clean-slate
+guarantee. Hermetic builds shouldn't write outside `target/` + declared outputs, but
+build scripts sometimes do — track-and-clean, or treat it as part of the hermeticity
+contract.
+
+### 5.7 Expected payoff
+
+From the measured incremental build @ 16 crates (~100 ms Anneal vs ~50 ms native):
+
+| Removed by | Phase | ~cost @ N=16 |
+|---|---|---|
+| warm reuse | restore snapshot | 16 ms |
+| warm reuse | teardown sandbox | 9 ms |
+| background + incremental save | save snapshot | 7 ms |
+| warm reuse (stable mtimes) | run-overhead vs native | ~12 ms |
+
+The plausible end state: incremental **≈ native**, with the CAS snapshot demoted to a
+background durability/sharing layer — turning the §20.3 "incremental must *beat*" gate from
+"lose, diverging" into "match-or-beat," with Anneal's added value (cross-machine cache,
+affected selection) sitting on top of parity rather than fighting a deficit.
