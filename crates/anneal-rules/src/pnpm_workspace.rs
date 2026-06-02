@@ -17,7 +17,7 @@
 //!   attribute: `scripts = { "test": { "kind": "test" }, "build": { "kind": "build",
 //!   "outputs": ["dist"] } }`. The rule *discovers* nothing automatically — the user
 //!   names which scripts become actions and of what `kind` (explicit; no name
-//!   convention). Each script action is **`SnapshotAccelerated`**: it shares `install`'s
+//!   convention). Each script action is **`SnapshotConsuming`**: it shares `install`'s
 //!   snapshot key to **restore `node_modules` read-only** so the script can run, but is
 //!   **never action-cached** (an opaque script's output is not trusted reproducible —
 //!   `docs/rules.md` §4–5). There is **no `cacheable` knob**: graduation to a real cache
@@ -122,7 +122,7 @@ impl Rule for PnpmWorkspace {
             .build();
         actions.push(install);
 
-        // --- per-script actions: SnapshotAccelerated (restore node_modules read-only) ---
+        // --- per-script actions: SnapshotConsuming (restore node_modules read-only) ---
         let mut provided: Vec<Artifact> = Vec::new();
         if let Some(scripts) = ctx.attrs().dict_opt("scripts")? {
             // Scripts need the actual source to run; install does not.

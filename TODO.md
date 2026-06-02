@@ -1,7 +1,8 @@
 # Anneal — open work / TODO
 
 > Running list of what's not yet built, beyond what's already in `build-system-design.md` §21.
-> Status as of: cargo_workspace + nickel_eval done; Nickel→Rust routing proven; pnpm_workspace not started.
+> Status as of: cargo_workspace, nickel_eval, pnpm_workspace (install + scripts + plain-path data routing) done;
+> Nickel→Rust and Nickel→TS (§14.3, plain-path) routing demos proven. Next: the `mybuild` CLI, then Phase 5.
 > Section refs (§) point at `build-system-design.md`.
 
 ## Correctness & enforcement (do alongside the relevant feature)
@@ -25,7 +26,7 @@
       10, no lifecycle scripts**, cached + `node_modules`/store snapshot keyed `(platform, pnpm major, lockfile
       digest)` — Node version dropped); (2) static introspection of `pnpm-workspace.yaml`/`package.json`(s);
       (3) script discovery + declared `scripts = { name: { kind, outputs? } }` with explicit `kind`;
-      (4) script actions **non-cacheable + snapshot-accelerated**, sealed by default (Node version is the
+      (4) script actions **non-cacheable + snapshot-consuming**, sealed by default (Node version is the
       *script* toolchain identity); (5) `data` routing as **plain-path** — the generated file is a direct
       relative-path input to the consuming scripts, placed via a per-edge destination (`label_keyed_string_dict`);
       a §14.6 Level-1 clean edge (`docs/pnpm-workspace.md` §4); (6) axis map (§7 of the doc). Deferred within the

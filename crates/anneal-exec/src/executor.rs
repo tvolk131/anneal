@@ -242,15 +242,15 @@ impl Executor for LocalExecutor {
         // Two orthogonal properties (§5 of docs/rules.md):
         //   restore  — bring a snapshot into the sandbox before running
         //   save     — write the snapshot back afterward (only the owner does)
-        // SnapshotBased owns the snapshot (restore + save); SnapshotAccelerated only
+        // SnapshotBased owns the snapshot (restore + save); SnapshotConsuming only
         // consumes one (restore, no save).
         let restore = matches!(
             action.cache_policy,
-            CachePolicy::SnapshotBased | CachePolicy::SnapshotAccelerated
+            CachePolicy::SnapshotBased | CachePolicy::SnapshotConsuming
         );
         let save = matches!(action.cache_policy, CachePolicy::SnapshotBased);
         // Deterministic and snapshot-based actions are cacheable when sealed; permeable,
-        // native, and snapshot-*accelerated* are not (§7.2, §8). SnapshotAccelerated is
+        // native, and snapshot-*consuming* are not (§7.2, §8). SnapshotConsuming is
         // deliberately excluded: its output is not trusted reproducible, so it never
         // skips. A snapshot is a separate accelerator for the case where an action runs.
         let cacheable = matches!(

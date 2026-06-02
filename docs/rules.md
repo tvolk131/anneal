@@ -213,35 +213,46 @@ trouble:
   neutrality harness. If an engine's incremental mode is *not* output-neutral, the rule
   disables it (the `CARGO_INCREMENTAL=0` move) and snapshots nothing.
 
-The combination "**non–action-cacheable + snapshot-accelerated**" is the honest default for
+The combination "**non–action-cacheable + snapshot-consuming**" is the honest default for
 an opaque script: we never trust a skip, but we still restore the engine's scratch state so
 the unavoidable re-run is cheap. The only thing a true action-cache hit buys *over* this is
 eliminating engine startup — a real win for slow-to-start tools (tsc), but an *optimization*
 that must pass the reproducibility gate to turn on, not a default anyone backs into.
 
-### Two snapshot policies: `SnapshotBased` (earned) vs. `SnapshotAccelerated` (default)
+### Two snapshot policies: `SnapshotBased` (earned) vs. `SnapshotConsuming` (default)
 
 The kernel encodes that default as a `CachePolicy` distinct from cargo's. Both restore a
 correctness-neutral snapshot (the §1.4 floor holds for either — that is *not* the difference);
 they differ on two orthogonal axes:
 
-| | `SnapshotBased` (cargo, pnpm `install`) | `SnapshotAccelerated` (pnpm scripts) |
+| | `SnapshotBased` (cargo, pnpm `install`) | `SnapshotConsuming` (pnpm scripts) |
 |---|---|---|
 | **Action-cacheable?** (skip via a recorded result) | **yes** — output is verified reproducible | **no** — output not trusted reproducible; always re-runs |
 | **Snapshot ownership** | **writer** — restores *and saves* (co-maintains the cache, neutrally) | **reader** — restores a snapshot another action owns; never saves |
 
 - **Primary axis — reproducibility → cacheability.** `SnapshotBased` may *skip* the action
   (reuse a recorded output); this is sound only because the action is verified reproducible. A
-  script's output (timestamps, build IDs, randomness) is not trusted, so `SnapshotAccelerated`
+  script's output (timestamps, build IDs, randomness) is not trusted, so `SnapshotConsuming`
   *never* skips — it restores the snapshot only to be able to *run*.
 - **Secondary axis — read vs. write.** A `SnapshotBased` writer must keep the shared snapshot
-  neutral (the `CARGO_INCREMENTAL=0` discipline). A `SnapshotAccelerated` reader takes a snapshot
+  neutral (the `CARGO_INCREMENTAL=0` discipline). A `SnapshotConsuming` reader takes a snapshot
   it does not own (a script reading `install`'s `node_modules`) and **does not save** — so it
   cannot corrupt the shared snapshot; read-only sidesteps the trust question structurally.
 
-They are **stages, not castes.** `SnapshotAccelerated` is the correct policy *until* reproducibility
+**Why "consuming," not "accelerated."** For `SnapshotBased` the snapshot is a true *accelerator*:
+delete it and the owning action cold-rebuilds the *same* result, only slower. For
+`SnapshotConsuming` the restored snapshot is a **necessary input the action cannot re-derive
+itself** — a script with no `node_modules` doesn't run slowly, it *fails*. The build as a whole
+stays correctness-neutral (§1.4) only because the snapshot's **owner** (`install`) runs first and
+re-derives it when absent — so neutrality is a property of *owner + consumers together*, not of a
+consuming action in isolation. (One coherence requirement falls out: the owner's snapshot must be
+*present* when consumers run. An owner that **action-cache-hits with an empty snapshot store**
+returns early without re-saving, breaking its consumers — a real hazard for shared/remote caching,
+benign on a single machine where the owner populates it once.)
+
+They are **stages, not castes.** `SnapshotConsuming` is the correct policy *until* reproducibility
 is proven; the deferred verification gate is the promotion path to (effectively) `SnapshotBased`.
-And the two axes are genuinely orthogonal — `SnapshotAccelerated` bundles {non-cacheable, read-only}
+And the two axes are genuinely orthogonal — `SnapshotConsuming` bundles {non-cacheable, read-only}
 because that is exactly the script case, but a fully general design would treat *cacheable?* and
 *saves?* as independent. The bundling is a known simplification, not a hidden one.
 

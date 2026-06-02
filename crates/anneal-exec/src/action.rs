@@ -70,7 +70,7 @@ pub enum CachePolicy {
     /// trusted reproducible (`docs/rules.md` §5). The honest default for an opaque
     /// script that needs `node_modules` present but whose result we won't reuse. The
     /// promotion to `SnapshotBased` is earned via verification, never asserted.
-    SnapshotAccelerated,
+    SnapshotConsuming,
 }
 
 impl CachePolicy {
@@ -79,7 +79,7 @@ impl CachePolicy {
             CachePolicy::Deterministic => "deterministic",
             CachePolicy::NonCacheable => "non_cacheable",
             CachePolicy::SnapshotBased => "snapshot_based",
-            CachePolicy::SnapshotAccelerated => "snapshot_accelerated",
+            CachePolicy::SnapshotConsuming => "snapshot_consuming",
         }
     }
 }
@@ -263,11 +263,11 @@ impl ActionBuilder {
     /// saving** it back and **without** action-caching the result. For an action that
     /// consumes a snapshot another action owns (e.g. a pnpm script reading `install`'s
     /// `node_modules`) but whose own output is not trusted reproducible. Sets the cache
-    /// policy to [`CachePolicy::SnapshotAccelerated`].
+    /// policy to [`CachePolicy::SnapshotConsuming`].
     pub fn snapshot_restore(mut self, key: Digest, paths: Vec<PathBuf>) -> Self {
         self.action.snapshot_key = Some(key);
         self.action.snapshot_paths = paths;
-        self.action.cache_policy = CachePolicy::SnapshotAccelerated;
+        self.action.cache_policy = CachePolicy::SnapshotConsuming;
         self
     }
 

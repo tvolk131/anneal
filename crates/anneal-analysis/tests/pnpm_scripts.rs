@@ -2,7 +2,7 @@
 //! actions that run against the restored `node_modules` (`docs/pnpm-workspace.md` §2–5).
 //! A `test`-kind script captures its run and always exits 0 (failure is recorded data);
 //! a `build`-kind script declares outputs and exposes them as a provider. Both are
-//! `SnapshotAccelerated`: they restore `install`'s snapshot read-only and never cache.
+//! `SnapshotConsuming`: they restore `install`'s snapshot read-only and never cache.
 
 use anneal_analysis::Analyzer;
 use anneal_core::{AxisValues, Configuration, Label, OptLevel, Platform};

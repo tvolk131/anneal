@@ -56,7 +56,7 @@ Actions emitted:
   package), so an offline install against an empty/local store succeeds even sealed.
 - **one action per declared script**, each a true dependent of `install` via an edge carrying
   the install-snapshot identity (§6), tagged with an explicit `kind` (§3). Default
-  **non-cacheable + snapshot-accelerated** (§5).
+  **non-cacheable + snapshot-consuming** (§5).
 
 Scripts are **surfaced by discovery but never auto-run** — `dev`/`start` never terminate,
 `clean` is destructive. Discovery means "the rule reads `package.json` `scripts` at analysis
@@ -182,7 +182,7 @@ accumulating reproducibility evidence (N-build sampling by default) or, where th
 warrants it, by removing the variance at the source (`SOURCE_DATE_EPOCH`, fixed seeds, or a
 deterministic-execution sandbox). That gate runs off the hot path, not in the executor.
 
-### M1 default: non-cacheable + snapshot-accelerated
+### M1 default: non-cacheable + snapshot-consuming
 
 Because reproducibility is unproven until measured, **every user script is non-cacheable by
 default — and that is nearly free**, because the inner tool's incremental state is restored
@@ -204,7 +204,7 @@ via snapshot:
   one churns its output digest and forces downstream misses. A deterministic one keeps a
   stable digest and downstream still hits. We do not *promise* the latter — that is the point
   of non-cacheable.
-- **Kernel policy:** script actions use `CachePolicy::SnapshotAccelerated` (`docs/rules.md`
+- **Kernel policy:** script actions use `CachePolicy::SnapshotConsuming` (`docs/rules.md`
   §5) — restore a snapshot to run, never action-cache. They share `install`'s `snapshot_key`
   to restore `node_modules` (read-only; they never save it), which is the concrete form of
   "the edge carries the install-snapshot identity" (§6). `install` itself stays
@@ -340,7 +340,7 @@ don't bust its cache key.
 - Static introspection of `pnpm-workspace.yaml` + `package.json`(s) for members/scripts.
 - Script *discovery*; user declares `scripts = { name: { kind, outputs? } }` with explicit
   `kind`.
-- All script actions **non-cacheable + snapshot-accelerated**, sealed by default.
+- All script actions **non-cacheable + snapshot-consuming**, sealed by default.
 - `data` routing as **plain-path** (§4): the generated file is a direct relative-path input
   to the consuming scripts, placed at a per-edge destination (`label_keyed_string_dict`). A
   §14.6 Level-1 clean edge — no wrapper, no bootstrap.
