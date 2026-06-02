@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use anneal_analysis::Analyzer;
 use anneal_core::{AxisValues, Configuration, Label, OptLevel, Platform};
-use anneal_exec::{Action, LocalExecutor};
+use anneal_exec::{Action, LocalExecutor, PhaseTimings};
 use anneal_loader::load_package;
 use anneal_rules::builtin_rules;
 
@@ -49,6 +49,13 @@ fn main() {
     let anneal_warm = timed(3, || run_anneal_build(&exec, root, &label));
 
     report(n, cargo_cold, cargo_noop, anneal_cold, anneal_warm);
+
+    // --- phase breakdown of a single cold build (fresh, timing-enabled store) ---
+    let profile_exec = LocalExecutor::new(root.join(".anneal-profile"))
+        .expect("open profile store")
+        .record_timings();
+    run_anneal_build(&profile_exec, root, &label);
+    report_phases(&profile_exec.take_timings());
 }
 
 /// Run the full Anneal build pipeline for `//ws:ws`, executing just the coarse
@@ -162,5 +169,37 @@ fn report(n: usize, cargo_cold: Duration, cargo_noop: Duration, anneal_cold: Dur
     println!(
         "\n_Cold = overhead gate (must match within margin). No-op & fresh-checkout = \
          the cache wins. Library pipeline; excludes CLI process startup._"
+    );
+}
+
+/// Print where a cold build's wall-clock goes, phase by phase. `run` is the inner
+/// cargo invocation (≈ the native baseline); everything else is Anneal's wrapping.
+fn report_phases(timings: &[PhaseTimings]) {
+    let Some(t) = timings.iter().find(|t| t.action.starts_with("cargo_workspace build")) else {
+        return;
+    };
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+    let pct = |d: std::time::Duration| d.as_secs_f64() / t.total.as_secs_f64() * 100.0;
+    let wrap = t.total.saturating_sub(t.run);
+
+    println!("\n## Cold-build phase breakdown (single run)\n");
+    println!("| Phase | Time | % of total |");
+    println!("|---|---:|---:|");
+    for (name, d) in [
+        ("materialize inputs", t.materialize),
+        ("restore snapshot", t.restore),
+        ("run (cargo itself)", t.run),
+        ("capture outputs", t.capture),
+        ("save target/ snapshot", t.save),
+        ("teardown sandbox", t.teardown),
+    ] {
+        println!("| {name} | {:.1} ms | {:.0}% |", ms(d), pct(d));
+    }
+    println!("| **total** | **{:.1} ms** | 100% |", ms(t.total));
+    println!(
+        "\n_Wrapping overhead (total − run) = {:.1} ms ({:.0}% of total). \
+         The hypothesis: `save target/ snapshot` dominates it._",
+        ms(wrap),
+        pct(wrap),
     );
 }

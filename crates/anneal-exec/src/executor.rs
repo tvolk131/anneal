@@ -47,6 +47,29 @@ impl ActionResult {
     }
 }
 
+/// Per-phase wall-clock for one *executed* action (a cache hit runs no phases and is
+/// not recorded). Collected only when [`LocalExecutor::record_timings`] is set — a
+/// diagnostic for profiling where a build spends its time (e.g. confirming the
+/// `target/` snapshot save dominates a cold build's wrapping overhead, §20).
+#[derive(Debug, Clone)]
+pub struct PhaseTimings {
+    pub action: String,
+    /// Stage the declared inputs into a fresh sandbox (hardlink/clone from the CAS).
+    pub materialize: Duration,
+    /// Restore the snapshot into the sandbox (a cold start with no snapshot is ~0).
+    pub restore: Duration,
+    /// Spawn the command and wait for it — the inner tool's own time.
+    pub run: Duration,
+    /// Read declared outputs back into the CAS.
+    pub capture: Duration,
+    /// Save the snapshot (e.g. `target/`) into the CAS — only the snapshot owner.
+    pub save: Duration,
+    /// Remove the sandbox directory (scales with what the build wrote into it).
+    pub teardown: Duration,
+    /// Whole-action wall-clock (the sum of all phases).
+    pub total: Duration,
+}
+
 /// Runs actions. Local and (future) remote executors share this interface so callers
 /// never branch on where work runs (§7.1).
 pub trait Executor {
@@ -63,6 +86,8 @@ pub struct LocalExecutor {
     /// Max actions to run concurrently in [`execute_graph`]. Defaults to the machine's
     /// available parallelism.
     parallelism: usize,
+    /// When set, every executed action appends its [`PhaseTimings`] here (diagnostic).
+    timings: Option<Mutex<Vec<PhaseTimings>>>,
 }
 
 impl LocalExecutor {
@@ -83,6 +108,7 @@ impl LocalExecutor {
             sandboxes,
             retain_sandboxes: false,
             parallelism: default_parallelism(),
+            timings: None,
         })
     }
 
@@ -102,6 +128,22 @@ impl LocalExecutor {
     pub fn jobs(mut self, jobs: usize) -> Self {
         self.parallelism = jobs.max(1);
         self
+    }
+
+    /// Record per-phase [`PhaseTimings`] for every executed action (off by default).
+    /// A diagnostic for profiling; drain with [`LocalExecutor::take_timings`].
+    pub fn record_timings(mut self) -> Self {
+        self.timings = Some(Mutex::new(Vec::new()));
+        self
+    }
+
+    /// Drain the recorded phase timings (empty unless [`LocalExecutor::record_timings`]
+    /// was set). Cache hits are not recorded — only actions that actually executed.
+    pub fn take_timings(&self) -> Vec<PhaseTimings> {
+        match &self.timings {
+            Some(m) => std::mem::take(&mut m.lock().unwrap()),
+            None => Vec::new(),
+        }
     }
 
     /// Execute an action graph, running independent actions **concurrently** (up to
@@ -365,11 +407,14 @@ impl LocalExecutor {
         restore: bool,
         save: bool,
     ) -> Result<ActionResult, ExecError> {
+        let started = Instant::now();
         if root.exists() {
             let _ = fs::remove_dir_all(&root);
         }
         let prepared = materializer::prepare_at(&self.cas, action, root)?;
+        let t_materialize = started.elapsed();
 
+        let restore_start = Instant::now();
         if restore {
             if let Some(key) = &action.snapshot_key {
                 for path in &action.snapshot_paths {
@@ -378,6 +423,7 @@ impl LocalExecutor {
                 }
             }
         }
+        let t_restore = restore_start.elapsed();
 
         let spec = SandboxSpec {
             mode: action.execution_mode,
@@ -386,21 +432,29 @@ impl LocalExecutor {
             tmp: &prepared.tmp,
             env: &action.env,
         };
+        let run_start = Instant::now();
         let mut child = sandbox::build_command(action, &spec)
             .spawn()
             .map_err(ExecError::Spawn)?;
         let status = wait_with_timeout(&mut child, action.timeout_ms)?;
         let exit_code = status.code().unwrap_or(-1);
+        let t_run = run_start.elapsed();
 
+        let mut t_capture = Duration::ZERO;
+        let mut t_save = Duration::ZERO;
         let outputs = if exit_code == 0 {
+            let capture_start = Instant::now();
             let captured = materializer::capture(&self.cas, action, &prepared)?;
+            t_capture = capture_start.elapsed();
             if save {
+                let save_start = Instant::now();
                 if let Some(key) = &action.snapshot_key {
                     for path in &action.snapshot_paths {
                         self.snapshots
                             .save(&self.cas, key, &prepared.cwd.join(path))?;
                     }
                 }
+                t_save = save_start.elapsed();
             }
             captured
         } else {
@@ -408,8 +462,23 @@ impl LocalExecutor {
             BTreeMap::new()
         };
 
+        let teardown_start = Instant::now();
         if !self.retain_sandboxes {
             let _ = fs::remove_dir_all(&prepared.root);
+        }
+        let t_teardown = teardown_start.elapsed();
+
+        if let Some(sink) = &self.timings {
+            sink.lock().unwrap().push(PhaseTimings {
+                action: action.name().to_owned(),
+                materialize: t_materialize,
+                restore: t_restore,
+                run: t_run,
+                capture: t_capture,
+                save: t_save,
+                teardown: t_teardown,
+                total: started.elapsed(),
+            });
         }
 
         Ok(ActionResult {

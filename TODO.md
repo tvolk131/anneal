@@ -87,9 +87,18 @@
         amortize against. Trivial crates are the *pessimal* case for the overhead gate; realistic compile times
         would shrink the %, but the absolute snapshot cost on a large `target/` is real (ties to §8.2 / deferred
         deep snapshot pruning).
-  - [ ] **Instrument the phase breakdown** (materialize / cargo / snapshot-save / capture) to confirm the snapshot
-        save is the dominant cold-overhead term, then decide whether it needs optimization (batching, parallel
-        CAS puts — cf. the carried-forward materialization-throughput item).
+  - [x] **Instrument the phase breakdown** — `LocalExecutor::record_timings()` → `PhaseTimings` per executed
+        action (materialize / restore / run / capture / save / teardown), surfaced by the bench. **Confirmed
+        (with nuance):** the in-execution wrapping overhead is dominated (~75%) by **two `target/`-size-scaling
+        phases — snapshot `save` (~1 ms/crate) and sandbox `teardown` (`rm -rf` of a target/-laden sandbox,
+        ~0.55 ms/crate)**; both grow ~linearly with output size. `run` (cargo itself) is 73–92% of total;
+        materialize+capture are ~2% each. Separately, load+analyze adds a roughly-fixed ~10 ms to a cold
+        `anneal build`. Trivial crates *exaggerate* this (no compile time to amortize), but `save` scales with
+        `target/` **byte** size, and real `target/` dirs are large — so this is the overhead-gate lever at scale.
+  - [ ] **Optimize the two target/-handling phases** (only if realistic workloads confirm it matters):
+        batch/parallel CAS puts in `save`; background/deferred sandbox `teardown`; incremental snapshot
+        (re-`put` only changed files instead of walking all of `target/`). Ties to §8.2 + the carried-forward
+        materialization-throughput item.
   - [ ] **Single-package-change scenario** — the canonical incremental case (edit one crate, rebuild): Anneal
         restores `target/`, runs incremental cargo, re-saves the full snapshot. Add to the harness.
   - [ ] **Realistic workloads** — crates with real compile time (and eventually external deps) so the overhead
