@@ -50,8 +50,22 @@
 
 ## Phase 5 — queries, CI cache, transitions
 
-- [ ] **`affected --since=<commit>`** and **`why <target>`** (§11.3) — the primary CI primitive. Depends on
-      multi-package loading + the exclusive-ownership `owner(path)` lookup.
+- [x] **`affected --since=<commit>`** (§11.3) — the primary CI primitive. `owner(path)` + whole-workspace
+      load + reverse-dependency closure (`anneal-query`); `anneal affected --since <ref>`. Package granularity;
+      unowned change → conservative workspace-wide.
+- [ ] **`why <from> <to>` + `why <target> --since`** (§11.3) — shortest dependency path (2a), explaining an
+      affected result. **Determinism:** BFS exploring deps in **sorted-label order** (no HashMap-order
+      dependence; stable under cosmetic dep reordering); first-reached path wins.
+- [ ] **`why --all` — connecting subgraph** (2c, deferred): the union of *all* paths from A to B as a DAG
+      (Bazel's `allpaths`) — complete and graph-size-bounded (vs. the combinatorial explosion of enumerating
+      every path), for dependency-entanglement analysis. Needs graph rendering (tree-indent or dot). Worth doing,
+      not now.
+- [ ] **`affected --explain`** (deferred): annotate each affected target with its reason-path, so the selection
+      is self-explaining in CI — removes the manual `affected` → `why` orchestration. Small follow-on once
+      `why`'s pathfinding exists (it's "run `why` per affected target").
+- [ ] **Untracked-file gap in `affected`** — `git diff --name-only` omits untracked-but-unadded files, so a
+      brand-new source file isn't flagged until staged/committed. Consider `--others --exclude-standard` (with
+      care to not sweep build junk).
 - [ ] **GitHub Actions cache integration** (§8.5) — the adoption wedge (dumb fetch/build/push Action).
 - [ ] **Transitions** (§6.4: host_to_exec, target_to_exec, explicit platform) + the **direct platform-transition
       test** (build a bare crate for two target platforms; assert distinct correctly-cached configured targets).
