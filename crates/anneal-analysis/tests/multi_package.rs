@@ -85,3 +85,80 @@ fn cross_package_dependency_analyzes_and_builds() {
     .unwrap();
     assert_eq!(combined.trim(), "libdata");
 }
+
+/// Three packages in a chain: `app → mid → base`. Exercises the closure *recursing*
+/// past depth 1 (a single hop wouldn't), and content flowing along the whole chain.
+fn three_package_chain() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    for p in ["app", "mid", "base"] {
+        std::fs::create_dir_all(tmp.path().join(p)).unwrap();
+    }
+    std::fs::write(
+        tmp.path().join("base/BUILD"),
+        "genrule(name = \"b\", outs = [\"b.txt\"], cmd = \"echo base > $(OUTS)\")\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("mid/BUILD"),
+        "genrule(name = \"m\", deps = [\"//base:b\"], outs = [\"m.txt\"], cmd = \"cat $(SRCS) > $(OUTS)\")\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("app/BUILD"),
+        "genrule(name = \"app\", deps = [\"//mid:m\"], outs = [\"o.txt\"], cmd = \"cat $(SRCS) > $(OUTS)\")\n",
+    )
+    .unwrap();
+    tmp
+}
+
+#[test]
+fn transitive_closure_spans_multiple_hops() {
+    let tmp = three_package_chain();
+    let root = tmp.path();
+    let registry = builtin_rules();
+    let cfg = host();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
+    let app = Label::parse("//app:app").unwrap();
+
+    let graph = load_closure(root, &app, &registry).unwrap();
+    for label in ["//app:app", "//mid:m", "//base:b"] {
+        assert!(
+            graph.get(&Label::parse(label).unwrap()).is_some(),
+            "{label} reached through the transitive closure"
+        );
+    }
+
+    let g = Analyzer::new(&graph, &registry, &cfg, root, exec.cas())
+        .analyze(&app)
+        .unwrap();
+    let actions: Vec<Action> = g.actions().cloned().collect();
+    let results = exec.execute_graph(&actions).unwrap();
+    assert!(results.iter().all(|r| r.success()), "the whole chain builds");
+
+    let idx = actions.iter().position(|a| a.name() == "genrule //app:app").unwrap();
+    let out = String::from_utf8(
+        exec.cas()
+            .get(results[idx].outputs.get("o.txt").unwrap())
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(out.trim(), "base", "content flowed base → mid → app across three packages");
+}
+
+#[test]
+fn missing_dependency_package_is_a_clean_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("app")).unwrap();
+    std::fs::write(
+        tmp.path().join("app/BUILD"),
+        "genrule(name = \"app\", deps = [\"//nope:x\"], outs = [\"o\"], cmd = \"cat $(SRCS) > $(OUTS)\")\n",
+    )
+    .unwrap();
+    let registry = builtin_rules();
+    let app = Label::parse("//app:app").unwrap();
+
+    let err = load_closure(tmp.path(), &app, &registry).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("nope"), "error should name the missing package; got: {msg}");
+}
