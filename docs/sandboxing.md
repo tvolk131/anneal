@@ -139,20 +139,43 @@ single-machine, single-key incremental accelerator.
 
 A warm dir is identified by its **`snapshot_key`** — `(toolchain, lockfile, triple,
 profile/axes)`, deliberately **not** source content — so it is a valid cargo-incremental
-base for *any* source state under the same key. It is reusable iff:
+base for *any* source state under the same key. The key is what's stable across
+re-invocations and source edits but distinct per config: the same target rebuilt after an
+edit reuses; a debug/release or toolchain/lockfile change does not. It is reusable iff:
 
 - **Same `snapshot_key`.** A different key (toolchain bump, lockfile change, profile
   switch) maps to a different (or absent) warm dir, so wrong-key reuse never happens — no
-  detection needed.
+  detection needed. *(Hardening: fold the package path into the key. Today
+  `snapshot_key` omits target identity and relies on the lockfile — which lists workspace
+  members — to distinguish workspaces; byte-identical workspace copies would otherwise
+  collide. Pre-existing for the CAS snapshot too, but warm reuse makes it concrete.)*
 - **The action is a snapshot *owner*** (`SnapshotBased`). Consumers (`SnapshotConsuming`
   test runs) keep their unique, fresh, restore-from-CAS sandboxes; they read the snapshot
-  read-only and must not touch the owner's mutable warm dir. This is the reconciliation
-  with parallel execution: **owners reuse (one per key, naturally serialized); consumers
-  stay unique and parallel** — the per-key stable path is exactly the `snap-K` path that
-  was dropped from `sandbox_root` for parallelism, reintroduced *for owners only*.
+  read-only and must not touch a mutable warm dir. The per-key stable path is exactly the
+  `snap-K` path dropped from `sandbox_root` for parallelism, reintroduced *for owners
+  only*.
 - **Left clean** by the previous build (§5.4).
-- **Not concurrently held** (single-writer lock per key — cheap: one owner per key per
-  graph, and identical-config builds wouldn't run concurrently anyway).
+- **Holds the single-writer lock for its key** (§5.3.1).
+
+#### 5.3.1 One warm dir per key — shared by a *group* of owners, serialized
+
+A key subtlety: **several owner actions share one `snapshot_key`.** A `cargo_workspace`
+at one config emits, all snapshotting the same `target/`: the `build` action, every unit
+`test-compile`, every `doc`, every `integration`. They build into the **same logical
+`target/`** — exactly as a developer's `cargo build && cargo test --no-run && cargo doc`
+share one `target/` (test-compile reuses the rlibs `build` produced). So the warm dir is
+**per key, shared by all same-key owners as a single-writer group — they serialize on it.**
+
+This is *more correct and less total work* than the fresh-sandbox model it replaces: today
+each same-key owner restores the snapshot into its own sandbox, runs, and **races to
+`save`** (last-writer-wins, so the stored snapshot is just whoever finished last, and each
+redundantly recompiles shared dependencies). A shared serialized warm dir lets `target/`
+**accumulate** across them as cargo intends — no redundant recompiles, no save race. The
+cost is parallelism *among same-key actions* (one workspace's build + test-compiles + doc
+can't overlap), which is fine: they were never truly parallel-incremental, cargo
+parallelizes *within* each invocation, and **different keys (other workspaces/configs)
+keep separate warm dirs and stay fully parallel.** A plain `anneal build` has a single
+owner and no contention; the group only matters under `anneal test`.
 
 ### 5.4 Invalidation — two axes
 
