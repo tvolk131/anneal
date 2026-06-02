@@ -13,6 +13,14 @@
       generators interact / multi-package loading lands.
 - [ ] **One owning workspace per package directory.** Reject two workspace targets sweeping the same dir
       (the degenerate exclusive-ownership violation, §1.5).
+- [ ] **Explicit `exclude` on sweeping rules** (input-scoping; future). `cargo_workspace`/`pnpm_workspace`
+      sweep `source_tree(".")` wholesale; an opt-in `exclude = [...]` would carve out files the rule shouldn't
+      claim (e.g. a sibling `.ncl` owned by another rule), removing spurious cross-rule cache deps. This is the
+      **local, explicit** alternative to auto-partitioning a residual rule by its siblings' claims — considered
+      and **rejected for non-locality** (a sibling rule silently changing the sweep's inputs/cache; against the
+      "explicit inputs" grain Bazel chose). Most of the same effect is already available via **package
+      boundaries** (put the carved-out file in its own package). Related, semantics-free: an `anneal owners
+      //pkg` **diagnostic** that prints the file→rule mapping — the inspectability benefit without the coupling.
 - [ ] **Read-tracking to *enforce* declared inputs** (`docs/sandboxing.md`). Fail on undeclared reads —
       defensive, catches under-declaration. Most valuable on macOS (where it's otherwise silent); on Linux
       it's mostly a better diagnostic (isolation already guarantees it). NOT for relaxing invalidation.
