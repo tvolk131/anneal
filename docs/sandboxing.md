@@ -184,9 +184,19 @@ owner and no contention; the group only matters under `anneal test`.
 - **Dirty state.** This is the one risk warm reuse adds over the CAS protocol: a CAS
   snapshot is only `save`d after a clean exit-0 build, so a restored snapshot is always a
   consistent post-success state, whereas an in-place dir can be left half-written by a
-  crash, a timeout-kill, or a non-zero exit. Mitigation: a **clean-commit marker** written
-  only after success; on entry, a missing/stale marker means "untrustworthy" → fall back
-  to tier 2 (re-restore the last good CAS snapshot) or tier 3 (cold).
+  crash, a timeout-kill, or a non-zero exit — at which point the on-disk source tree
+  and/or `target/` no longer match the recorded manifest, and the next diff would compute
+  wrong ops. Mitigation: a **commit record** governed by **clear-on-begin / set-on-commit**
+  transaction semantics — delete it before mutating the dir, write it only after a fully
+  successful build. On entry: **present → trust the manifest and reuse; absent →
+  in-flight-or-crashed → discard** and fall back to tier 2 (re-restore the last good CAS
+  snapshot) or tier 3 (cold). This is engine-agnostic (the same record protects a pnpm
+  `node_modules` or `.next/cache` warm dir), so it lives at the **warm-dir root**, not
+  inside `target/` — it attests the *whole dir's* consistency, independent of how `target/`
+  got there (a tier-2 restore is clean without a build). It may carry the manifest digest
+  ("clean as of input-set X"), which both pins the version and cross-checks the manifest;
+  equivalently the two files collapse into one if `.anneal-inputs` itself is deleted-on-
+  begin and atomically renamed-into-place on commit (presence = the commit bit).
 
 Plus the usual: explicit `anneal clean`, and **eviction** (each warm dir is ≈ one real
 `target/`, so disk pressure must GC them — ties into the eviction work).
@@ -253,12 +263,20 @@ whole point:
 
 ```
 .anneal/warm/<snapshot_key>/
-├── Cargo.toml, Cargo.lock, crate*/src/*.rs   ← source (mostly shared inodes/CoW; ~free)
-├── target/ …                                 ← warm build state (real bytes; the bulk)
+├── Cargo.toml, Cargo.lock, crate*/src/*.rs   ← declared inputs (source; mostly shared inodes/CoW; ~free)
+├── target/ …                                 ← warm snapshot state (real bytes; the bulk)
 ├── .home/  .tmp/                             ← scratch (clearable)
-├── .anneal-inputs                            ← path→digest manifest, for §5.5's diff
-└── target/.anneal-committed                  ← clean-commit marker (§5.4)
+├── .anneal-inputs                            ← path→digest manifest of the declared inputs (§5.5's diff baseline)
+└── .anneal-committed                         ← commit record, root-level + engine-agnostic (§5.4)
 ```
+
+**Declared inputs** are exactly the action's `inputs` map — the rule's enumerated source
+set (the package tree globbed, minus `IGNORED_DIRS` like `target`/`.git`/`.anneal`) plus
+any routed `data` — the *same* set the action cache key is computed over. `target/` is the
+**snapshot, not an input** (it is kept warm, never diffed as source); declared outputs,
+undeclared files, and the (ambient) toolchain are likewise outside the diff. So
+`.anneal-inputs` is the per-path itemization of the set the cache key aggregates, and the
+sync's universe is precisely `Action.inputs`.
 
 If it held only `target/` and the code were re-laid every build, **every source file would
 get a fresh mtime → cargo would see everything as newer than `target/` → full rebuild**,
