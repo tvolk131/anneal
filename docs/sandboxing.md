@@ -275,11 +275,24 @@ The working tree should be **indistinguishable from a real checkout** — only s
 `target/` + scratch — so the native tool behaves exactly as it would locally. Anneal's
 manifest and commit record are *our* bookkeeping, read by the **executor during sync**,
 never by the rule's analysis (which globs the user's *repo*, not the warm dir), so they sit
-**beside** the tree keyed by the same `snapshot_key`, not in it. (Root-level dotfiles also
-work — cargo ignores them and the snapshot save only touches `target/` — but the sibling
-layout keeps the "faithful checkout" property crisp.) The commit record's **existence** is
-the whole signal (§5.4); equivalently it folds into `inputs` via atomic-rename-on-commit,
-so "manifest present = committed."
+**beside** the tree keyed by the same `snapshot_key`, not in it (hence no `.anneal-` hiding
+prefix is needed). (Root-level dotfiles also work — cargo ignores them and the snapshot save
+only touches `target/` — but the sibling layout keeps the "faithful checkout" property
+crisp.) The commit record's **existence** is the whole signal (§5.4); equivalently it folds
+into `inputs` via atomic-rename-on-commit, so "manifest present = committed."
+
+**Why files, not an embedded database.** The commit dance is a transaction, so a DB
+(SQLite/redb) is a fair instinct — but it's the wrong fit here, consistent with the rest of
+Anneal's storage layer (CAS, action cache, and snapshot index are all flat-files +
+atomic-rename). The load-bearing state (`target/`, source, CAS blobs) *must* be real files,
+so a DB could only hold the small metadata sidecar — a **second source of truth** to keep
+consistent with the filesystem that holds the real truth (DB says clean, dir was `rm`'d…).
+And the only consistency we need is **one atomic op per key** — a manifest swap — which
+`rename(2)` delivers crash-safely with zero dependencies; that's the right-sized OS
+primitive, not a hand-rolled DB. A DB earns its keep for *relational/graph* metadata (cf.
+Nix's SQLite for the store's reference graph + GC reachability); our per-key warm metadata
+is flat and independent, so files win. (Even the eventual CAS GC is a file mark-and-sweep,
+stop-the-world under the workspace lock — see TODO — so it doesn't force a DB either.)
 
 **Declared inputs** are exactly the action's `inputs` map — the rule's enumerated source
 set (the package tree globbed, minus `IGNORED_DIRS` like `target`/`.git`/`.anneal`) plus
