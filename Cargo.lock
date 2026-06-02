@@ -81,6 +81,7 @@ dependencies = [
  "anneal-core",
  "anneal-exec",
  "anneal-loader",
+ "anneal-query",
  "anneal-rules",
  "clap",
  "tempfile",
@@ -122,6 +123,7 @@ version = "0.0.0"
 dependencies = [
  "anneal-core",
  "anneal-loader",
+ "anneal-rules",
  "tempfile",
 ]
 

@@ -9,4 +9,5 @@ anneal-core = { path = "../anneal-core" }
 anneal-loader = { path = "../anneal-loader" }
 
 [dev-dependencies]
+anneal-rules = { path = "../anneal-rules" }
 tempfile = "3"

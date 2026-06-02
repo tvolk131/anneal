@@ -1,9 +1,13 @@
 //! Graph queries (§11): ownership, `affected`, and `why`.
 //!
-//! Milestone-1 scope: [`owner`] (the file → package map that `affected` builds on). The
-//! `affected` and `why` queries layer on top and arrive in subsequent increments.
+//! Milestone-1 scope: [`owner`] (the file → package map) and [`affected`] (the
+//! reverse-dependency closure of a change). `why` arrives next.
 
-use std::path::Path;
+use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
+
+use anneal_core::Label;
+use anneal_loader::TargetGraph;
 
 /// The package that **owns** a path: the nearest enclosing directory containing a
 /// `BUILD` file (§1.5). Returns the package path (`/`-separated; empty string for the
@@ -35,6 +39,82 @@ fn package_path(rel: &Path) -> String {
         .map(|c| c.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// The result of an [`affected`] query.
+pub struct Affected {
+    /// The affected targets, sorted and deduped: every target in a changed package, plus
+    /// everything that transitively depends on one.
+    pub targets: Vec<Label>,
+    /// Set when a changed file had no owning package, forcing a conservative
+    /// workspace-wide result (§11.3). `targets` is then *every* target in the graph.
+    pub workspace_wide: bool,
+    /// The unowned changed files that triggered `workspace_wide` (for diagnostics).
+    pub unowned: Vec<PathBuf>,
+}
+
+/// The targets **affected** by a set of changed files (§11.3): every target in a changed
+/// file's package, plus the reverse-dependency closure of those targets.
+///
+/// Package granularity (a changed file affects *all* targets in its package) is the sound,
+/// cheap choice — it needs only the loaded graph, never analysis, and never *under*-selects
+/// (the correctness requirement; over-selection is recovered by the cache layers below).
+/// A changed file with **no owning package** can't be scoped, so it conservatively makes
+/// the whole workspace affected.
+///
+/// Pure: `changed` is supplied by the caller (the CLI runs `git diff`), so this is
+/// testable without git. `workspace_root` is needed only to resolve [`owner`].
+pub fn affected(workspace_root: &Path, graph: &TargetGraph, changed: &[PathBuf]) -> Affected {
+    // 1. Map each changed file to its owning package; collect any unowned files.
+    let mut changed_packages: BTreeSet<String> = BTreeSet::new();
+    let mut unowned: Vec<PathBuf> = Vec::new();
+    for path in changed {
+        match owner(workspace_root, path) {
+            Some(package) => {
+                changed_packages.insert(package);
+            }
+            None => unowned.push(path.clone()),
+        }
+    }
+
+    // 2. An unowned change can't be scoped → conservatively, everything is affected.
+    if !unowned.is_empty() {
+        let mut targets: Vec<Label> = graph.targets().map(|t| t.label.clone()).collect();
+        targets.sort();
+        return Affected { targets, workspace_wide: true, unowned };
+    }
+
+    // 3. Seeds: every target in a changed package (package granularity).
+    let seeds: Vec<Label> = graph
+        .targets()
+        .filter(|t| changed_packages.contains(t.label.package()))
+        .map(|t| t.label.clone())
+        .collect();
+
+    // 4. Reverse-dependency index: dep → the targets that declared it.
+    let mut rdeps: HashMap<&Label, Vec<&Label>> = HashMap::new();
+    for target in graph.targets() {
+        for dep in &target.deps {
+            rdeps.entry(dep).or_default().push(&target.label);
+        }
+    }
+
+    // 5. Reverse-closure from the seeds (a seed is itself affected).
+    let mut reached: BTreeSet<Label> = BTreeSet::new();
+    let mut stack = seeds;
+    while let Some(label) = stack.pop() {
+        if reached.insert(label.clone()) {
+            if let Some(dependents) = rdeps.get(&label) {
+                stack.extend(dependents.iter().map(|l| (*l).clone()));
+            }
+        }
+    }
+
+    Affected {
+        targets: reached.into_iter().collect(), // BTreeSet → sorted, deduped
+        workspace_wide: false,
+        unowned: Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -93,5 +173,71 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("loose")).unwrap();
         assert_eq!(own(tmp.path(), "loose/x.txt"), None);
         assert_eq!(own(tmp.path(), "app/x.rs").as_deref(), Some("app"));
+    }
+}
+
+#[cfg(test)]
+mod affected_tests {
+    use super::*;
+    use anneal_loader::load_workspace;
+    use anneal_rules::builtin_rules;
+
+    /// `app → lib → base`, plus an independent `other`. `data`-style genrule deps carry
+    /// the edges the reverse-closure walks.
+    fn diamond_workspace() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let write = |pkg: &str, build: &str| {
+            let dir = tmp.path().join(pkg);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("BUILD"), build).unwrap();
+        };
+        write("base", "genrule(name = \"base\", outs = [\"b\"], cmd = \"echo > $(OUTS)\")\n");
+        write("lib", "genrule(name = \"lib\", deps = [\"//base:base\"], outs = [\"l\"], cmd = \"echo > $(OUTS)\")\n");
+        write("app", "genrule(name = \"app\", deps = [\"//lib:lib\"], outs = [\"a\"], cmd = \"echo > $(OUTS)\")\n");
+        write("other", "genrule(name = \"other\", outs = [\"o\"], cmd = \"echo > $(OUTS)\")\n");
+        tmp
+    }
+
+    fn affected_labels(root: &Path, graph: &TargetGraph, changed: &[&str]) -> Vec<String> {
+        let paths: Vec<PathBuf> = changed.iter().map(PathBuf::from).collect();
+        affected(root, graph, &paths)
+            .targets
+            .iter()
+            .map(|l| l.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn change_propagates_up_the_reverse_closure() {
+        let tmp = diamond_workspace();
+        let graph = load_workspace(tmp.path(), &builtin_rules()).unwrap();
+
+        // Editing base affects base and everything that (transitively) depends on it.
+        assert_eq!(
+            affected_labels(tmp.path(), &graph, &["base/src.txt"]),
+            vec!["//app:app", "//base:base", "//lib:lib"],
+        );
+        // Editing a leaf consumer affects only itself.
+        assert_eq!(
+            affected_labels(tmp.path(), &graph, &["app/src.txt"]),
+            vec!["//app:app"],
+        );
+        // An independent package is isolated.
+        assert_eq!(
+            affected_labels(tmp.path(), &graph, &["other/src.txt"]),
+            vec!["//other:other"],
+        );
+    }
+
+    #[test]
+    fn unowned_change_is_conservatively_workspace_wide() {
+        let tmp = diamond_workspace(); // no root BUILD → a root-level file is unowned
+        let graph = load_workspace(tmp.path(), &builtin_rules()).unwrap();
+
+        let result = affected(tmp.path(), &graph, &[PathBuf::from("flake.nix")]);
+        assert!(result.workspace_wide, "an unowned change forces workspace-wide");
+        assert_eq!(result.unowned, vec![PathBuf::from("flake.nix")]);
+        // Every target is affected.
+        assert_eq!(result.targets.len(), 4);
     }
 }

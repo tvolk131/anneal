@@ -13,13 +13,14 @@
 //! only orchestrates and formats.
 
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 
 use anneal_analysis::Analyzer;
 use anneal_core::{
     AxisValues, Configuration, Coverage, DebugInfo, Label, Lto, OptLevel, Platform, Sanitizer,
 };
 use anneal_exec::{Action, ActionResult, LocalExecutor};
-use anneal_loader::load_closure;
+use anneal_loader::{load_closure, load_workspace};
 use anneal_rules::builtin_rules;
 use clap::{Args, Parser, Subcommand};
 
@@ -44,6 +45,12 @@ enum Command {
     Test {
         /// The target label, e.g. `//app:app`.
         target: String,
+    },
+    /// List the targets affected by changes since a git ref (§11.3).
+    Affected {
+        /// The git ref to diff against (e.g. `origin/main`, a commit SHA).
+        #[arg(long)]
+        since: String,
     },
 }
 
@@ -95,7 +102,54 @@ fn run(cli: Cli) -> Result<i32, String> {
     match cli.command {
         Command::Build { target } => build(&target, &config, &root),
         Command::Test { target } => test(&target, &config, &root),
+        Command::Affected { since } => affected(&since, &root),
     }
+}
+
+/// Print the targets affected by changes since `since` (§11.3): `git diff` → owning
+/// packages → reverse-dependency closure. Loads the whole workspace (reverse-deps need
+/// every target), but runs no analysis.
+fn affected(since: &str, root: &Path) -> Result<i32, String> {
+    let changed = git_changed_files(root, since)?;
+    if changed.is_empty() {
+        println!("no changes since {since}");
+        return Ok(0);
+    }
+    let graph = load_workspace(root, &builtin_rules()).map_err(|e| e.to_string())?;
+    let result = anneal_query::affected(root, &graph, &changed);
+
+    if result.workspace_wide {
+        eprintln!(
+            "note: {} change(s) outside any package (e.g. {}) — treating the whole workspace as affected",
+            result.unowned.len(),
+            result.unowned[0].display(),
+        );
+    }
+    for label in &result.targets {
+        println!("{label}");
+    }
+    Ok(0)
+}
+
+/// Files changed in the working tree relative to `since` (workspace-root == git-root).
+/// Untracked-but-unadded files are not reported by `git diff` — a known limitation.
+fn git_changed_files(root: &Path, since: &str) -> Result<Vec<PathBuf>, String> {
+    let out = ProcessCommand::new("git")
+        .args(["diff", "--name-only", since])
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("running git: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git diff --name-only {since} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(PathBuf::from)
+        .collect())
 }
 
 /// Analyze and execute a target's action graph; return the process exit code.
