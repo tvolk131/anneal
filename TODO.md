@@ -95,8 +95,8 @@
         materialize+capture are ~2% each. Separately, load+analyze adds a roughly-fixed ~10 ms to a cold
         `anneal build`. Trivial crates *exaggerate* this (no compile time to amortize), but `save` scales with
         `target/` **byte** size, and real `target/` dirs are large — so this is the overhead-gate lever at scale.
-  - [x] **Warm-sandbox reuse for snapshot owners** — implemented (opt-in `LocalExecutor::warm_reuse()`), per the
-        `docs/sandboxing.md` §5 design. Snapshot owners keep their `target/` working tree in place and sync only
+  - [x] **Warm-sandbox reuse for snapshot owners — implemented, now ON BY DEFAULT** (`warm_reuse(false)` opts
+        out), per the `docs/sandboxing.md` §5 design. Snapshot owners keep their `target/` working tree in place and sync only
         changed declared inputs (the §5.5 mtime-safe diff: distinct-inode copy + fresh mtime); skips restore +
         teardown; commit-record discipline (manifest doubles as it; clear-on-begin/atomic-write-on-commit); same
         snapshot-key owners serialize on the dir, different keys stay parallel. `warm.rs` (engine, unit-tested) +
@@ -105,14 +105,23 @@
         +36% (N=16) → +58% (N=48) and bounded** — restore+teardown off the critical path. Still not *beating*
         native on trivial crates (native incremental ≈ cargo's fixed startup there); the residual is the
         synchronous full-`target/` save (next).
-  - [ ] **Private vs shared snapshots — don't save private per build** (`docs/sandboxing.md` §5.8.1). The warm
-        residual is the full-`target/` save still on the critical path. Cargo's `target/` has **no consumers**, so
-        it never needs a per-build CAS save — the warm dir is the live copy. Save per build **only if the snapshot
-        is shared** (consumed by a `SnapshotConsuming` action, e.g. pnpm `node_modules`). **Must be a rule-declared
-        flag, not a per-graph consumer scan:** the owner is action-cacheable, so "no consumer in this graph → skip
-        save → cache owner" breaks a later invocation whose owner cache-hits and never produces the snapshot.
-        Plan: `Action.snapshot_shared` (default true) + `.snapshot_private(key, paths)`; cargo marks `target/`
-        private; `save = SnapshotBased && snapshot_shared`; warm-dir manifest commit stays unconditional.
+  - [x] **Private vs shared snapshots — don't save private per build** (`docs/sandboxing.md` §5.8.1). Done:
+        `Action.snapshot_shared` + `.snapshot_private`; cargo `target/` is private; `save = SnapshotBased &&
+        (snapshot_shared || !warm_eligible)` (the `!warm_eligible` term keeps the non-warm path saving, since
+        test-run's byte-identity cache-hit relies on it there). Rule-declared, **not** a per-graph consumer scan
+        (the owner is action-cacheable → "no consumer in this graph → skip+cache" would starve a later
+        cache-hitting invocation's consumer). Measured (heavy `syn`, warm single-change): **+62% → +27% vs
+        native** by dropping the ~19 ms private save.
+  - [ ] **Default-on prerequisites** (warm reuse is now the default for owners): (a) run cold-vs-warm
+        correctness-neutrality verification (§1.4) routinely — the isolation model is now persistent in-place;
+        (b) the **cross-process workspace lock** (+ sandbox-name `pid` token) — persistent per-key warm dirs are
+        shared across concurrent `anneal` processes, and today's per-key lock is in-process only. Until (b),
+        concurrent `anneal` invocations on one workspace can corrupt a shared warm dir.
+  - [ ] **Cross-machine / CI incremental** — default-on warm reuse fixes the *same-machine* loop but not
+        cross-machine: a fresh CI runner has no at-path warm dir, and a restored `target/` at a different path
+        full-rebuilds (cargo path-sensitivity), so CI incremental still pays cold. Fix needs either **warm-dir
+        caching across runs** (persist/restore the actual `warm/<key>/` dir, path-preserved) or **path
+        canonicalization** (a fixed build path across machines) + a shared snapshot. The next incremental frontier.
   - [ ] **Snapshot-on-evict** (private snapshots, after GC exists) — when GC removes a warm dir, snapshot it to
         the CAS first (restorable to the same stable path → incremental), so eviction costs a save *once*, not
         per build. Eviction-recovery insurance without the per-build tax.

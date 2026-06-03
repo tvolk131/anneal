@@ -27,7 +27,7 @@ fn concat_action(a: Digest, b: Digest, snapshot_key: Digest) -> Action {
 fn warm_reuse_stays_correct_across_a_revert() {
     let tmp = tempfile::tempdir().unwrap();
     let store = tmp.path().join(".anneal");
-    let exec = LocalExecutor::new(&store).unwrap().warm_reuse();
+    let exec = LocalExecutor::new(&store).unwrap(); // warm reuse on by default
     let skey = Digest::of(b"warm-reuse-test-key");
 
     let out = |a: &[u8], b: &[u8]| -> Vec<u8> {
@@ -64,7 +64,7 @@ fn private_snapshot_skips_cas_save_under_warm_reuse_but_shared_saves() {
     // the CAS (the warm dir is its only live copy), while a *shared* owner must.
     let tmp = tempfile::tempdir().unwrap();
     let store = tmp.path().join(".anneal");
-    let exec = LocalExecutor::new(&store).unwrap().warm_reuse();
+    let exec = LocalExecutor::new(&store).unwrap(); // warm reuse on by default
     let index = |k: &Digest| store.join("snapshots").join("index").join(k.to_hex());
     let cmd = ["/bin/sh", "-c", "mkdir -p cache && echo m > cache/m && cp in.txt out.txt"];
     // Distinct input content per action so they have distinct action digests — otherwise
@@ -100,8 +100,8 @@ fn warm_and_cold_paths_agree() {
     let run = |warm: bool| -> Vec<Vec<u8>> {
         let tmp = tempfile::tempdir().unwrap();
         let mut exec = LocalExecutor::new(tmp.path().join(".anneal")).unwrap();
-        if warm {
-            exec = exec.warm_reuse();
+        if !warm {
+            exec = exec.warm_reuse(false); // warm is the default; this is the fresh-path contrast
         }
         inputs
             .iter()

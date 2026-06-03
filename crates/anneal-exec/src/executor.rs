@@ -89,8 +89,12 @@ pub struct LocalExecutor {
     parallelism: usize,
     /// When set, every executed action appends its [`PhaseTimings`] here (diagnostic).
     timings: Option<Mutex<Vec<PhaseTimings>>>,
-    /// Opt-in warm-sandbox reuse for snapshot owners (`docs/sandboxing.md` §5). Off by
-    /// default — it changes the isolation model from fresh-per-build to in-place reuse.
+    /// Warm-sandbox reuse for snapshot owners (`docs/sandboxing.md` §5). **On by default**
+    /// — without it a snapshot owner's incremental rebuild restores `target/` to a new
+    /// sandbox path each run, which cargo treats as stale → full rebuild (the +3495%
+    /// case). Disable with `warm_reuse(false)` for fresh-per-build isolation (verification,
+    /// benchmarks). Caveat: persistent per-key dirs want the cross-process workspace lock
+    /// for multi-process safety (tracked).
     warm_reuse: bool,
     /// Persistent warm working trees, keyed by snapshot key: `warm/<key16>/`.
     warm: PathBuf,
@@ -120,7 +124,7 @@ impl LocalExecutor {
             retain_sandboxes: false,
             parallelism: default_parallelism(),
             timings: None,
-            warm_reuse: false,
+            warm_reuse: true,
             warm: root.join("warm"),
             warm_meta: root.join("warm-meta"),
             warm_locks: Mutex::new(HashMap::new()),
@@ -152,12 +156,13 @@ impl LocalExecutor {
         self
     }
 
-    /// Enable warm-sandbox reuse for snapshot owners (`docs/sandboxing.md` §5; off by
-    /// default). On a cache miss, a `SnapshotBased` action reuses a persistent per-key
-    /// working tree — syncing only changed inputs and keeping `target/` in place —
-    /// instead of a fresh sandbox + snapshot round-trip.
-    pub fn warm_reuse(mut self) -> Self {
-        self.warm_reuse = true;
+    /// Toggle warm-sandbox reuse for snapshot owners (`docs/sandboxing.md` §5; **on by
+    /// default**). When on, a `SnapshotBased` action on a cache miss reuses a persistent
+    /// per-key working tree — syncing only changed inputs and keeping `target/` in place —
+    /// instead of a fresh sandbox + snapshot round-trip. Pass `false` for fresh-per-build
+    /// isolation (verification, benchmark contrast).
+    pub fn warm_reuse(mut self, enabled: bool) -> Self {
+        self.warm_reuse = enabled;
         self
     }
 

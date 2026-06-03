@@ -54,7 +54,9 @@ fn main() {
 
     // --- anneal (library pipeline; the build action only, to mirror `cargo build`) ---
     let label = Label::parse("//ws:ws").unwrap();
-    let exec = LocalExecutor::new(root.join(".anneal")).expect("open .anneal");
+    // Warm reuse is on by default now; this exec is the fresh-per-build contrast for the
+    // cold / no-op / non-warm-change rows.
+    let exec = LocalExecutor::new(root.join(".anneal")).expect("open .anneal").warm_reuse(false);
     let anneal_cold = timed(1, || run_anneal_build(&exec, root, &label));
     let anneal_warm = timed(3, || run_anneal_build(&exec, root, &label));
 
@@ -75,7 +77,7 @@ fn main() {
     // A separate, warm-reuse-enabled store, primed cold once, then the same edit/rebuild
     // loop: the snapshot owner keeps target/ in place and syncs only the changed source,
     // so restore + teardown drop off the critical path.
-    let warm_exec = LocalExecutor::new(root.join(".anneal-warm")).expect("open warm store").warm_reuse();
+    let warm_exec = LocalExecutor::new(root.join(".anneal-warm")).expect("open warm store"); // warm by default
     run_anneal_build(&warm_exec, root, &label); // cold-populate the warm tree
     let mut anneal_change_warm = Duration::MAX;
     for i in 100..103 {
@@ -94,6 +96,7 @@ fn main() {
     // timing-enabled store (isolated from the comparison runs above). ---
     let profile = LocalExecutor::new(root.join(".anneal-profile"))
         .expect("open profile store")
+        .warm_reuse(false) // the breakdown contrasts the fresh-per-build path
         .record_timings();
     run_anneal_build(&profile, root, &label); // cold (from scratch)
     let cold_phases = profile.take_timings();

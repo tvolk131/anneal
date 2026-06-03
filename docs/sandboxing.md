@@ -97,15 +97,27 @@ So read-tracking is a *defensive* tool here (catch missing declarations), not a
 *performance* tool (skip work). The performance case is outsourced to the inner engines
 by the wrap-don't-decompose architecture.
 
-## 5. Warm sandbox reuse — *implemented (opt-in)*
+## 5. Warm sandbox reuse — *implemented, on by default for owners*
 
 > Motivated by the §20 benchmark: on the canonical **incremental** case (edit one crate,
 > rebuild), the fresh-sandbox model loses to native cargo and loses *worse* as the
-> workspace grows (+50% at 4 crates → +265% at 64). The phase breakdown shows why — see
-> §5.7. This section is the design; it is **implemented** behind the opt-in
-> `LocalExecutor::warm_reuse()` (`warm.rs` engine + `run_warm`), with the residual
-> overhead — the snapshot save — still synchronous and full (the §5.8 follow-on). It is the
-> sandbox-lifecycle counterpart to the snapshot protocol (`build-system-design.md` §8.2).
+> workspace grows (+50% at 4 crates → +265% at 64; +3495% on a real `syn` workload, where
+> the restored `target/` lands at a new path each run and cargo full-rebuilds). This is
+> **implemented** (`warm.rs` engine + `run_warm`) and is now the **default** for snapshot
+> owners (`LocalExecutor::warm_reuse(false)` opts out for verification/benchmarks). It is
+> the sandbox-lifecycle counterpart to the snapshot protocol (`build-system-design.md` §8.2).
+>
+> **Default-on prerequisites (tracked, not yet closed):** (1) routine cold-vs-warm
+> correctness-neutrality verification (§1.4) — the isolation model is now persistent
+> in-place, not fresh-per-build; (2) the cross-process workspace lock — persistent per-key
+> dirs are shared across concurrent `anneal` processes (today's per-key lock is in-process).
+>
+> **What default-on does and doesn't fix:** it eliminates the +3495% on the *same-machine*
+> dev loop (owners reuse the warm dir at a stable path → true incremental). It does **not**
+> make cargo's `target/` path-relocatable — the full-rebuild cost relocates to cases with no
+> at-path warm dir: **cross-machine / fresh CI** (needs warm-*dir* caching across runs, or
+> path canonicalization + a shared snapshot) and **post-eviction** (one-shot; → snapshot-on-
+> evict). Those are one-time, not per-build.
 
 ### 5.1 The reframe
 
