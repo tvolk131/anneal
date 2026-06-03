@@ -97,12 +97,14 @@ So read-tracking is a *defensive* tool here (catch missing declarations), not a
 *performance* tool (skip work). The performance case is outsourced to the inner engines
 by the wrap-don't-decompose architecture.
 
-## 5. Warm sandbox reuse — *designed, not yet built*
+## 5. Warm sandbox reuse — *implemented (opt-in)*
 
 > Motivated by the §20 benchmark: on the canonical **incremental** case (edit one crate,
-> rebuild), the current fresh-sandbox model loses to native cargo and loses *worse* as the
+> rebuild), the fresh-sandbox model loses to native cargo and loses *worse* as the
 > workspace grows (+50% at 4 crates → +265% at 64). The phase breakdown shows why — see
-> the end of this section. This is the design for closing that gap. It is the
+> §5.7. This section is the design; it is **implemented** behind the opt-in
+> `LocalExecutor::warm_reuse()` (`warm.rs` engine + `run_warm`), with the residual
+> overhead — the snapshot save — still synchronous and full (the §5.8 follow-on). It is the
 > sandbox-lifecycle counterpart to the snapshot protocol (`build-system-design.md` §8.2).
 
 ### 5.1 The reframe
@@ -319,18 +321,52 @@ guarantee. Hermetic builds shouldn't write outside `target/` + declared outputs,
 build scripts sometimes do — track-and-clean, or treat it as part of the hermeticity
 contract.
 
-### 5.7 Expected payoff
+### 5.7 Payoff — measured
 
-From the measured incremental build @ 16 crates (~100 ms Anneal vs ~50 ms native):
+Warm reuse removes restore + teardown (the O(`target/`) terms) from the critical path. On
+the single-package-change benchmark vs native cargo:
 
-| Removed by | Phase | ~cost @ N=16 |
+| | non-warm | **warm reuse** |
 |---|---|---|
-| warm reuse | restore snapshot | 16 ms |
-| warm reuse | teardown sandbox | 9 ms |
-| background + incremental save | save snapshot | 7 ms |
-| warm reuse (stable mtimes) | run-overhead vs native | ~12 ms |
+| N=16 | +91% | **+36%** |
+| N=48 | +203% | **+58%** |
 
-The plausible end state: incremental **≈ native**, with the CAS snapshot demoted to a
-background durability/sharing layer — turning the §20.3 "incremental must *beat*" gate from
-"lose, diverging" into "match-or-beat," with Anneal's added value (cross-machine cache,
-affected selection) sitting on top of parity rather than fighting a deficit.
+The non-warm overhead **diverges** with workspace size; warm reuse is **bounded** — exactly
+the restore+teardown removal. The residual (+36–58%) is dominated by the snapshot save,
+still synchronous and full — §5.8. On trivial crates Anneal does not yet *beat* native
+(whose incremental is ≈ its fixed startup, with nothing to amortize against); that verdict
+needs a realistic workload where compile time dominates.
+
+### 5.8 The residual: incremental + background snapshot save — *not yet built*
+
+After warm reuse, the warm critical path is `sync(O(change)) + recompile(O(change)) +
+save(O(full target/), synchronous)`. The save (`SnapshotStore::save`) **re-walks all of
+`target/` and re-reads+re-hashes every file every build** — O(`target/`) regardless of how
+little changed — and sits on the critical path. It is the last term that both *dominates*
+the residual and *scales* with `target/` size.
+
+**The decoupling that licenses fixing it:** with warm reuse the producer reuses its
+**in-place** `target/`, so it **never restores its own CAS snapshot**. The save's only
+consumers are *external* — snapshot-*consuming* actions (test runs restoring `target/`),
+other machines / CI, and cold-start after eviction. The producer doesn't need its own save,
+so the save can shrink to the delta and move off the producer's critical path.
+
+- **Incremental save** — the prior manifest already records each file's `(mtime, size,
+  mode, digest)`. Walk `target/`, `stat` each file; if `(mtime, size)` matches the prior
+  manifest, **reuse its recorded digest** (no read, no hash); only changed/new files are
+  read + hashed + `put`. Cost → O(change). This is cargo's own fingerprint trick applied to
+  snapshot capture. (It trusts mtime+size — the *inverse* of §5.5: there we *force* fresh
+  mtimes on synced inputs; here we *read* mtimes to detect changed outputs. A content change
+  that didn't bump mtime would yield a stale snapshot for consumers; the §1.4 cold-vs-warm
+  verification is the backstop, with a paranoid full-hash mode available.)
+- **Background save** — return the build result immediately (the warm dir is already
+  committed, so the next reuse doesn't wait) and run the save on a worker thread. The one
+  sync point: a *consumer* needing the snapshot must wait for it — and `build_edges` already
+  orders consumer-after-owner via the snapshot-owner edge, so "owner done" includes its save
+  (or the save is joined lazily at restore). A plain `anneal build` with no consumers joins
+  outstanding saves before process exit so nothing is lost.
+
+**Why it matters:** together they reduce the user-felt warm critical path to `sync +
+recompile` ≈ native incremental, and make the incremental overhead **independent of
+`target/` size** — killing the scaling that made non-warm diverge. This is the piece that
+moves the §20.3 "incremental must *beat*" gate from "match" toward "beat".
