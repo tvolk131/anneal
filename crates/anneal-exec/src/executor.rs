@@ -13,7 +13,7 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::process::{Child, ExitStatus};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,6 +25,7 @@ use crate::action::{Action, CachePolicy, ExecutionMode, InputSource};
 use crate::cache::{action_digest, ActionCache, StoredResult};
 use crate::materializer;
 use crate::sandbox::{self, SandboxSpec};
+use crate::warm::{self, InputManifest};
 
 /// Disambiguates per-run sandbox directories for normal (non-snapshot) actions.
 static SANDBOX_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -88,6 +89,16 @@ pub struct LocalExecutor {
     parallelism: usize,
     /// When set, every executed action appends its [`PhaseTimings`] here (diagnostic).
     timings: Option<Mutex<Vec<PhaseTimings>>>,
+    /// Opt-in warm-sandbox reuse for snapshot owners (`docs/sandboxing.md` §5). Off by
+    /// default — it changes the isolation model from fresh-per-build to in-place reuse.
+    warm_reuse: bool,
+    /// Persistent warm working trees, keyed by snapshot key: `warm/<key16>/`.
+    warm: PathBuf,
+    /// Warm-dir bookkeeping (manifest = commit record), kept out of the working tree.
+    warm_meta: PathBuf,
+    /// Per-snapshot-key locks: same-key owners share one warm dir and serialize on it
+    /// (§5.3.1), while different keys run concurrently.
+    warm_locks: Mutex<HashMap<Digest, Arc<Mutex<()>>>>,
 }
 
 impl LocalExecutor {
@@ -109,6 +120,10 @@ impl LocalExecutor {
             retain_sandboxes: false,
             parallelism: default_parallelism(),
             timings: None,
+            warm_reuse: false,
+            warm: root.join("warm"),
+            warm_meta: root.join("warm-meta"),
+            warm_locks: Mutex::new(HashMap::new()),
         })
     }
 
@@ -134,6 +149,15 @@ impl LocalExecutor {
     /// A diagnostic for profiling; drain with [`LocalExecutor::take_timings`].
     pub fn record_timings(mut self) -> Self {
         self.timings = Some(Mutex::new(Vec::new()));
+        self
+    }
+
+    /// Enable warm-sandbox reuse for snapshot owners (`docs/sandboxing.md` §5; off by
+    /// default). On a cache miss, a `SnapshotBased` action reuses a persistent per-key
+    /// working tree — syncing only changed inputs and keeping `target/` in place —
+    /// instead of a fresh sandbox + snapshot round-trip.
+    pub fn warm_reuse(mut self) -> Self {
+        self.warm_reuse = true;
         self
     }
 
@@ -504,6 +528,133 @@ impl LocalExecutor {
             .join(format!("{}-{}", &key.to_hex()[..16], nonce))
     }
 
+    /// The per-snapshot-key serialization lock for a warm dir, created on first use.
+    fn warm_key_lock(&self, key: &Digest) -> Arc<Mutex<()>> {
+        self.warm_locks
+            .lock()
+            .unwrap()
+            .entry(*key)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    /// Run a snapshot-owner action against a **persistent warm working tree** (§5).
+    /// Reuse it in place when a committed manifest exists (sync only changed inputs, keep
+    /// `target/` warm, no restore, no teardown); otherwise cold-populate it (wipe →
+    /// materialize all inputs → restore the last good snapshot). The snapshot is still
+    /// saved to the CAS so consumers and other machines can restore it. Same-key owners
+    /// serialize on the dir via [`LocalExecutor::warm_key_lock`].
+    fn run_warm(&self, action: &Action) -> Result<ActionResult, ExecError> {
+        let started = Instant::now();
+        let skey = action
+            .snapshot_key
+            .expect("run_warm is only called for snapshot owners, which have a snapshot_key");
+        let tag = skey.to_hex();
+        let tag = &tag[..16];
+        let warm_dir = self.warm.join(tag);
+        let manifest_path = self.warm_meta.join(tag).join("inputs");
+
+        // Same-key owners share this warm dir; serialize on it (different keys run free).
+        let key_lock = self.warm_key_lock(&skey);
+        let _guard = key_lock.lock().unwrap();
+
+        // The desired declared inputs as path -> digest (the action is already resolved).
+        let desired: BTreeMap<PathBuf, Digest> = action
+            .inputs
+            .values()
+            .filter_map(|i| match &i.source {
+                InputSource::Blob(d) => Some((i.path.clone(), *d)),
+                InputSource::Output { .. } => None,
+            })
+            .collect();
+
+        // Reuse iff a committed manifest exists AND the working tree is present.
+        let baseline = match InputManifest::load(&manifest_path)? {
+            Some(old) if warm_dir.exists() => Some(old),
+            _ => None,
+        };
+        // BEGIN the transaction: the manifest doubles as the commit record (§5.4), so
+        // clear it before mutating — a crash then leaves no baseline and the next run
+        // cold-populates rather than trusting a half-synced tree.
+        let _ = fs::remove_file(&manifest_path);
+
+        let t_materialize;
+        let mut t_restore = Duration::ZERO;
+        let prepared = if let Some(old) = baseline {
+            // Reuse: keep target/ and unchanged sources in place; refresh only scratch.
+            let m = Instant::now();
+            let _ = fs::remove_dir_all(warm_dir.join(".home"));
+            let _ = fs::remove_dir_all(warm_dir.join(".tmp"));
+            let prepared = materializer::layout(action, warm_dir.clone())?;
+            warm::sync(&self.cas, &prepared.cwd, &old, &desired)?;
+            t_materialize = m.elapsed();
+            prepared
+        } else {
+            // Cold-populate: wipe, materialize all inputs, restore the last good snapshot.
+            let m = Instant::now();
+            if warm_dir.exists() {
+                let _ = fs::remove_dir_all(&warm_dir);
+            }
+            let prepared = materializer::prepare_at(&self.cas, action, warm_dir.clone())?;
+            t_materialize = m.elapsed();
+            let r = Instant::now();
+            for path in &action.snapshot_paths {
+                self.snapshots.restore(&self.cas, &skey, &prepared.cwd.join(path))?;
+            }
+            t_restore = r.elapsed();
+            prepared
+        };
+
+        let spec = SandboxSpec {
+            mode: action.execution_mode,
+            cwd: &prepared.cwd,
+            home: &prepared.home,
+            tmp: &prepared.tmp,
+            env: &action.env,
+        };
+        let run_start = Instant::now();
+        let mut child = sandbox::build_command(action, &spec)
+            .spawn()
+            .map_err(ExecError::Spawn)?;
+        let status = wait_with_timeout(&mut child, action.timeout_ms)?;
+        let exit_code = status.code().unwrap_or(-1);
+        let t_run = run_start.elapsed();
+
+        let mut t_capture = Duration::ZERO;
+        let mut t_save = Duration::ZERO;
+        let outputs = if exit_code == 0 {
+            let c = Instant::now();
+            let captured = materializer::capture(&self.cas, action, &prepared)?;
+            t_capture = c.elapsed();
+            let s = Instant::now();
+            for path in &action.snapshot_paths {
+                self.snapshots.save(&self.cas, &skey, &prepared.cwd.join(path))?;
+            }
+            t_save = s.elapsed();
+            // COMMIT: the atomically-written manifest's presence marks the tree clean.
+            InputManifest::new(desired).save_atomic(&manifest_path)?;
+            captured
+        } else {
+            // Failed build: leave the manifest absent → next run cold-populates. No teardown.
+            BTreeMap::new()
+        };
+
+        if let Some(sink) = &self.timings {
+            sink.lock().unwrap().push(PhaseTimings {
+                action: action.name().to_owned(),
+                materialize: t_materialize,
+                restore: t_restore,
+                run: t_run,
+                capture: t_capture,
+                save: t_save,
+                teardown: Duration::ZERO,
+                total: started.elapsed(),
+            });
+        }
+
+        Ok(ActionResult { exit_code, outputs, cache_hit: false })
+    }
+
     /// Run an action **outside the action cache**, in a caller-named sandbox, with
     /// explicit snapshot restore/save. This is the primitive the correctness-neutral
     /// verification harness uses to run an action cold vs. snapshot-warm and compare.
@@ -554,10 +705,18 @@ impl Executor for LocalExecutor {
             }
         }
 
-        // Cache miss (or non-cacheable): run, restoring/saving the snapshot per policy.
-        // Each run gets a unique sandbox; the snapshot is restored from the store.
-        let root = self.sandbox_root(&key);
-        let result = self.run_core(action, root, restore, save)?;
+        // Cache miss (or non-cacheable): run the action. A snapshot *owner* reuses its
+        // persistent warm working tree when that's enabled (§5); everything else gets a
+        // fresh unique sandbox with the snapshot restored from the store.
+        let warm_eligible = self.warm_reuse
+            && matches!(action.cache_policy, CachePolicy::SnapshotBased)
+            && action.snapshot_key.is_some();
+        let result = if warm_eligible {
+            self.run_warm(action)?
+        } else {
+            let root = self.sandbox_root(&key);
+            self.run_core(action, root, restore, save)?
+        };
 
         if result.exit_code == 0 && cacheable {
             self.cache.insert(

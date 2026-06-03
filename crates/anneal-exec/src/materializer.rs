@@ -40,6 +40,16 @@ pub(crate) fn prepare_at(
     action: &Action,
     root: PathBuf,
 ) -> Result<PreparedSandbox, ExecError> {
+    let prepared = layout(action, root)?;
+    materialize_inputs(cas, action, &prepared.cwd)?;
+    Ok(prepared)
+}
+
+/// Compute the sandbox layout and create its directories (`cwd`, `HOME`, `TMPDIR`, and
+/// declared-output parents) **without** materializing inputs. `prepare_at` is this plus
+/// input materialization; the warm-reuse path uses `layout` alone and then syncs only the
+/// changed inputs in place (see `warm`).
+pub(crate) fn layout(action: &Action, root: PathBuf) -> Result<PreparedSandbox, ExecError> {
     // Joining a bare "." would append a CurDir component that `create_dir_all`
     // rejects, so treat the default working directory as the root itself.
     let cwd = if action.working_directory == Path::new(".") {
@@ -54,6 +64,19 @@ pub(crate) fn prepare_at(
     std::fs::create_dir_all(&home).map_err(ExecError::Io)?;
     std::fs::create_dir_all(&tmp).map_err(ExecError::Io)?;
 
+    // Pre-create parent directories for declared outputs, so an action can write to a
+    // nested output path (e.g. `gen/config.json`) without creating the dir itself.
+    for output in action.outputs.values() {
+        if let Some(parent) = cwd.join(output).parent() {
+            std::fs::create_dir_all(parent).map_err(ExecError::Io)?;
+        }
+    }
+
+    Ok(PreparedSandbox { root, cwd, home, tmp })
+}
+
+/// Materialize all declared inputs of `action` into `cwd` (hardlink/clone from the CAS).
+fn materialize_inputs(cas: &Cas, action: &Action, cwd: &Path) -> Result<(), ExecError> {
     for input in action.inputs.values() {
         // Inputs must be resolved to blobs before reaching the materializer; the
         // graph executor guarantees this. An unresolved Output is a caller error.
@@ -66,24 +89,9 @@ pub(crate) fn prepare_at(
                 })
             }
         };
-        let dest = cwd.join(&input.path);
-        cas.link_into(digest, &dest).map_err(ExecError::Io)?;
+        cas.link_into(digest, &cwd.join(&input.path)).map_err(ExecError::Io)?;
     }
-
-    // Pre-create parent directories for declared outputs, so an action can write to a
-    // nested output path (e.g. `gen/config.json`) without creating the dir itself.
-    for output in action.outputs.values() {
-        if let Some(parent) = cwd.join(output).parent() {
-            std::fs::create_dir_all(parent).map_err(ExecError::Io)?;
-        }
-    }
-
-    Ok(PreparedSandbox {
-        root,
-        cwd,
-        home,
-        tmp,
-    })
+    Ok(())
 }
 
 /// Read each declared output from the sandbox and store it in the CAS, returning the
