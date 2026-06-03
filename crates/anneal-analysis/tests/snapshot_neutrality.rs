@@ -8,7 +8,9 @@
 
 use anneal_analysis::Analyzer;
 use anneal_core::{AxisValues, Configuration, Label, OptLevel, Platform};
-use anneal_exec::{prime_snapshot, verify_correctness_neutral, Action, LocalExecutor};
+use anneal_exec::{
+    prime_snapshot, verify_correctness_neutral, verify_warm_neutral, Action, LocalExecutor,
+};
 use anneal_loader::load_package;
 use anneal_rules::builtin_rules;
 
@@ -111,6 +113,54 @@ fn snapshot_restored_build_is_correctness_neutral() {
     assert!(
         report.is_neutral(),
         "snapshot-warm build diverged from cold build on: {:?}\ncold={:?}\nwarm={:?}",
+        report.divergences(),
+        report.cold,
+        report.warm,
+    );
+}
+
+#[test]
+fn warm_reuse_build_is_correctness_neutral() {
+    // The same release-blocker gate (§1.4, §22) for the **warm-reuse** path: an incremental
+    // build that keeps `target/` in place and syncs only the edited crate must produce
+    // byte-identical outputs to a clean build of the edited state. This exercises the
+    // in-place sync (and its mtime handling) rather than the CAS-restore path above.
+    let tmp = two_crate_fixture();
+    let root = tmp.path();
+    let registry = builtin_rules();
+    let cfg = debug_config();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
+    let label = Label::parse("//ws:ws").unwrap();
+
+    let build_action = |exec: &LocalExecutor| -> Action {
+        let graph = load_package(root, "ws", &registry).unwrap();
+        Analyzer::new(&graph, &registry, &cfg, root, exec.cas())
+            .analyze(&label)
+            .unwrap()
+            .actions()
+            .find(|a| a.name().starts_with("cargo_workspace build"))
+            .expect("a build action")
+            .clone()
+    };
+
+    // Baseline (v1): both crates at their original source.
+    let v1 = build_action(&exec);
+
+    // Edit ONLY applib → v2. A correct warm reuse recompiles applib and reuses corelib's
+    // in-place artifact; a botched sync (e.g. a stale mtime on applib) would leave a stale
+    // applib artifact → outputs diverge from the cold build.
+    std::fs::write(
+        root.join("ws/applib/src/lib.rs"),
+        "pub fn answer() -> i32 { corelib::base() + 100 }\n",
+    )
+    .unwrap();
+    let v2 = build_action(&exec);
+
+    let report = verify_warm_neutral(&exec, &v1, &v2).unwrap();
+    assert!(!report.cold.is_empty(), "there must be declared outputs to compare");
+    assert!(
+        report.is_neutral(),
+        "warm-reuse build diverged from cold build on: {:?}\ncold={:?}\nwarm={:?}",
         report.divergences(),
         report.cold,
         report.warm,

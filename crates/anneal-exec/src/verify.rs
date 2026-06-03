@@ -82,3 +82,32 @@ pub fn verify_correctness_neutral(
 pub fn prime_snapshot(exec: &LocalExecutor, action: &Action) -> Result<ActionResult, ExecError> {
     exec.run_uncached(action, VERIFY_SANDBOX, /*restore*/ false, /*save*/ true)
 }
+
+/// Verify that **warm-sandbox reuse** is correctness-neutral (§5, §1.4) — distinct from
+/// [`verify_correctness_neutral`], which checks the CAS-restore path. Here the warm path
+/// (keep `target/` in place + in-place sync of only the changed inputs) is the mechanism
+/// under test.
+///
+/// `baseline` and `edited` are the same action at two source states (so they share a
+/// snapshot key — e.g. a cargo build action before/after an edit). The check:
+///
+/// 1. cold-populate the warm dir at `baseline`;
+/// 2. **warm** — reuse it and sync `baseline → edited` in place (the incremental build);
+/// 3. **cold** — wipe the same warm dir and clean-build `edited`.
+///
+/// Both (2) and (3) build `edited` at the *same* per-key warm path, so any output
+/// difference is attributable to the sync — exactly the mtime-hazard backstop. Neither
+/// touches the action cache. Any divergence is a release blocker (§22).
+pub fn verify_warm_neutral(
+    exec: &LocalExecutor,
+    baseline: &Action,
+    edited: &Action,
+) -> Result<NeutralityReport, ExecError> {
+    exec.run_warm_uncached(baseline, /*fresh*/ true)?; // populate the warm dir at baseline
+    let warm = exec.run_warm_uncached(edited, /*fresh*/ false)?; // reuse + sync baseline→edited
+    let cold = exec.run_warm_uncached(edited, /*fresh*/ true)?; // same path, clean build of edited
+    Ok(NeutralityReport {
+        cold: cold.outputs,
+        warm: warm.outputs,
+    })
+}

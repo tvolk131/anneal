@@ -112,11 +112,14 @@
         (the owner is action-cacheable → "no consumer in this graph → skip+cache" would starve a later
         cache-hitting invocation's consumer). Measured (heavy `syn`, warm single-change): **+62% → +27% vs
         native** by dropping the ~19 ms private save.
-  - [ ] **Default-on prerequisites** (warm reuse is now the default for owners): (a) run cold-vs-warm
-        correctness-neutrality verification (§1.4) routinely — the isolation model is now persistent in-place;
-        (b) the **cross-process workspace lock** (+ sandbox-name `pid` token) — persistent per-key warm dirs are
-        shared across concurrent `anneal` processes, and today's per-key lock is in-process only. Until (b),
-        concurrent `anneal` invocations on one workspace can corrupt a shared warm dir.
+  - [x] **Default-on prerequisites** (warm reuse is now the default for owners): (a) **warm-path
+        correctness-neutrality verification** — `verify_warm_neutral` + `run_warm_uncached` (warm incremental of
+        an edited state vs a clean build of it, path-matched at the per-key warm dir → isolates the sync); a real
+        cargo two-crate test (`warm_reuse_build_is_correctness_neutral`) is the mtime-hazard backstop. (b) **the
+        cross-process workspace lock** + sandbox-name `pid` token — done (`WorkspaceLock`).
+    - [ ] **Run the neutrality gate in CI** — `verify_warm_neutral`/`verify_correctness_neutral` exist and have
+          representative tests; wire them as a routine CI gate over more rules/actions (it's a sampling detector,
+          so breadth matters), and add a triage note for tool-nondeterminism false-positives.
   - [x] **Decision: snapshots are universally non-portable** (`docs/sandboxing.md` §5.9). A snapshot is local
         materialized working state (`target/`, `node_modules`) — never shipped between machines. Cross-machine
         reuse lives in the **content-addressed layer**: action outputs (path-independent) + ecosystem package

@@ -683,6 +683,26 @@ impl LocalExecutor {
         let root = self.sandboxes.join(sandbox_name);
         self.run_core(action, root, restore, save)
     }
+
+    /// Run the **warm-reuse** path for `action` **outside the action cache**, for the
+    /// correctness-neutral verifier. `fresh = true` forces a cold-populate (clears the
+    /// committed manifest so the per-key warm dir is rebuilt from scratch); `fresh = false`
+    /// reuses the existing warm dir (in-place sync of changed inputs). Both build at the
+    /// *same* per-key warm path, so a cold-vs-warm output comparison isolates the sync —
+    /// the backstop for the mtime-based under-rebuild hazard (`docs/sandboxing.md` §5.5).
+    /// The snapshot is not saved (`save = false`); the commit manifest is still written, so
+    /// a following reuse run sees the prior state.
+    pub fn run_warm_uncached(&self, action: &Action, fresh: bool) -> Result<ActionResult, ExecError> {
+        guard_resolved(action)?;
+        let skey = action
+            .snapshot_key
+            .expect("run_warm_uncached requires a snapshot owner (a snapshot_key)");
+        if fresh {
+            let tag = skey.to_hex();
+            let _ = fs::remove_file(self.warm_meta.join(&tag[..16]).join("inputs"));
+        }
+        self.run_warm(action, /*save*/ false)
+    }
 }
 
 impl Executor for LocalExecutor {
