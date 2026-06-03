@@ -118,8 +118,19 @@
         cargo two-crate test (`warm_reuse_build_is_correctness_neutral`) is the mtime-hazard backstop. (b) **the
         cross-process workspace lock** + sandbox-name `pid` token — done (`WorkspaceLock`).
     - [ ] **Run the neutrality gate in CI** — `verify_warm_neutral`/`verify_correctness_neutral` exist and have
-          representative tests; wire them as a routine CI gate over more rules/actions (it's a sampling detector,
-          so breadth matters), and add a triage note for tool-nondeterminism false-positives.
+          representative cargo tests (incl. a content-revert: `warm_reuse_is_neutral_across_a_revert`, the
+          mtime-hazard backstop on the real tool); wire them as a routine CI gate over more rules/actions (it's a
+          sampling detector, so breadth matters), and add a triage note for tool-nondeterminism false-positives.
+    - [ ] **pnpm neutrality (deferred — vacuous in M1 scope).** A pnpm *warm*-neutral test doesn't fit: the only
+          warm owner (`install`) declares no file outputs (its product is the node_modules snapshot) and has no
+          incremental-reuse shape (its key tracks the lockfile, not source → unchanged = action-cache hit,
+          changed = new key = cold); scripts are *consumers* (`SnapshotConsuming`), not warm. The genuine pnpm
+          check is **snapshot-*restore* neutrality for the consumer pipeline** — does a script's output match
+          whether node_modules was freshly installed vs snapshot-restored. It needs (a) a non-trivial node_modules
+          (a local `file:` dep, or — for free — once external-dep vendoring lands) so the result *depends* on
+          node_modules, and (b) a new **consumer-pipeline** harness (`install-fresh → script` vs `restore → script`
+          in one sandbox; the current single-action cold-vs-warm can't model it, since "cold" = no node_modules =
+          the consumer can't run). Build it when external deps make node_modules non-vacuous.
   - [x] **Decision: snapshots are universally non-portable** (`docs/sandboxing.md` §5.9). A snapshot is local
         materialized working state (`target/`, `node_modules`) — never shipped between machines. Cross-machine
         reuse lives in the **content-addressed layer**: action outputs (path-independent) + ecosystem package
