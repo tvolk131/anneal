@@ -542,9 +542,10 @@ impl LocalExecutor {
     /// Reuse it in place when a committed manifest exists (sync only changed inputs, keep
     /// `target/` warm, no restore, no teardown); otherwise cold-populate it (wipe →
     /// materialize all inputs → restore the last good snapshot). The snapshot is still
-    /// saved to the CAS so consumers and other machines can restore it. Same-key owners
-    /// serialize on the dir via [`LocalExecutor::warm_key_lock`].
-    fn run_warm(&self, action: &Action) -> Result<ActionResult, ExecError> {
+    /// saved to the CAS (when `save` — i.e. the snapshot is *shared*, §5.8.1) so consumers
+    /// and other machines can restore it; a *private* snapshot skips the per-build save and
+    /// lives only in the warm dir. Same-key owners serialize via [`LocalExecutor::warm_key_lock`].
+    fn run_warm(&self, action: &Action, save: bool) -> Result<ActionResult, ExecError> {
         let started = Instant::now();
         let skey = action
             .snapshot_key
@@ -627,8 +628,13 @@ impl LocalExecutor {
             let captured = materializer::capture(&self.cas, action, &prepared)?;
             t_capture = c.elapsed();
             let s = Instant::now();
-            for path in &action.snapshot_paths {
-                self.snapshots.save(&self.cas, &skey, &prepared.cwd.join(path))?;
+            // Shared snapshots are saved to the CAS for consumers; private ones aren't
+            // (the warm dir is their only live copy). The manifest commit below is
+            // unconditional, so warm reuse works regardless.
+            if save {
+                for path in &action.snapshot_paths {
+                    self.snapshots.save(&self.cas, &skey, &prepared.cwd.join(path))?;
+                }
             }
             t_save = s.elapsed();
             // COMMIT: the atomically-written manifest's presence marks the tree clean.
@@ -685,7 +691,18 @@ impl Executor for LocalExecutor {
             action.cache_policy,
             CachePolicy::SnapshotBased | CachePolicy::SnapshotConsuming
         );
-        let save = matches!(action.cache_policy, CachePolicy::SnapshotBased);
+        // A snapshot *owner* reuses its persistent warm working tree when that's enabled
+        // (§5); everything else gets a fresh unique sandbox with the snapshot restored.
+        let warm_eligible = self.warm_reuse
+            && matches!(action.cache_policy, CachePolicy::SnapshotBased)
+            && action.snapshot_key.is_some();
+        // Save the snapshot to the CAS for owners — **unless** it is *private* and warm
+        // reuse is active (§5.8.1): then the warm dir is the live copy, so the per-build
+        // save would be pure O(target/) overhead. In the non-warm path we still save even
+        // a private snapshot — there's no warm dir, so it remains the only mechanism for
+        // cold-start and downstream output reproducibility (e.g. the test-run cache hit).
+        let save = matches!(action.cache_policy, CachePolicy::SnapshotBased)
+            && (action.snapshot_shared || !warm_eligible);
         // Deterministic and snapshot-based actions are cacheable when sealed; permeable,
         // native, and snapshot-*consuming* are not (§7.2, §8). SnapshotConsuming is
         // deliberately excluded: its output is not trusted reproducible, so it never
@@ -705,14 +722,8 @@ impl Executor for LocalExecutor {
             }
         }
 
-        // Cache miss (or non-cacheable): run the action. A snapshot *owner* reuses its
-        // persistent warm working tree when that's enabled (§5); everything else gets a
-        // fresh unique sandbox with the snapshot restored from the store.
-        let warm_eligible = self.warm_reuse
-            && matches!(action.cache_policy, CachePolicy::SnapshotBased)
-            && action.snapshot_key.is_some();
         let result = if warm_eligible {
-            self.run_warm(action)?
+            self.run_warm(action, save)?
         } else {
             let root = self.sandbox_root(&key);
             self.run_core(action, root, restore, save)?

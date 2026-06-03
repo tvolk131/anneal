@@ -337,7 +337,7 @@ still synchronous and full — §5.8. On trivial crates Anneal does not yet *bea
 (whose incremental is ≈ its fixed startup, with nothing to amortize against); that verdict
 needs a realistic workload where compile time dominates.
 
-### 5.8 The residual: incremental + background snapshot save — *not yet built*
+### 5.8 The residual: don't save *private* snapshots per build
 
 After warm reuse, the warm critical path is `sync(O(change)) + recompile(O(change)) +
 save(O(full target/), synchronous)`. The save (`SnapshotStore::save`) **re-walks all of
@@ -348,8 +348,35 @@ the residual and *scales* with `target/` size.
 **The decoupling that licenses fixing it:** with warm reuse the producer reuses its
 **in-place** `target/`, so it **never restores its own CAS snapshot**. The save's only
 consumers are *external* — snapshot-*consuming* actions (test runs restoring `target/`),
-other machines / CI, and cold-start after eviction. The producer doesn't need its own save,
-so the save can shrink to the delta and move off the producer's critical path.
+other machines / CI, and cold-start after eviction.
+
+#### 5.8.1 Private vs shared snapshots — the safe criterion
+
+So the per-build CAS save is needed **only if the snapshot has consumers**. But "has a
+consumer *in this graph*" is **not** a safe test, because the owner is action-cacheable:
+build `//pkg` (owner runs, no consumer present → skip save → owner cached), then test
+`//pkg` (owner *cache-hits*, never runs → the snapshot is never produced → the test's
+restore finds nothing). The snapshot, once skipped-and-cached, is gone for good.
+
+The safe criterion is "**is this snapshot *ever* consumed**" — a property of the rule's
+intent, declared on the action, not derived per-graph:
+
+- **Private** (`target/`): the owner's internal incremental state, **never** consumed
+  (cargo's only "consumers" take content-addressed *outputs*/binaries, never `target/`).
+  → **no per-build CAS save**; the warm dir is the live copy. Save only on eviction
+  (snapshot-on-evict, future) or explicit cross-machine publish.
+- **Shared** (`node_modules`): consumed by `SnapshotConsuming` actions (pnpm scripts).
+  → **save every build** — a later cache-hit owner must still find the snapshot in the CAS.
+
+Decided intrinsically: `save = SnapshotBased && snapshot_shared` (default **shared** —
+conservative). `cargo_workspace` marks `target/` **private**; `pnpm_workspace`'s `install`
+leaves `node_modules` **shared**. The warm-dir manifest (commit record) is written
+regardless, so reuse works whether or not the CAS save runs.
+
+This removes the O(`target/`) save from cargo's incremental path entirely — better than
+the (still-useful, for *shared* snapshots) incremental + background save below.
+
+#### 5.8.2 For shared snapshots: incremental + background save
 
 - **Incremental save** — the prior manifest already records each file's `(mtime, size,
   mode, digest)`. Walk `target/`, `stat` each file; if `(mtime, size)` matches the prior

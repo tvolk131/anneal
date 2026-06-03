@@ -125,7 +125,7 @@ impl Rule for CargoWorkspace {
         actions.push(
             build
                 .configured(ctx.config().clone(), consumed.clone())
-                .snapshot(snapshot_key, snapshot_paths.clone())
+                .snapshot_private(snapshot_key, snapshot_paths.clone())
                 .build(),
         );
 
@@ -150,7 +150,7 @@ impl Rule for CargoWorkspace {
                 )
                 .output("test-bin", "test-bin")
                 .configured(ctx.config().clone(), consumed.clone())
-                .snapshot(snapshot_key, snapshot_paths.clone());
+                .snapshot_private(snapshot_key, snapshot_paths.clone());
                 actions.push(compile.build());
 
                 // run depends on the compiled binary (an action-graph edge); its cache
@@ -185,7 +185,7 @@ impl Rule for CargoWorkspace {
                     &data,
                 )
                 .configured(ctx.config().clone(), consumed.clone())
-                .snapshot(snapshot_key, snapshot_paths.clone());
+                .snapshot_private(snapshot_key, snapshot_paths.clone());
                 actions.push(doc.build());
             }
 
@@ -204,7 +204,7 @@ impl Rule for CargoWorkspace {
                     &data,
                 )
                 .configured(ctx.config().clone(), consumed.clone())
-                .snapshot(snapshot_key, snapshot_paths.clone());
+                .snapshot_private(snapshot_key, snapshot_paths.clone());
                 actions.push(integ.build());
             }
         }

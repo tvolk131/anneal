@@ -59,6 +59,38 @@ fn warm_reuse_stays_correct_across_a_revert() {
 }
 
 #[test]
+fn private_snapshot_skips_cas_save_under_warm_reuse_but_shared_saves() {
+    // §5.8.1: under warm reuse, a *private* snapshot owner must NOT write the snapshot to
+    // the CAS (the warm dir is its only live copy), while a *shared* owner must.
+    let tmp = tempfile::tempdir().unwrap();
+    let store = tmp.path().join(".anneal");
+    let exec = LocalExecutor::new(&store).unwrap().warm_reuse();
+    let index = |k: &Digest| store.join("snapshots").join("index").join(k.to_hex());
+    let cmd = ["/bin/sh", "-c", "mkdir -p cache && echo m > cache/m && cp in.txt out.txt"];
+    // Distinct input content per action so they have distinct action digests — otherwise
+    // the cache key (which excludes snapshot_key/shared/name) would collide and the second
+    // would cache-hit the first instead of running.
+    let make = |tag_name: &str, content: &[u8], key: Digest, private: bool| -> Action {
+        let blob = exec.cas().put(content).unwrap();
+        let b = Action::builder(tag_name, cmd).input("in", "in.txt", blob).output("out", "out.txt");
+        if private { b.snapshot_private(key, vec![PathBuf::from("cache")]).build() }
+        else { b.snapshot(key, vec![PathBuf::from("cache")]).build() }
+    };
+
+    let priv_key = Digest::of(b"private-snapshot-key");
+    assert!(exec.execute(&make("priv", b"private-input", priv_key, true)).unwrap().success());
+    assert!(!index(&priv_key).exists(), "private snapshot must not be saved to the CAS under warm reuse");
+    // ...but the warm dir + commit manifest exist, so reuse still works.
+    let tag = &priv_key.to_hex()[..16];
+    assert!(store.join("warm").join(tag).join("out.txt").exists(), "warm tree persists");
+    assert!(store.join("warm-meta").join(tag).join("inputs").exists(), "commit manifest written");
+
+    let shared_key = Digest::of(b"shared-snapshot-key");
+    assert!(exec.execute(&make("shared", b"shared-input", shared_key, false)).unwrap().success());
+    assert!(index(&shared_key).exists(), "shared snapshot must be saved to the CAS for consumers");
+}
+
+#[test]
 fn warm_and_cold_paths_agree() {
     // Correctness-neutrality at the integration level: the same inputs produce the same
     // output whether built warm-reuse or through the default fresh-sandbox path.

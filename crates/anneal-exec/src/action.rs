@@ -111,6 +111,11 @@ pub struct Action {
     /// The coarse snapshot key (e.g. a hash of toolchain+lockfile+triple+profile).
     /// An accelerator only — deliberately **not** part of the action cache key.
     pub(crate) snapshot_key: Option<Digest>,
+    /// Whether the snapshot is **shared** (consumed by other actions → saved to the CAS
+    /// every build) or **private** (internal incremental state, never consumed → not
+    /// saved per build; warm reuse keeps it in place). Only meaningful for
+    /// [`CachePolicy::SnapshotBased`]. Default `true` (conservative). See §5.8.1.
+    pub(crate) snapshot_shared: bool,
     /// Whether this action's output depends on the target platform. `true` for most
     /// actions (the platform is part of identity); `false` for platform-independent
     /// ones like `nickel_eval`, whose result is shared across all platforms (§6.3).
@@ -138,6 +143,7 @@ impl Action {
                 timeout_ms: 600_000,
                 snapshot_paths: Vec::new(),
                 snapshot_key: None,
+                snapshot_shared: true,
                 platform_sensitive: true,
             },
         }
@@ -251,11 +257,28 @@ impl ActionBuilder {
     /// Use snapshot-based caching: `paths` are the mutable cache directories
     /// (relative to the working directory) snapshotted under the coarse `key`. The
     /// action restores **and saves** the snapshot, and is action-cacheable. Sets the
-    /// cache policy to [`CachePolicy::SnapshotBased`].
+    /// cache policy to [`CachePolicy::SnapshotBased`]. The snapshot is **shared** —
+    /// consumers (`SnapshotConsuming`) may restore it, so it is saved to the CAS every
+    /// build (e.g. pnpm's `node_modules`).
     pub fn snapshot(mut self, key: Digest, paths: Vec<PathBuf>) -> Self {
         self.action.snapshot_key = Some(key);
         self.action.snapshot_paths = paths;
         self.action.cache_policy = CachePolicy::SnapshotBased;
+        self.action.snapshot_shared = true;
+        self
+    }
+
+    /// Like [`ActionBuilder::snapshot`], but the snapshot is **private** — the owner's
+    /// internal incremental state that **no action consumes** (e.g. cargo's `target/`).
+    /// It is *not* saved to the CAS per build: with warm-sandbox reuse the in-place tree
+    /// is the live copy, so the per-build save would be pure O(`target/`) overhead
+    /// (`docs/sandboxing.md` §5.8.1). The action is still `SnapshotBased` (restorable on a
+    /// cold start / eviction-recovery); only the per-build *save* is suppressed.
+    pub fn snapshot_private(mut self, key: Digest, paths: Vec<PathBuf>) -> Self {
+        self.action.snapshot_key = Some(key);
+        self.action.snapshot_paths = paths;
+        self.action.cache_policy = CachePolicy::SnapshotBased;
+        self.action.snapshot_shared = false;
         self
     }
 

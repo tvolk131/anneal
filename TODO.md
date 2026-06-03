@@ -105,11 +105,21 @@
         +36% (N=16) → +58% (N=48) and bounded** — restore+teardown off the critical path. Still not *beating*
         native on trivial crates (native incremental ≈ cargo's fixed startup there); the residual is the
         synchronous full-`target/` save (next).
-  - [ ] **Incremental + background snapshot save** — the remaining incremental overhead after warm reuse is the
-        full-`target/` snapshot save still on the critical path each build. Make it (a) incremental (re-`put` only
-        changed files) and (b) off the critical path (background), so the warm critical path ≈ sync + recompile ≈
-        native. Then judge the "must beat" gate on a realistic workload. Ties to §1.4 / §8.2 + materialization
-        throughput.
+  - [ ] **Private vs shared snapshots — don't save private per build** (`docs/sandboxing.md` §5.8.1). The warm
+        residual is the full-`target/` save still on the critical path. Cargo's `target/` has **no consumers**, so
+        it never needs a per-build CAS save — the warm dir is the live copy. Save per build **only if the snapshot
+        is shared** (consumed by a `SnapshotConsuming` action, e.g. pnpm `node_modules`). **Must be a rule-declared
+        flag, not a per-graph consumer scan:** the owner is action-cacheable, so "no consumer in this graph → skip
+        save → cache owner" breaks a later invocation whose owner cache-hits and never produces the snapshot.
+        Plan: `Action.snapshot_shared` (default true) + `.snapshot_private(key, paths)`; cargo marks `target/`
+        private; `save = SnapshotBased && snapshot_shared`; warm-dir manifest commit stays unconditional.
+  - [ ] **Snapshot-on-evict** (private snapshots, after GC exists) — when GC removes a warm dir, snapshot it to
+        the CAS first (restorable to the same stable path → incremental), so eviction costs a save *once*, not
+        per build. Eviction-recovery insurance without the per-build tax.
+  - [ ] **Incremental + background save** (for *shared* snapshots, `docs/sandboxing.md` §5.8.2) — a shared
+        snapshot must hit the CAS each build (consumers need it), so make that cheap: incremental (re-`put` only
+        changed files via the prior manifest's mtime+size) and off the critical path (background; consumers join
+        via the existing owner edge). Ties to §1.4 / §8.2 + materialization throughput.
     - [x] **mtime experiment — done, design assumption confirmed + hazard found.** Warm `target/` + changed
           source with a **fresh** mtime → cargo recompiles *only* that crate (the optimization is viable). But
           cargo's freshness is **mtime-based and content-blind** (rust 1.95): the *same* content change behind a
