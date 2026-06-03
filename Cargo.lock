@@ -96,6 +96,7 @@ dependencies = [
  "anneal-query",
  "anneal-rules",
  "clap",
+ "libc",
  "tempfile",
 ]
 

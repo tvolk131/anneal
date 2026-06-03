@@ -25,6 +25,8 @@ use anneal_loader::{load_closure, load_workspace};
 use anneal_rules::builtin_rules;
 use clap::{Args, Parser, Subcommand};
 
+mod lock;
+
 /// Anneal — a native-tool-preserving build system.
 #[derive(Parser)]
 #[command(name = "anneal", version, about)]
@@ -309,6 +311,12 @@ fn analyze_and_run(
 ) -> Result<(Vec<Action>, Vec<ActionResult>, LocalExecutor), String> {
     let label = Label::parse(target).map_err(|e| format!("invalid target {target:?}: {e}"))?;
     let registry = builtin_rules();
+    // A mutating command takes the coarse exclusive workspace lock for its whole run, so
+    // concurrent `anneal` processes can't collide on shared warm dirs / sandboxes. Held
+    // until this function returns (after execute_graph); released on drop. Read-only
+    // commands (`affected`/`why`) deliberately do not acquire it. (See lock.rs.)
+    let _lock = lock::WorkspaceLock::acquire(&root.join(".anneal"))
+        .map_err(|e| format!("acquiring workspace lock: {e}"))?;
     // Load the target's transitive package closure (cross-package deps included).
     let graph = load_closure(root, &label, &registry).map_err(|e| e.to_string())?;
     let exec = LocalExecutor::new(root.join(".anneal"))

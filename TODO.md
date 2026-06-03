@@ -201,13 +201,17 @@
       dispatch and drains in-flight (a non-zero *exit* stays a normal result). Tests in `parallel_scheduler.rs`
       (out-of-order diamond, rendezvous proving real overlap, error/cycle paths). Deferred: lifting the
       snapshot-owner edge into the action model (see triggers below); see also the multi-process hardening item.
-- [ ] **Multi-process safety: coarse `.anneal/` lock + sandbox-name collision** (hardening; not needed for the
-      single-process parallel scheduler). (a) Normal sandbox names are `<keyhex16>-<nonce>` where `nonce` is a
-      per-**process** in-memory `AtomicU64` from 0 → **two `anneal` processes collide** on the same path and
-      `rm -rf` each other (latent today, snapshot-independent). Fold a `pid`/random token into the name. (b) Add a
-      workspace-level **RW advisory lock** (flock on a lockfile): builds take **shared**, GC takes **exclusive**
-      (Cargo/Bazel pattern). Subsumes every cross-process concern: the CAS is already corruption-safe
-      (content-addressed + atomic temp→rename), so only deletion (GC) needs exclusivity, not all CAS access.
+- [x] **Multi-process safety: coarse `.anneal/` lock + sandbox-name pid.** Done. (a) Sandbox names now include
+      the pid (`<keyhex16>-<pid>-<nonce>`), so concurrent `anneal` processes can't collide. (b) `WorkspaceLock`
+      (`anneal-cli/src/lock.rs`): a **coarse exclusive `flock`** on `.anneal/lock`, acquired by mutating commands
+      (`build`/`test`) in `analyze_and_run` for the run's duration; a second process prints a waiting message
+      (with the holder pid) and blocks. `flock` auto-releases on process death → no stale locks. Read-only
+      commands (`affected`/`why`) don't acquire it (they read atomic/content-addressed state, safe alongside a
+      build). The CAS/cache/snapshot stores were already multi-process-safe (atomic temp→rename); the lock guards
+      the mutable working state warm reuse made shared (warm dirs, sandboxes) + future GC.
+  - [ ] **Relaxation (when concurrent builds on one store is a real need):** per-`snapshot_key` cross-process
+        locks + a *shared* build lock so non-conflicting builds run in parallel; GC stays exclusive (RW model).
+        The pid sandbox-name fix is the groundwork that makes this safe. Not needed for M1.
 - [ ] **CAS / action-cache / snapshot eviction & GC** (§8.2). All three stores currently grow **unbounded**.
       The system owns eviction policy (LRU, size/age caps); rules declare only what to prune. Design: blobs are
       **shared** across action-cache entries and snapshots, so deletion is **not** the inverse of write — removing

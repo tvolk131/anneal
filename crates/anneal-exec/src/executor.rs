@@ -525,12 +525,15 @@ impl LocalExecutor {
     /// reproducibility comparison uses a stable, caller-named path via
     /// [`LocalExecutor::run_uncached`] instead, so it is unaffected.
     ///
-    /// Note: `nonce` is process-local, so two concurrent `anneal` processes can still
-    /// collide on this path — closed later by the workspace lock (see TODO).
+    /// The name includes the pid + a process-local nonce, so neither concurrent threads
+    /// nor concurrent `anneal` processes collide on a sandbox path.
     fn sandbox_root(&self, key: &Digest) -> PathBuf {
         let nonce = SANDBOX_COUNTER.fetch_add(1, Ordering::Relaxed);
+        // Include the pid so two `anneal` processes never collide on a sandbox path. (The
+        // coarse workspace lock already serializes mutating commands; this is cheap
+        // defense-in-depth, and what makes relaxing that lock safe later.)
         self.sandboxes
-            .join(format!("{}-{}", &key.to_hex()[..16], nonce))
+            .join(format!("{}-{}-{}", &key.to_hex()[..16], std::process::id(), nonce))
     }
 
     /// The per-snapshot-key serialization lock for a warm dir, created on first use.
