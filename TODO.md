@@ -273,6 +273,22 @@
 - [ ] **`load()` of `*.bzl` libraries** (§4.4) — shared Starlark, reserved but not implemented.
 - [ ] **Restricted user-facing subset linter** (§4.2).
 - [ ] **starlark-rust monorepo-scale perf** validation (Spike A deferred check, §22).
+- [ ] **Staged-graph / deferred analysis — the general "tool computes its own structure" mechanism** (foundational
+      v1.x; §14.6 Level-3). Many wrapped tools *compute* the build graph's shape rather than declaring it
+      statically: `cargo metadata` (Rust members + target kinds), **`go list -json ./...`** (the exact Go analog),
+      **CMake configure / `compile_commands.json`** (C/C++ is a meta-build — the graph is generated), **protoc**
+      output sets, **Nx/Turbo/Lerna** JS project graphs, and **Nickel generating *targets* (not just data)** —
+      config-as-code that defines the graph. The mechanism: a rule emits a **content-addressed, sandboxed prelude
+      query action** (e.g. `cargo metadata --no-deps --offline`), it executes, and a **second analysis pass** reads
+      its output to emit the rest of the graph. **Non-staleness is free** (the query is keyed on its source inputs
+      → re-runs when manifests change, else cache-hits). Industry-validated shape: Bazel **repository rules** (a
+      cached external phase that runs tools, e.g. `crate_universe` runs `cargo metadata`) — *not* running tools in
+      pure loading. First adopter: **`cargo_workspace`'s `workspace_crates` swaps from hand-parse → cargo metadata**
+      (authoritative member/crate-type resolution, no drift) without touching `analyze()` (it consumes the
+      structure abstraction). Cost/why-deferred: the graph isn't fully known until prelude actions run, which
+      complicates incrementality + the mental model — justified by **ecosystem breadth**, not one rule. (Supersedes
+      the old "wrap-don't-decompose sidesteps deferred analysis" note below — wrapping tools that own their
+      structure is exactly what *needs* it.)
 
 ## cargo_workspace completeness
 
@@ -309,4 +325,8 @@
 - `nextjs_app`; **Rust → WASM → TS** typed bindings (§13.5) — the typed cross-language demo.
 - `uv_workspace` (Python), `go_module` (Go).
 - Secrets / private registries (§7.5) — deliberate non-goal for M1.
-- Deferred/dynamic analysis (DICE-style) — only if we move from *wrapping* engines to *being* a fine-grained one (C/C++, our own codegen, ThinLTO). See chat: wrap-don't-decompose largely sidesteps the need.
+- Deferred/dynamic analysis (DICE-style, *fine-grained* per-action) — only if we move from *wrapping* engines to
+  *being* a fine-grained one (C/C++, our own codegen, ThinLTO). NOTE: distinct from the **staged-graph** item under
+  *Loader / analysis infrastructure* — that one (a cached prelude query whose output a second pass reads) is
+  *needed precisely to wrap* tools that compute their own structure (cargo metadata, go list, cmake), and is no
+  longer "sidestepped by wrap-don't-decompose."
