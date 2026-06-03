@@ -30,12 +30,22 @@ use anneal_loader::load_package;
 use anneal_rules::builtin_rules;
 
 fn main() {
+    // `heavy` builds a workspace with a heavy *real* external dependency (`syn`,
+    // vendored), so real compile time dominates and the verdict isn't an artifact of
+    // trivial crates. Otherwise N trivial dependency-free crates. Both keep package
+    // name "ws" so the scenario plumbing is identical.
+    let heavy = std::env::args().any(|a| a == "heavy");
     let n: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(8);
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path();
     let ws = root.join("ws");
-    make_fixture(&ws, n);
+    let edit_rel = if heavy { "app/src/lib.rs" } else { "crate0/src/lib.rs" };
+    if heavy {
+        make_heavy_fixture(&ws);
+    } else {
+        make_fixture(&ws, n);
+    }
 
     // --- native cargo baseline (same invocation the rule wraps) ---
     clean_target(&ws);
@@ -56,7 +66,7 @@ fn main() {
     let mut cargo_change = Duration::MAX;
     let mut anneal_change = Duration::MAX;
     for i in 0..3 {
-        edit_one_crate(&ws, i);
+        edit_source(&ws, edit_rel, i);
         cargo_change = cargo_change.min(timed(1, || assert!(cargo_build(&ws).success(), "cargo incremental failed")));
         anneal_change = anneal_change.min(timed(1, || run_anneal_build(&exec, root, &label)));
     }
@@ -69,11 +79,16 @@ fn main() {
     run_anneal_build(&warm_exec, root, &label); // cold-populate the warm tree
     let mut anneal_change_warm = Duration::MAX;
     for i in 100..103 {
-        edit_one_crate(&ws, i);
+        edit_source(&ws, edit_rel, i);
         anneal_change_warm = anneal_change_warm.min(timed(1, || run_anneal_build(&warm_exec, root, &label)));
     }
 
-    report(n, cargo_cold, cargo_noop, anneal_cold, anneal_warm, cargo_change, anneal_change, anneal_change_warm);
+    let workload = if heavy {
+        "1 crate + heavy real dep (syn, full), vendored".to_string()
+    } else {
+        format!("{n} dependency-free crates")
+    };
+    report(&workload, cargo_cold, cargo_noop, anneal_cold, anneal_warm, cargo_change, anneal_change, anneal_change_warm);
 
     // --- phase breakdowns: a cold build, then an incremental rebuild, on a fresh,
     // timing-enabled store (isolated from the comparison runs above). ---
@@ -82,20 +97,59 @@ fn main() {
         .record_timings();
     run_anneal_build(&profile, root, &label); // cold (from scratch)
     let cold_phases = profile.take_timings();
-    edit_one_crate(&ws, 99); // warm snapshot now exists; this rebuild is incremental
+    edit_source(&ws, edit_rel, 99); // warm snapshot now exists; this rebuild is incremental
     run_anneal_build(&profile, root, &label);
     let incremental_phases = profile.take_timings();
     report_phases("Cold build", &cold_phases);
     report_phases("Single-package change (incremental)", &incremental_phases);
 }
 
-/// Append a unique function to `crate0`'s source — a content change that busts the
-/// action cache (and triggers an incremental recompile of exactly that crate).
-fn edit_one_crate(ws: &Path, marker: usize) {
-    let path = ws.join("crate0/src/lib.rs");
+/// Append a unique function to one source file — a content change that busts the action
+/// cache and triggers an incremental recompile of just that crate.
+fn edit_source(ws: &Path, rel: &str, marker: usize) {
+    let path = ws.join(rel);
     let mut src = std::fs::read_to_string(&path).unwrap();
     src.push_str(&format!("pub fn touched_{marker}() {{}}\n"));
     std::fs::write(&path, src).unwrap();
+}
+
+/// A workspace whose single member depends on a **heavy real external crate** (`syn`,
+/// vendored offline), so the build is dominated by genuine compilation rather than the
+/// trivial-crate fixed costs. Requires network at setup (lockfile + `cargo vendor`); the
+/// build itself is then fully offline. Keeps package name "ws" so the scenarios are
+/// identical to the synthetic fixture.
+fn make_heavy_fixture(ws: &Path) {
+    let app = ws.join("app/src");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(ws.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n").unwrap();
+    std::fs::write(
+        ws.join("app/Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+         [dependencies]\nsyn = { version = \"2\", features = [\"full\", \"extra-traits\"] }\nquote = \"1\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("lib.rs"),
+        "use syn::Expr;\npub fn parse(s: &str) -> bool { syn::parse_str::<Expr>(s).is_ok() }\n",
+    )
+    .unwrap();
+    std::fs::write(ws.join("BUILD"), "cargo_workspace(name = \"ws\")\n").unwrap();
+
+    run(Command::new("cargo").arg("generate-lockfile").current_dir(ws), "generate-lockfile");
+    std::fs::create_dir_all(ws.join(".cargo")).unwrap();
+    let vendored = Command::new("cargo")
+        .args(["vendor", "vendor"])
+        .current_dir(ws)
+        .stderr(Stdio::null())
+        .output()
+        .expect("run cargo vendor");
+    assert!(vendored.status.success(), "cargo vendor failed");
+    std::fs::write(ws.join(".cargo/config.toml"), vendored.stdout).unwrap();
+}
+
+fn run(cmd: &mut Command, what: &str) {
+    let ok = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status().expect("spawn").success();
+    assert!(ok, "{what} failed");
 }
 
 /// Run the full Anneal build pipeline for `//ws:ws`, executing just the coarse
@@ -188,7 +242,7 @@ fn make_fixture(ws: &Path, n: usize) {
 
 #[allow(clippy::too_many_arguments)]
 fn report(
-    n: usize,
+    workload: &str,
     cargo_cold: Duration,
     cargo_noop: Duration,
     anneal_cold: Duration,
@@ -201,7 +255,7 @@ fn report(
     let pct = |a: Duration, base: Duration| (a.as_secs_f64() - base.as_secs_f64()) / base.as_secs_f64() * 100.0;
     let times = |slow: Duration, fast: Duration| slow.as_secs_f64() / fast.as_secs_f64();
 
-    println!("# Anneal vs native cargo — {n} dependency-free crates, debug profile\n");
+    println!("# Anneal vs native cargo — {workload}, debug profile\n");
     println!("| Scenario | Anneal | Native cargo | Result |");
     println!("|---|---:|---:|---|");
     println!(

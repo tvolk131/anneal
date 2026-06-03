@@ -128,8 +128,15 @@
         real compile to amortize the O(`target/`) overhead against; on real crates (seconds/recompile) the
         absolute overhead may be acceptable — *or not*, if `target/` is GB-scale. **Only a realistic-`target/`
         workload resolves this** (→ real-repo benchmark).
-  - [ ] **Realistic workloads** — crates with real compile time (and eventually external deps) so the overhead
-        gate is assessed where compile dominates, not snapshot bookkeeping.
+  - [x] **Realistic workload (heavy real dep: `syn`, vendored)** — `anneal-bench heavy`. The verdict the trivial
+        fixture couldn't give. **Cold build +4% vs native** (was +20–45% on trivial crates → that overhead *was*
+        a fixed-cost artifact; on real compile it's noise — overhead gate comfortably met). **Deeper finding on
+        incremental:** the non-warm path's "incremental" rebuild is a **near-full recompile** (~2 s, `run` = 96%
+        of total) — restore-into-fresh-sandbox doesn't preserve the mtime consistency cargo's incremental needs,
+        so cargo rebuilds everything → **+3666% vs native**. **Warm reuse preserves the in-place tree (only the
+        edit perturbed) → true incremental → +62%** (89 ms vs 55 ms native, a ~23× speedup over non-warm). So warm
+        reuse isn't an optimization, it's what makes incremental *work at all* on a real `target/`; its residual
+        is the synchronous full-`target/` save (→ §5.8). No-op 4.3× / fresh-checkout 472× faster.
   - [ ] **pnpm harness**, then competitor baselines (sccache, Turborepo/Nx, Bazel) and real cross-machine CI
         cold-start (needs the remote cache, v1.x).
 
@@ -221,7 +228,15 @@
 
 ## cargo_workspace completeness
 
-- [ ] **Dependency vendoring** — workspaces with external crates (currently `--offline --locked`, no-dep/path-dep only).
+- [x] **External crates via vendoring — works with NO rule changes.** A workspace with `vendor/` +
+      `.cargo/config.toml` (from `cargo vendor`) builds hermetically through the existing rule: `walk_tree`
+      already materializes `vendor/`/`.cargo/` (not in `IGNORED_DIRS`) and the sealed `cargo build --offline
+      --locked` consumes them. Validated end-to-end via `anneal build` on a `syn`-dependent workspace (all 4
+      actions ok, offline). So external-dep *enablement* was effectively already present.
+  - [ ] **Anneal-managed vendoring** — automate the `cargo vendor` step as a network-permeable action so users
+        don't pre-vendor. The clean model needs either tree/directory artifacts (§21.1, deferred) or a build
+        action that *consumes a second snapshot* (the vendor/registry cache) while *owning* `target/` — i.e. an
+        action-model extension to restore N snapshots + own one. Until then the bench pre-vendors at setup.
 - [ ] **Integration-test multi-binary split** (one binary per `tests/*.rs`).
 - [ ] **Separately-addressable test targets** (`//ws:crate_a_test_unit`) — falls out of named output groups + demand pruning.
 - [ ] **Per-case test durations** (needs libtest JSON, i.e. a nightly `-Z` path or alternative).
