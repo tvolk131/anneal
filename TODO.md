@@ -95,14 +95,21 @@
         materialize+capture are ~2% each. Separately, load+analyze adds a roughly-fixed ~10 ms to a cold
         `anneal build`. Trivial crates *exaggerate* this (no compile time to amortize), but `save` scales with
         `target/` **byte** size, and real `target/` dirs are large — so this is the overhead-gate lever at scale.
-  - [ ] **Attack the O(`target/`) incremental overhead** (the lever for the "must beat" gate; prioritize once a
-        realistic workload confirms the absolute cost matters). **Design captured in `docs/sandboxing.md` §5**
-        (reusability-iff conditions, three-tier fallback, dirty-state clean-commit marker, source-sync diff,
-        at-rest structure, mtime edge). Biggest: **warm-sandbox reuse for snapshot *owners*** — keep the build
-        action's `target/` working dir in place across incremental rebuilds (skip restore + teardown, ~25 ms
-        @ N=16) instead of the fresh-sandbox + snapshot round-trip every run; owners reuse (one per key) while
-        consumers stay unique+parallel. Plus **incremental + background snapshot save** (re-`put` only changed
-        files, attacks the ~7 ms save). Ties to §1.4 / §8.2 + the materialization-throughput item.
+  - [x] **Warm-sandbox reuse for snapshot owners** — implemented (opt-in `LocalExecutor::warm_reuse()`), per the
+        `docs/sandboxing.md` §5 design. Snapshot owners keep their `target/` working tree in place and sync only
+        changed declared inputs (the §5.5 mtime-safe diff: distinct-inode copy + fresh mtime); skips restore +
+        teardown; commit-record discipline (manifest doubles as it; clear-on-begin/atomic-write-on-commit); same
+        snapshot-key owners serialize on the dir, different keys stay parallel. `warm.rs` (engine, unit-tested) +
+        `run_warm` (executor) + `tests/warm_reuse.rs` (revert-hazard correctness + warm≡cold agreement). **Measured
+        (bench single-package change vs native):** non-warm +91% (N=16) → +203% (N=48) and *diverging*; **warm
+        +36% (N=16) → +58% (N=48) and bounded** — restore+teardown off the critical path. Still not *beating*
+        native on trivial crates (native incremental ≈ cargo's fixed startup there); the residual is the
+        synchronous full-`target/` save (next).
+  - [ ] **Incremental + background snapshot save** — the remaining incremental overhead after warm reuse is the
+        full-`target/` snapshot save still on the critical path each build. Make it (a) incremental (re-`put` only
+        changed files) and (b) off the critical path (background), so the warm critical path ≈ sync + recompile ≈
+        native. Then judge the "must beat" gate on a realistic workload. Ties to §1.4 / §8.2 + materialization
+        throughput.
     - [x] **mtime experiment — done, design assumption confirmed + hazard found.** Warm `target/` + changed
           source with a **fresh** mtime → cargo recompiles *only* that crate (the optimization is viable). But
           cargo's freshness is **mtime-based and content-blind** (rust 1.95): the *same* content change behind a

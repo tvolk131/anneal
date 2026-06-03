@@ -61,7 +61,19 @@ fn main() {
         anneal_change = anneal_change.min(timed(1, || run_anneal_build(&exec, root, &label)));
     }
 
-    report(n, cargo_cold, cargo_noop, anneal_cold, anneal_warm, cargo_change, anneal_change);
+    // --- single-package change WITH warm-sandbox reuse (the optimization under test) ---
+    // A separate, warm-reuse-enabled store, primed cold once, then the same edit/rebuild
+    // loop: the snapshot owner keeps target/ in place and syncs only the changed source,
+    // so restore + teardown drop off the critical path.
+    let warm_exec = LocalExecutor::new(root.join(".anneal-warm")).expect("open warm store").warm_reuse();
+    run_anneal_build(&warm_exec, root, &label); // cold-populate the warm tree
+    let mut anneal_change_warm = Duration::MAX;
+    for i in 100..103 {
+        edit_one_crate(&ws, i);
+        anneal_change_warm = anneal_change_warm.min(timed(1, || run_anneal_build(&warm_exec, root, &label)));
+    }
+
+    report(n, cargo_cold, cargo_noop, anneal_cold, anneal_warm, cargo_change, anneal_change, anneal_change_warm);
 
     // --- phase breakdowns: a cold build, then an incremental rebuild, on a fresh,
     // timing-enabled store (isolated from the comparison runs above). ---
@@ -183,6 +195,7 @@ fn report(
     anneal_warm: Duration,
     cargo_change: Duration,
     anneal_change: Duration,
+    anneal_change_warm: Duration,
 ) {
     let ms = |d: Duration| d.as_secs_f64() * 1000.0;
     let pct = |a: Duration, base: Duration| (a.as_secs_f64() - base.as_secs_f64()) / base.as_secs_f64() * 100.0;
@@ -200,6 +213,10 @@ fn report(
         ms(anneal_change), ms(cargo_change), pct(anneal_change, cargo_change),
     );
     println!(
+        "| Single-package change (warm reuse) | {:.1} ms | {:.1} ms | {:+.0}% vs native |",
+        ms(anneal_change_warm), ms(cargo_change), pct(anneal_change_warm, cargo_change),
+    );
+    println!(
         "| No-op rebuild | {:.1} ms | {:.1} ms | {:.1}× faster |",
         ms(anneal_warm), ms(cargo_noop), times(cargo_noop, anneal_warm),
     );
@@ -209,7 +226,7 @@ fn report(
     );
     println!(
         "\n_Cold & single-change = overhead gates. No-op & fresh-checkout = the cache \
-         wins. Library pipeline; excludes CLI process startup._"
+         wins. Warm reuse is the §5 optimization. Library pipeline; excludes CLI startup._"
     );
 }
 
