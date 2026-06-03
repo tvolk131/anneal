@@ -6,7 +6,7 @@
 //! arbitrary files or inspect global state — which keeps the system/rule boundary
 //! sharp.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anneal_cas::Cas;
 use anneal_core::{Configuration, Label};
@@ -103,6 +103,25 @@ impl<'a> RuleContext<'a> {
     /// Whether a file exists within the package (introspection helper).
     pub fn package_file_exists(&self, rel: &Path) -> bool {
         self.package_dir.join(rel).exists()
+    }
+
+    /// List the immediate entries under `rel` (relative to the package), returned as
+    /// paths relative to the package directory and sorted for determinism. Empty if `rel`
+    /// is absent. Used to expand glob workspace members (e.g. `crates/*`).
+    pub fn list_dir(&self, rel: &Path) -> Result<Vec<PathBuf>, RuleError> {
+        let base = self.package_dir.join(rel);
+        let entries = match std::fs::read_dir(&base) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(RuleError::Source { path: rel.to_path_buf(), error }),
+        };
+        let mut out = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| RuleError::Source { path: rel.to_path_buf(), error })?;
+            out.push(rel.join(entry.file_name()));
+        }
+        out.sort();
+        Ok(out)
     }
 
     /// Resolve an entire source tree under `rel` (relative to the package) into

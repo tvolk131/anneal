@@ -117,7 +117,7 @@ impl Rule for CargoWorkspace {
             ),
             &data,
         );
-        for c in crates.iter().filter(|c| c.has_lib) {
+        for c in crates.iter().filter(|c| c.is_normal_lib()) {
             let lib = format!("lib{}.rlib", c.name.replace('-', "_"));
             let out = PathBuf::from(format!("target/{profile_dir}/{lib}"));
             build = build.output(out.to_string_lossy().into_owned(), out);
@@ -131,7 +131,7 @@ impl Rule for CargoWorkspace {
 
         // --- per-(crate, test_type) actions ---
         for c in &crates {
-            if c.has_lib {
+            if c.is_normal_lib() {
                 // unit: compile/run split.
                 let compile_id = format!("cargo_workspace test-compile {label} {} unit", c.name);
                 let run_id = format!("cargo_workspace test-run {label} {} unit", c.name);
@@ -219,8 +219,21 @@ impl Rule for CargoWorkspace {
 /// A workspace member crate discovered by introspecting `Cargo.toml`s.
 struct CrateInfo {
     name: String,
+    /// `src/lib.rs` exists. NOTE: also true for proc-macro crates — distinguish with
+    /// [`CrateInfo::is_normal_lib`].
     has_lib: bool,
+    /// `[lib] proc-macro = true` — produces a dylib, **not** an rlib.
+    is_proc_macro: bool,
     has_tests: bool,
+}
+
+impl CrateInfo {
+    /// A normal (rlib-producing) library member: has a lib and isn't a proc-macro. Only
+    /// these get a declared `lib<name>.rlib` output and lib/doc test actions; a proc-macro
+    /// member produces a dylib, so declaring its rlib would be a spurious `MissingOutput`.
+    fn is_normal_lib(&self) -> bool {
+        self.has_lib && !self.is_proc_macro
+    }
 }
 
 /// Build a base `cargo` action builder with the shared environment (toolchain on
@@ -363,27 +376,49 @@ fn snapshot_key(toolchain_dirs: &[PathBuf], sources: &[Artifact], ctx: &RuleCont
 
 /// Enumerate workspace member crates, noting whether each has a library target and an
 /// integration `tests/` directory.
+///
+/// This is the rule's **workspace-structure** view (members + each member's relevant
+/// target kind). It is *hand-parsed* from the manifests today — pure, in-process,
+/// non-stale (it reads the live `Cargo.toml`s). It intentionally re-derives a *slice* of
+/// `cargo metadata` (members + lib/proc-macro kind), not cargo's full resolution, so it
+/// can drift on the long tail (nested workspaces, `default-members`, multi-level globs).
+/// The clean upgrade is to let cargo report this authoritatively via the staged-graph /
+/// `cargo metadata` path (see TODO); a rule only consumes the returned structure, so the
+/// implementation can swap underneath without touching `analyze`.
 fn workspace_crates(ctx: &RuleContext) -> Result<Vec<CrateInfo>, RuleError> {
     let root: toml::Value = ctx
         .read_package_file(Path::new("Cargo.toml"))?
         .parse()
         .map_err(|e| RuleError::Message(format!("parsing Cargo.toml: {e}")))?;
 
+    let workspace = root.get("workspace");
+    let exclude: Vec<PathBuf> = workspace
+        .and_then(|w| w.get("exclude"))
+        .and_then(|e| e.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(PathBuf::from).collect())
+        .unwrap_or_default();
+
     let mut dirs: Vec<PathBuf> = vec![PathBuf::new()]; // the root package, if any
-    if let Some(members) = root
-        .get("workspace")
-        .and_then(|w| w.get("members"))
-        .and_then(|m| m.as_array())
-    {
-        for member in members {
-            if let Some(s) = member.as_str() {
-                if s.contains('*') {
-                    continue; // glob members deferred
+    if let Some(members) = workspace.and_then(|w| w.get("members")).and_then(|m| m.as_array()) {
+        for member in members.iter().filter_map(|m| m.as_str()) {
+            // Expand a trailing single-level glob (`crates/*`, or a bare `*`) by listing
+            // the immediate subdirectories that contain a `Cargo.toml`. Multi-level globs
+            // (`**`, `a/*/b`) are not yet supported and are skipped.
+            let glob_prefix = if member == "*" { Some("") } else { member.strip_suffix("/*") };
+            match glob_prefix {
+                Some(prefix) => {
+                    for entry in ctx.list_dir(Path::new(prefix))? {
+                        if ctx.package_file_exists(&entry.join("Cargo.toml")) {
+                            dirs.push(entry);
+                        }
+                    }
                 }
-                dirs.push(PathBuf::from(s));
+                None if member.contains('*') => continue, // unsupported glob shape
+                None => dirs.push(PathBuf::from(member)),
             }
         }
     }
+    dirs.retain(|d| !exclude.contains(d));
 
     let mut crates = Vec::new();
     for dir in dirs {
@@ -400,9 +435,15 @@ fn workspace_crates(ctx: &RuleContext) -> Result<Vec<CrateInfo>, RuleError> {
             .and_then(|p| p.get("name"))
             .and_then(|n| n.as_str())
         {
+            let is_proc_macro = parsed
+                .get("lib")
+                .and_then(|l| l.get("proc-macro"))
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(false);
             crates.push(CrateInfo {
                 name: name.to_owned(),
                 has_lib: ctx.package_file_exists(&dir.join("src/lib.rs")),
+                is_proc_macro,
                 has_tests: ctx.package_file_exists(&dir.join("tests")),
             });
         }

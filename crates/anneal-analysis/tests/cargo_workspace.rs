@@ -153,3 +153,101 @@ fn profile_axis_changes_the_build() {
     assert!(release.success());
     assert!(!release.cache_hit, "release build must not reuse the debug cache entry");
 }
+
+/// Generate `Cargo.lock` for a workspace fixture so `--locked` is satisfied.
+fn gen_lockfile(ws: &std::path::Path) {
+    let ok = std::process::Command::new("cargo")
+        .arg("generate-lockfile")
+        .current_dir(ws)
+        .status()
+        .expect("cargo available")
+        .success();
+    assert!(ok, "cargo generate-lockfile failed");
+}
+
+fn build_and_outputs(root: &std::path::Path) -> std::collections::BTreeMap<String, anneal_core::Digest> {
+    let registry = builtin_rules();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
+    let graph = load_package(root, "ws", &registry).unwrap();
+    let action = build_action(
+        &Analyzer::new(&graph, &registry, &config(OptLevel::Debug), root, exec.cas())
+            .analyze(&anneal_core::Label::parse("//ws:ws").unwrap())
+            .unwrap(),
+    );
+    let result = exec.execute(&action).unwrap();
+    assert!(result.success(), "build failed (exit {})", result.exit_code);
+    result.outputs
+}
+
+#[test]
+fn proc_macro_member_does_not_break_the_build() {
+    // A proc-macro member has `src/lib.rs` but produces a *dylib*, not an rlib. We must
+    // detect `[lib] proc-macro = true` and NOT declare its `lib<name>.rlib` output — else
+    // the build action fails with a spurious MissingOutput.
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(ws.join("mylib/src")).unwrap();
+    std::fs::create_dir_all(ws.join("mymacro/src")).unwrap();
+    std::fs::write(ws.join("Cargo.toml"), "[workspace]\nmembers = [\"mylib\", \"mymacro\"]\nresolver = \"2\"\n").unwrap();
+    std::fs::write(ws.join("mylib/Cargo.toml"), "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(ws.join("mylib/src/lib.rs"), "pub fn f() -> i32 { 1 }\n").unwrap();
+    // A trivial proc-macro — needs only the built-in `proc_macro` crate, so still offline.
+    std::fs::write(
+        ws.join("mymacro/Cargo.toml"),
+        "[package]\nname = \"mymacro\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\nproc-macro = true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join("mymacro/src/lib.rs"),
+        "use proc_macro::TokenStream;\n#[proc_macro]\npub fn noop(_: TokenStream) -> TokenStream { TokenStream::new() }\n",
+    )
+    .unwrap();
+    std::fs::write(ws.join("BUILD"), "cargo_workspace(name = \"ws\")\n").unwrap();
+    gen_lockfile(&ws);
+
+    let outputs = build_and_outputs(tmp.path());
+    assert!(
+        outputs.keys().any(|k| k.contains("libmylib.rlib")),
+        "the normal lib's rlib should be declared+captured; got {:?}",
+        outputs.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !outputs.keys().any(|k| k.contains("mymacro")),
+        "the proc-macro member must NOT have a declared rlib output; got {:?}",
+        outputs.keys().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn glob_members_are_expanded() {
+    // `members = ["crates/*"]` must enumerate each subcrate (we previously skipped globs).
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("ws");
+    std::fs::write(ws_path(&ws, "Cargo.toml"), "[workspace]\nmembers = [\"crates/*\"]\nresolver = \"2\"\n").unwrap();
+    for name in ["alpha", "beta"] {
+        std::fs::create_dir_all(ws.join(format!("crates/{name}/src"))).unwrap();
+        std::fs::write(
+            ws.join(format!("crates/{name}/Cargo.toml")),
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        )
+        .unwrap();
+        std::fs::write(ws.join(format!("crates/{name}/src/lib.rs")), "pub fn f() {}\n").unwrap();
+    }
+    std::fs::write(ws.join("BUILD"), "cargo_workspace(name = \"ws\")\n").unwrap();
+    gen_lockfile(&ws);
+
+    let outputs = build_and_outputs(tmp.path());
+    for name in ["alpha", "beta"] {
+        assert!(
+            outputs.keys().any(|k| k.contains(&format!("lib{name}.rlib"))),
+            "glob member {name} should be enumerated and its rlib captured; got {:?}",
+            outputs.keys().collect::<Vec<_>>()
+        );
+    }
+}
+
+/// Create `<ws>/<rel>`'s parent and return the full path (small helper for the glob test).
+fn ws_path(ws: &std::path::Path, rel: &str) -> std::path::PathBuf {
+    std::fs::create_dir_all(ws).unwrap();
+    ws.join(rel)
+}
