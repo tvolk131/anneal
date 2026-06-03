@@ -166,3 +166,54 @@ fn warm_reuse_build_is_correctness_neutral() {
         report.warm,
     );
 }
+
+#[test]
+fn warm_reuse_is_neutral_across_a_revert() {
+    // The sharpest mtime hazard, on the real tool: revert a crate to *earlier* content
+    // whose CAS blob predates the warm `target/`. A stale-mtime sync (a plain clone of the
+    // old blob) would carry an mtime older than the warm artifacts → cargo's mtime-based
+    // freshness skips the change → stale binary. The fresh-mtime sync (§5.5) must recompile
+    // to the reverted content, matching a clean build.
+    let tmp = two_crate_fixture();
+    let root = tmp.path();
+    let registry = builtin_rules();
+    let cfg = debug_config();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
+    let label = Label::parse("//ws:ws").unwrap();
+
+    let build_action = |exec: &LocalExecutor| -> Action {
+        let graph = load_package(root, "ws", &registry).unwrap();
+        Analyzer::new(&graph, &registry, &cfg, root, exec.cas())
+            .analyze(&label)
+            .unwrap()
+            .actions()
+            .find(|a| a.name().starts_with("cargo_workspace build"))
+            .expect("a build action")
+            .clone()
+    };
+
+    // vx — applib at its ORIGINAL content. Analyzing it now seeds applib's "X" source blob,
+    // so by the time the warm `target/` is built (inside verify) that blob is already old.
+    let vx = build_action(&exec);
+
+    // Edit applib to a different ("Y") content and analyze vy.
+    std::fs::write(
+        root.join("ws/applib/src/lib.rs"),
+        "pub fn answer() -> i32 { corelib::base() + 100 }\n",
+    )
+    .unwrap();
+    let vy = build_action(&exec);
+
+    // Warm dir built at Y, then synced *back* to X (the revert; X's blob predates the Y
+    // build). Compare to a clean build of X. Neutral ⇒ the revert recompiled correctly
+    // despite the old blob — i.e. the sync gave the reverted file a fresh mtime.
+    let report = verify_warm_neutral(&exec, &vy, &vx).unwrap();
+    assert!(!report.cold.is_empty(), "there must be declared outputs to compare");
+    assert!(
+        report.is_neutral(),
+        "warm-reuse revert diverged from cold build on: {:?}\ncold={:?}\nwarm={:?}",
+        report.divergences(),
+        report.cold,
+        report.warm,
+    );
+}
