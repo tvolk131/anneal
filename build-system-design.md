@@ -374,7 +374,9 @@ Three rule-author operations:
 
 Snapshots are content-addressed in the same CAS, keyed at a **coarser** granularity than action cache keys — e.g., `(toolchain, lockfile, target_triple, profile)` — coarse enough that small source edits hit the same snapshot, fine enough that a toolchain bump invalidates it. Eviction policy (LRU, size/age caps) belongs to the system; the rule declares only *what* to prune.
 
-A planned acceleration keeps a snapshot **in place** as a reusable per-key working directory (a "warm sandbox") rather than round-tripping it through the CAS every build — the lever for the incremental-build benchmark gate ([§20.3](#203-pass-criteria)). It is the snapshot protocol under the same §1.4 invariant; the lifecycle mechanics (reusability conditions, the dirty-state guard, the source-sync diff, and the at-rest structure) are developed in `docs/sandboxing.md` §5.
+An implemented acceleration (now the default for snapshot owners) keeps a snapshot **in place** as a reusable per-key working directory (a "warm sandbox") rather than round-tripping it through the CAS every build — the lever for the incremental-build benchmark gate ([§20.3](#203-pass-criteria)). It is the snapshot protocol under the same §1.4 invariant; the lifecycle mechanics (reusability conditions, the dirty-state guard, the source-sync diff, the at-rest structure, and the private-vs-shared save rule) are developed in `docs/sandboxing.md` §5.
+
+**Snapshots are local, never portable.** A snapshot is a machine-local materialization accelerator; cross-machine reuse lives in the content-addressed layer — action *outputs* plus each ecosystem's *package store* (cargo vendor/registry, pnpm `.pnpm-store`) — which is shipped, while the working tree (`target/`, `node_modules`) is re-materialized locally. Non-portability is safe by the §1.4 invariant (it costs at most a re-derivation). See `docs/sandboxing.md` §5.9.
 
 ### 8.3 Pruning scope (v1: conservative)
 

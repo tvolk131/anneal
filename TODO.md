@@ -117,11 +117,22 @@
         (b) the **cross-process workspace lock** (+ sandbox-name `pid` token) — persistent per-key warm dirs are
         shared across concurrent `anneal` processes, and today's per-key lock is in-process only. Until (b),
         concurrent `anneal` invocations on one workspace can corrupt a shared warm dir.
-  - [ ] **Cross-machine / CI incremental** — default-on warm reuse fixes the *same-machine* loop but not
-        cross-machine: a fresh CI runner has no at-path warm dir, and a restored `target/` at a different path
-        full-rebuilds (cargo path-sensitivity), so CI incremental still pays cold. Fix needs either **warm-dir
-        caching across runs** (persist/restore the actual `warm/<key>/` dir, path-preserved) or **path
-        canonicalization** (a fixed build path across machines) + a shared snapshot. The next incremental frontier.
+  - [x] **Decision: snapshots are universally non-portable** (`docs/sandboxing.md` §5.9). A snapshot is local
+        materialized working state (`target/`, `node_modules`) — never shipped between machines. Cross-machine
+        reuse lives in the **content-addressed layer**: action outputs (path-independent) + ecosystem package
+        stores (cargo vendor/registry, pnpm `.pnpm-store`). Ship the store, re-materialize the working tree
+        locally. Safe by §1.4 (non-portable costs at most re-derivation). *Not* fixing cargo path-sensitivity —
+        that fight needs fixed-path canonicalization + cross-machine reproducibility, fragile and against the
+        tool's nature.
+  - [ ] **Lift `.pnpm-store` out of the pnpm snapshot** — today `snapshot_paths = [node_modules, .pnpm-store]`
+        bundles the *portable* store into the *non-portable* snapshot. Separate it into a portable
+        content-addressed cache so cross-machine pnpm is "ship store → `pnpm install --offline` re-links a local
+        `node_modules`." Symmetric with cargo's vendor/registry.
+  - [ ] **Cross-machine cargo: rustc-level compilation cache** (sccache-style, path-normalized) — the portable
+        layer that gives *fine-grained* cross-machine cargo reuse. Needed because the build action is coarse
+        (whole-workspace inputs), so the action cache only exact-hits an unchanged workspace; any change → full
+        `cargo build --workspace`. Keeps `target/` local; rustc invocations hit the shared cache. The real v1.x
+        remote-cache piece for cargo.
   - [ ] **Snapshot-on-evict** (private snapshots, after GC exists) — when GC removes a warm dir, snapshot it to
         the CAS first (restorable to the same stable path → incremental), so eviction costs a save *once*, not
         per build. Eviction-recovery insurance without the per-build tax.

@@ -409,3 +409,45 @@ the (still-useful, for *shared* snapshots) incremental + background save below.
 recompile` ≈ native incremental, and make the incremental overhead **independent of
 `target/` size** — killing the scaling that made non-warm diverge. This is the piece that
 moves the §20.3 "incremental must *beat*" gate from "match" toward "beat".
+
+### 5.9 Snapshots are universally non-portable — portability lives in the content-addressed layer
+
+A snapshot is the **materialized mutable working state** of a tool's incremental cache
+(`target/`, `node_modules`, `.next/cache`): tool-internal, often path- or platform-bound,
+and **re-derivable**. The decision: **snapshots are local-only — never transported between
+machines.** Cross-machine reuse lives entirely in the **content-addressed layer**: action
+*outputs* (rlibs, build-script outputs — already path-independent) and each ecosystem's
+*package store* (cargo's vendored deps / registry, pnpm's `.pnpm-store`). You **ship the
+store, re-materialize the working tree locally** — never the working tree itself.
+
+This is **safe by construction**: snapshots are correctness-*neutral* accelerators (§1.4),
+so non-portability costs at most a re-derivation on a fresh machine, never a wrong result.
+And it matches what mature CI converges on (cache the registry/store + a local build cache;
+the *store* is the shared thing). Trying to make `target/` itself portable is the wrong
+fight — it would need a fixed build-path convention *and* cross-machine build
+reproducibility, fighting the tool's nature for a fragile payoff.
+
+| ecosystem | local (snapshot, non-portable) | portable (content-addressed) |
+|---|---|---|
+| cargo | `target/` | vendored deps / registry + outputs (+ future rustc compilation cache) |
+| pnpm  | `node_modules` | **`.pnpm-store`** (tarballs) + script outputs |
+
+**Two axes, don't conflate them.** *Within-machine shared vs private* (§5.8.1 — does a
+*local* sibling action restore it) is orthogonal to *cross-machine portable vs not* (this
+section). `node_modules` is within-machine **shared** (local script consumers restore it →
+saved to the *local* CAS each build) yet cross-machine **non-portable** (re-materialized per
+machine). Both axes for `node_modules` say "don't transport the working tree."
+
+**Consequence — lift `.pnpm-store` out of the snapshot.** Today the pnpm rule bundles
+`node_modules` *and* `.pnpm-store` into one snapshot (`snapshot_paths = [node_modules,
+.pnpm-store]`). The store is the *portable* half trapped inside a (now explicitly
+non-portable) snapshot. It should be a **separate, portable, content-addressed cache**, so
+cross-machine pnpm is "ship the store → `pnpm install --offline` re-links a local
+`node_modules`" — symmetric with cargo's "ship vendor/registry → build locally." (Tracked.)
+
+**Honest cargo caveat.** With snapshots local-only *and* cargo's build action coarse
+(whole-workspace inputs), cross-machine cargo still pays a full `cargo build --workspace` on
+*any* change — the action cache is workspace-granular, so it only exact-hits on an unchanged
+workspace. Fine-grained cross-machine cargo reuse therefore needs a **rustc-level
+compilation cache** (sccache-style, path-normalized) as the portable layer — the real v1.x
+remote-cache piece. pnpm fares better: a warm `.pnpm-store` makes a fresh install fast.
