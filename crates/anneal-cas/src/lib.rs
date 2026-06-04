@@ -30,10 +30,14 @@
 //!
 //! Both fall back to a copy across filesystems / on non-CoW volumes.
 
+use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::time::UNIX_EPOCH;
 
 use anneal_core::Digest;
 
@@ -57,18 +61,51 @@ pub enum LinkKind {
     Copied,
 }
 
+/// One `(file-identity → digest)` record. The identity is `(mtime, size)`; a match
+/// lets [`Cas::ingest_file`] return the digest without re-reading or re-hashing the
+/// file body. Content-blind, exactly as cargo's own fingerprint is (see `ingest_file`).
+#[derive(Debug, Clone, Copy)]
+struct CacheEntry {
+    mtime_nanos: u128,
+    size: u64,
+    digest: Digest,
+}
+
+/// The in-memory digest cache, loaded from `<root>/digest-cache` on open and persisted
+/// (atomically) on flush/drop. `dirty` avoids rewriting an unchanged cache.
+#[derive(Default)]
+struct DigestCache {
+    entries: HashMap<PathBuf, CacheEntry>,
+    dirty: bool,
+}
+
 /// A content-addressed store rooted at a directory.
 pub struct Cas {
     /// `<root>/objects` — all blobs live under here, prefix-sharded.
     objects: PathBuf,
+    /// `<root>/digest-cache` — the persisted `(path,mtime,size) → digest` table.
+    cache_path: PathBuf,
+    /// The digest cache (see [`Cas::ingest_file`]). A local, rebuildable optimization.
+    digest_cache: Mutex<DigestCache>,
+    /// Count of files actually read+hashed (digest-cache misses) — observability for the
+    /// benchmark and tests; the whole point of the cache is to keep this low on rebuilds.
+    reads: AtomicU64,
 }
 
 impl Cas {
     /// Open (creating if necessary) a store rooted at `root`.
     pub fn open(root: impl Into<PathBuf>) -> io::Result<Self> {
-        let objects = root.into().join("objects");
+        let root = root.into();
+        let objects = root.join("objects");
         fs::create_dir_all(&objects)?;
-        Ok(Cas { objects })
+        let cache_path = root.join("digest-cache");
+        let digest_cache = Mutex::new(load_digest_cache(&cache_path));
+        Ok(Cas {
+            objects,
+            cache_path,
+            digest_cache,
+            reads: AtomicU64::new(0),
+        })
     }
 
     /// Store `bytes`, returning their content address. Idempotent: storing the same
@@ -99,6 +136,86 @@ impl Cas {
                 }
             }
         }
+    }
+
+    /// Ingest a file *from disk* into the store, returning its content address — the
+    /// cached form of `cas.put(&fs::read(path)?)`.
+    ///
+    /// Reading and SHA-256-ing a file scales with its size and, across a whole input
+    /// tree, dominates analysis on a file-heavy repo (vendored deps = thousands of
+    /// files). So we cache `(path, mtime, size) → digest`: if the file's mtime and size
+    /// match a prior ingest *and* that blob is still in the store, we return the cached
+    /// digest after only a `stat` — never touching the file body. On any mismatch (or a
+    /// missing blob — the cache self-heals against GC/corruption) we fall back to the
+    /// full read+hash and refresh the entry.
+    ///
+    /// This is content-*blind*, the same trade-off cargo's own fingerprint makes: a
+    /// content change that preserves both mtime and size would be missed. Real edits
+    /// always move mtime, and the cache is local + cheaply rebuilt, but callers needing
+    /// absolute certainty should use [`put`](Cas::put) on bytes they have read themselves.
+    pub fn ingest_file(&self, path: &Path) -> io::Result<Digest> {
+        let meta = fs::metadata(path)?;
+        let identity = file_identity(&meta);
+
+        // Fast path: a matching identity whose blob is still present.
+        if let Some((mtime, size)) = identity {
+            let cached = self.digest_cache.lock().unwrap().entries.get(path).copied();
+            if let Some(e) = cached {
+                if e.mtime_nanos == mtime && e.size == size && self.has(&e.digest) {
+                    return Ok(e.digest);
+                }
+            }
+        }
+
+        // Slow path: read + hash + store, then record the identity for next time.
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        let bytes = fs::read(path)?;
+        let digest = self.put(&bytes)?;
+        if let Some((mtime, size)) = identity {
+            let mut cache = self.digest_cache.lock().unwrap();
+            cache.entries.insert(
+                path.to_path_buf(),
+                CacheEntry { mtime_nanos: mtime, size, digest },
+            );
+            cache.dirty = true;
+        }
+        Ok(digest)
+    }
+
+    /// Number of files actually read+hashed via [`ingest_file`](Cas::ingest_file) — i.e.
+    /// digest-cache misses. A no-op rebuild should report ~0.
+    pub fn reads(&self) -> u64 {
+        self.reads.load(Ordering::Relaxed)
+    }
+
+    /// Persist the digest cache atomically (temp + rename). A no-op if nothing changed
+    /// since the last flush. Best-effort on drop; callers may invoke it explicitly.
+    pub fn flush(&self) -> io::Result<()> {
+        let mut cache = self.digest_cache.lock().unwrap();
+        if !cache.dirty {
+            return Ok(());
+        }
+        let mut buf = String::new();
+        for (path, e) in &cache.entries {
+            // Source paths never contain newlines; a non-UTF-8 path that round-trips
+            // lossily just misses the cache next time (safe — a re-hash, not an error).
+            let _ = writeln!(
+                buf,
+                "{}\t{}\t{}\t{}",
+                e.mtime_nanos,
+                e.size,
+                e.digest.to_hex(),
+                path.display()
+            );
+        }
+        let nonce = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp = self
+            .cache_path
+            .with_file_name(format!(".digest-cache.tmp.{}.{}", std::process::id(), nonce));
+        fs::write(&tmp, &buf)?;
+        fs::rename(&tmp, &self.cache_path)?;
+        cache.dirty = false;
+        Ok(())
     }
 
     /// Fetch the bytes for `digest`, or `None` if absent.
@@ -140,6 +257,45 @@ impl Cas {
         let hex = digest.to_hex();
         self.objects.join(&hex[..2]).join(&hex[2..])
     }
+}
+
+impl Drop for Cas {
+    /// Persist the digest cache on the way out (best-effort; it is rebuildable, so a
+    /// flush failure or a crash just costs a re-hash on the next build).
+    fn drop(&mut self) {
+        let _ = self.flush();
+    }
+}
+
+/// `(mtime-nanoseconds, size)` identity for the digest cache, or `None` if the platform
+/// can't give a stable mtime (then we always read+hash — safe, just not cached).
+fn file_identity(meta: &fs::Metadata) -> Option<(u128, u64)> {
+    let mtime = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_nanos();
+    Some((mtime, meta.len()))
+}
+
+/// Load the digest cache from disk. A missing/corrupt file, or any unparseable line, is
+/// tolerated: the entry is simply dropped (worst case, a re-hash). Format per line:
+/// `<mtime_nanos>\t<size>\t<digest_hex>\t<path>`.
+fn load_digest_cache(path: &Path) -> DigestCache {
+    let mut entries = HashMap::new();
+    if let Ok(text) = fs::read_to_string(path) {
+        for line in text.lines() {
+            let mut parts = line.splitn(4, '\t');
+            let (Some(mt), Some(sz), Some(dg), Some(p)) =
+                (parts.next(), parts.next(), parts.next(), parts.next())
+            else {
+                continue;
+            };
+            let (Ok(mtime_nanos), Ok(size), Ok(digest)) =
+                (mt.parse::<u128>(), sz.parse::<u64>(), Digest::from_hex(dg))
+            else {
+                continue;
+            };
+            entries.insert(PathBuf::from(p), CacheEntry { mtime_nanos, size, digest });
+        }
+    }
+    DigestCache { entries, dirty: false }
 }
 
 /// Place a blob at `dest` using the cheapest store-safe mechanism for the platform.
@@ -292,5 +448,60 @@ mod tests {
             .link_into(&absent, &dir.path().join("x"))
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn ingest_file_addresses_like_put_and_caches_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::open(dir.path()).unwrap();
+        let f = dir.path().join("src.rs");
+        fs::write(&f, b"fn main() {}").unwrap();
+
+        let d1 = cas.ingest_file(&f).unwrap();
+        assert_eq!(d1, Digest::of(b"fn main() {}"), "ingest addresses by content like put");
+        assert_eq!(cas.reads(), 1, "first ingest reads the file");
+
+        // Unchanged file (same mtime + size): a cache hit, no second read.
+        let d2 = cas.ingest_file(&f).unwrap();
+        assert_eq!(d2, d1);
+        assert_eq!(cas.reads(), 1, "an unchanged file is not re-read/re-hashed");
+    }
+
+    #[test]
+    fn ingest_file_rehashes_when_content_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::open(dir.path()).unwrap();
+        let f = dir.path().join("src.rs");
+        fs::write(&f, b"v1").unwrap();
+        let d1 = cas.ingest_file(&f).unwrap();
+
+        // A real edit moves the mtime (and here the size) → cache miss → fresh digest.
+        // Sleep a hair so the mtime is observably different even on coarse clocks.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        fs::write(&f, b"v2 longer").unwrap();
+        let d2 = cas.ingest_file(&f).unwrap();
+        assert_ne!(d1, d2, "an edited file must produce a new digest");
+        assert_eq!(d2, Digest::of(b"v2 longer"));
+        assert_eq!(cas.reads(), 2, "the edit forces a re-read");
+    }
+
+    #[test]
+    fn digest_cache_persists_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("src.rs");
+        fs::write(&f, b"persisted").unwrap();
+
+        let d = {
+            let cas = Cas::open(dir.path()).unwrap();
+            let d = cas.ingest_file(&f).unwrap();
+            cas.flush().unwrap();
+            d
+        };
+
+        // A fresh Cas over the same root loads the cache: the unchanged file is a hit.
+        let cas2 = Cas::open(dir.path()).unwrap();
+        let d2 = cas2.ingest_file(&f).unwrap();
+        assert_eq!(d, d2);
+        assert_eq!(cas2.reads(), 0, "a persisted entry means no read after reopen");
     }
 }

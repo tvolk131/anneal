@@ -73,11 +73,7 @@ impl<'a> RuleContext<'a> {
     /// on the rule's behalf — the rule never touches the filesystem directly.
     pub fn source_artifact(&self, rel: &Path) -> Result<Artifact, RuleError> {
         let abs = self.package_dir.join(rel);
-        let bytes = std::fs::read(&abs).map_err(|error| RuleError::Source {
-            path: rel.to_path_buf(),
-            error,
-        })?;
-        let digest = self.cas.put(&bytes).map_err(|error| RuleError::Source {
+        let digest = self.cas.ingest_file(&abs).map_err(|error| RuleError::Source {
             path: rel.to_path_buf(),
             error,
         })?;
@@ -168,8 +164,7 @@ impl<'a> RuleContext<'a> {
                     .strip_prefix(self.package_dir)
                     .unwrap_or(&path)
                     .to_path_buf();
-                let bytes = std::fs::read(&path).map_err(|e| source_err(&rel, e))?;
-                let digest = self.cas.put(&bytes).map_err(|e| source_err(&rel, e))?;
+                let digest = self.cas.ingest_file(&path).map_err(|e| source_err(&rel, e))?;
                 out.push(Artifact {
                     path: rel,
                     source: ArtifactSource::Source(digest),
