@@ -71,6 +71,14 @@ pub enum CachePolicy {
     /// script that needs `node_modules` present but whose result we won't reuse. The
     /// promotion to `SnapshotBased` is earned via verification, never asserted.
     SnapshotConsuming,
+    /// **Fixed-output** (a Nix fixed-output derivation; Bazel `http_archive(sha256)`):
+    /// the action's single declared output is pinned to `expected` *before* it runs.
+    /// That a-priori knowledge is what licenses the network — the action is cached by
+    /// its **output** (`cas.has(expected)`), not its inputs, so an already-present blob
+    /// skips the fetch entirely, and a produced output is verified byte-for-byte against
+    /// `expected` (a mismatch fails closed). The acquisition layer for hash-pinned deps,
+    /// toolchains, and archives (`docs/...` §FOD). Built via [`ActionBuilder::fixed_output`].
+    FixedOutput { expected: Digest },
 }
 
 impl CachePolicy {
@@ -80,6 +88,7 @@ impl CachePolicy {
             CachePolicy::NonCacheable => "non_cacheable",
             CachePolicy::SnapshotBased => "snapshot_based",
             CachePolicy::SnapshotConsuming => "snapshot_consuming",
+            CachePolicy::FixedOutput { .. } => "fixed_output",
         }
     }
 }
@@ -120,6 +129,13 @@ pub struct Action {
     /// actions (the platform is part of identity); `false` for platform-independent
     /// ones like `nickel_eval`, whose result is shared across all platforms (§6.3).
     pub(crate) platform_sensitive: bool,
+    /// Whether the action is permitted network access. Default `false` — the sealed-build
+    /// goal (§7) is no network. Set `true` only for fixed-output fetches (where the output
+    /// hash fences the impurity) and the `exec` escape hatch. Kept orthogonal to
+    /// [`CachePolicy`] so the capability is reusable; kernel-level *enforcement* of the
+    /// default (Linux netns, macOS sandbox-exec) is later hardening — the capability is
+    /// recorded here so enforcement can consult it.
+    pub(crate) network: bool,
 }
 
 impl Action {
@@ -145,6 +161,7 @@ impl Action {
                 snapshot_key: None,
                 snapshot_shared: true,
                 platform_sensitive: true,
+                network: false,
             },
         }
     }
@@ -154,6 +171,13 @@ impl Action {
     /// outputs ([`InputSource::Output`]), so it must be unique within a graph.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Whether the action is permitted network access (see the `network` field). The
+    /// sandbox/executor consults this; enforcement of the `false` default is later
+    /// hardening.
+    pub fn allows_network(&self) -> bool {
+        self.network
     }
 }
 
@@ -291,6 +315,25 @@ impl ActionBuilder {
         self.action.snapshot_key = Some(key);
         self.action.snapshot_paths = paths;
         self.action.cache_policy = CachePolicy::SnapshotConsuming;
+        self
+    }
+
+    /// Permit (or forbid) network access for this action (default forbidden). Orthogonal
+    /// to the cache policy — for the `exec` escape hatch and as the capability
+    /// [`ActionBuilder::fixed_output`] turns on.
+    pub fn network(mut self, enabled: bool) -> Self {
+        self.action.network = enabled;
+        self
+    }
+
+    /// Make this a **fixed-output** fetch: its single declared `output` is pinned to
+    /// `expected`. Sets [`CachePolicy::FixedOutput`] and **enables the network** (the
+    /// pin fences the impurity). The action is cached by output content — an already-
+    /// present `expected` blob skips the fetch — and any produced output is verified
+    /// against `expected`, failing closed on a mismatch. Declare exactly one output.
+    pub fn fixed_output(mut self, expected: Digest) -> Self {
+        self.action.cache_policy = CachePolicy::FixedOutput { expected };
+        self.action.network = true;
         self
     }
 

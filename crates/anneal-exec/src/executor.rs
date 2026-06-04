@@ -429,6 +429,57 @@ impl LocalExecutor {
     /// Materialize → (optionally restore snapshot) → run → capture → (optionally save
     /// snapshot). The shared core of cached execution and verification. The sandbox
     /// at `root` is recreated fresh each call.
+    /// Execute a fixed-output (FOD) fetch (§FOD): a network-permitted action whose single
+    /// declared output is pinned to `expected`.
+    ///
+    /// Cached by **output**, not inputs: if `expected` is already a CAS blob — from any
+    /// prior build, any project on this machine, or a future remote-cache pull — the
+    /// fetch is skipped entirely (content-addressed dedup; the fetch command never runs).
+    /// On a miss we fetch in a sandbox with the network capability, then verify the
+    /// produced bytes against the pin: a mismatch (corrupt download, compromised mirror,
+    /// moved artifact) fails *closed*. Verification makes the result trivially §1.4
+    /// correctness-neutral — the hash is the sole arbiter, so a bad network can fail the
+    /// build but never corrupt it.
+    fn run_fixed_output(&self, action: &Action, expected: Digest) -> Result<ActionResult, ExecError> {
+        // The pin is a single digest, so a FOD pins exactly one artifact.
+        if action.outputs.len() != 1 {
+            return Err(ExecError::FixedOutputArity {
+                action: action.name().to_owned(),
+                outputs: action.outputs.len(),
+            });
+        }
+        let out_name = action.outputs.keys().next().unwrap().clone();
+
+        // Cache by output content: the pinned blob is present ⇒ nothing to fetch.
+        if self.cas.has(&expected) {
+            return Ok(ActionResult {
+                exit_code: 0,
+                outputs: BTreeMap::from([(out_name, expected)]),
+                cache_hit: true,
+            });
+        }
+
+        // Miss: fetch in a sandbox (network permitted by the capability; no snapshot
+        // restore/save). `capture` already stored the produced bytes in the CAS under
+        // their *actual* digest — a wrong-hash blob there is harmless, it simply isn't
+        // `expected` — so we only need to check that digest against the pin.
+        let result = self.run_core(action, self.sandbox_root(&expected), false, false)?;
+        if result.exit_code != 0 {
+            // The fetch command itself failed (e.g. the artifact is unreachable). Surface
+            // it as the failed result rather than a hash mismatch.
+            return Ok(result);
+        }
+        let actual = result
+            .outputs
+            .get(&out_name)
+            .copied()
+            .expect("a successful run captured the single declared output");
+        if actual != expected {
+            return Err(ExecError::FixedOutputMismatch { expected, actual });
+        }
+        Ok(result)
+    }
+
     fn run_core(
         &self,
         action: &Action,
@@ -709,6 +760,12 @@ impl Executor for LocalExecutor {
     fn execute(&self, action: &Action) -> Result<ActionResult, ExecError> {
         guard_resolved(action)?;
 
+        // Fixed-output (FOD) fetches are cached by their *output* hash, not their inputs,
+        // and verified against the pin — a different execution path entirely (§FOD).
+        if let CachePolicy::FixedOutput { expected } = action.cache_policy {
+            return self.run_fixed_output(action, expected);
+        }
+
         let key = action_digest(action);
         // Two orthogonal properties (§5 of docs/rules.md):
         //   restore  — bring a snapshot into the sandbox before running
@@ -817,6 +874,12 @@ pub enum ExecError {
     Timeout { timeout_ms: u64 },
     /// The action graph contains a dependency cycle, so no execution order exists.
     DependencyCycle,
+    /// A fixed-output (FOD) action declared other than exactly one output. The pin is a
+    /// single digest, so it pins a single artifact.
+    FixedOutputArity { action: String, outputs: usize },
+    /// A fixed-output (FOD) action produced content whose digest did not match its pin —
+    /// a corrupt download, a compromised mirror, or a moved artifact. Fails closed.
+    FixedOutputMismatch { expected: Digest, actual: Digest },
 }
 
 impl fmt::Display for ExecError {
@@ -836,6 +899,14 @@ impl fmt::Display for ExecError {
             ExecError::DependencyCycle => {
                 write!(f, "action graph contains a dependency cycle")
             }
+            ExecError::FixedOutputArity { action, outputs } => write!(
+                f,
+                "fixed-output action {action:?} must declare exactly one output, has {outputs}"
+            ),
+            ExecError::FixedOutputMismatch { expected, actual } => write!(
+                f,
+                "fixed-output hash mismatch: expected {expected}, fetched {actual}"
+            ),
         }
     }
 }
