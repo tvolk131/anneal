@@ -390,9 +390,10 @@ shape is shared across every package ecosystem.
       index path, but the index is a static, pinnable local artifact. Default to the **vendor layout** (simplest
       assembly); reach for local-registry only if a vendor-mode limitation bites; **never** the live registry.
       (Reframes "Anneal-managed vendoring" below — the FOD primitive *is* the action-model extension it was waiting
-      for.) **Shippable now, no FOD/staged-graph needed:** stop walking `vendor/`/`.cargo/` as inputs and key the
-      build on the lockfile digest — that step alone retires the serde input-handling slowness for the
-      committed-lockfile case (see "Treat `vendor/` as one lockfile-keyed input unit", §Performance).
+      for.) **DONE for the committed-lockfile case** (vendor layout, in-sandbox assembly, build keyed on the
+      `.crate` digests) — see "Anneal-managed acquisition (fetch mode)" under §cargo_workspace completeness.
+      **Remaining:** the once-per-machine *shared vendor store* (today assembly re-runs each cold build), and the
+      `sparse+file://` local-registry variant only if a vendor-mode limitation bites.
 
 ## cargo_workspace completeness
 
@@ -401,11 +402,21 @@ shape is shared across every package ecosystem.
       already materializes `vendor/`/`.cargo/` (not in `IGNORED_DIRS`) and the sealed `cargo build --offline
       --locked` consumes them. Validated end-to-end via `anneal build` on a `syn`-dependent workspace (all 4
       actions ok, offline). So external-dep *enablement* was effectively already present.
-  - [ ] **Anneal-managed vendoring** — automate the `cargo vendor` step as a network-permeable action so users
-        don't pre-vendor. **Now subsumed by the FOD section** (§Hermetic dependency acquisition): the
-        fixed-output fetch primitive *is* the action-model extension this was waiting for — per-crate hash-pinned
-        FODs populate a shared CAS-materialized vendor store, the build consumes it offline. Until then the bench
-        pre-vendors at setup.
+  - [x] **Anneal-managed acquisition (fetch mode) — committed-lockfile case done.** No pre-vendoring needed: a
+        workspace with a committed `Cargo.lock` (crates.io deps) and **no** `vendor/` now hash-pin-fetches each
+        crate via per-crate FOD (static.crates.io `.crate`, pinned to the lockfile checksum), assembles a vendor
+        tree in-sandbox (`tar` + a pinned-checksum `.cargo-checksum.json` + a `[source]`-replacement
+        `.cargo/config.toml`), and builds/tests `--offline`. `fetch_plan` / `fetch_action` / `assembly_prelude` /
+        `with_crates` in `cargo_workspace.rs`; the build is keyed on workspace sources + the `.crate` digests
+        (= lockfile checksums), so it's O(workspace sources) not O(vendored files). The `.crate` blobs are
+        CAS-deduped (fetched once per machine), but the **vendor *assembly*** still re-runs each cold build (the
+        prelude) — making it a once-per-machine materialized store (§FOD point 3) is the remaining perf step.
+        Verified end-to-end (`anneal-analysis/tests/cargo_fetch.rs`, `#[ignore]` = network: cfg-if). Required
+        wiring the **network capability through the sandbox** (macOS sealed mode denied network unconditionally;
+        a `allows_network()` action now gets an allow-network `sandbox-exec` profile — non-FOD sealed actions still
+        deny). Pre-vendored + dependency-free paths unchanged. **Still deferred:** the bench still pre-vendors at
+        setup (its convenience); generated-lockfile (library w/o committed lock, e.g. serde) needs staged-graph;
+        git/`path`/non-crates.io deps error out (vendor those).
 - [ ] **Integration-test multi-binary split** (one binary per `tests/*.rs`).
 - [ ] **Separately-addressable test targets** (`//ws:crate_a_test_unit`) — falls out of named output groups + demand pruning.
 - [ ] **Per-case test durations** (needs libtest JSON, i.e. a nightly `-Z` path or alternative).
