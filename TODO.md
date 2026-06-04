@@ -141,7 +141,9 @@
   - [ ] **Lift `.pnpm-store` out of the pnpm snapshot** — today `snapshot_paths = [node_modules, .pnpm-store]`
         bundles the *portable* store into the *non-portable* snapshot. Separate it into a portable
         content-addressed cache so cross-machine pnpm is "ship store → `pnpm install --offline` re-links a local
-        `node_modules`." Symmetric with cargo's vendor/registry.
+        `node_modules`." Symmetric with cargo's vendor/registry. **The principled form of this is the FOD section**
+        (§Hermetic dependency acquisition): `.pnpm-store` is populated by per-package hash-pinned fetches from
+        `pnpm-lock.yaml` SRI integrity, making it a portable FOD layer rather than a manually-separated cache.
   - [ ] **Cross-machine cargo: rustc-level compilation cache** (sccache-style, path-normalized) — the portable
         layer that gives *fine-grained* cross-machine cargo reuse. Needed because the build action is coarse
         (whole-workspace inputs), so the action cache only exact-hits an unchanged workspace; any change → full
@@ -322,6 +324,75 @@
       the old "wrap-don't-decompose sidesteps deferred analysis" note below — wrapping tools that own their
       structure is exactly what *needs* it.)
 
+## Hermetic dependency acquisition — fixed-output fetch (FOD)
+
+The Nix/Bazel model for pulling external deps over the network *without* losing hermeticity or non-staleness.
+A foundational, rule-agnostic capability (sibling of staged-graph above); cargo is the first adopter but the
+shape is shared across every package ecosystem.
+
+- [ ] **Fixed-output fetch primitive (rule-agnostic, §7) — the "safe network" axis.** `CachePolicy::FixedOutput
+      { expected: Digest }` + a `network: bool` action capability (default `false`). A FOD action's output digest
+      is known *before* it runs — that is exactly what licenses the network (Nix fixed-output derivation; Bazel
+      `http_archive(sha256)`). Slots into `executor.rs::execute()` as a new branch: the cache lookup becomes
+      `cas.has(expected)` — content-addressed by **output**, not inputs (`action_digest` is irrelevant) → hit =
+      synthesize the result, **no sandbox / no network / no fetch**; miss = run with network on, capture the single
+      declared output, verify `Digest::of(output) == expected` (else hard-fail `FetchHashMismatch`), store under
+      `expected`. Properties: trivially **§1.4 correctness-neutral** (the hash is the arbiter — a bad/compromised
+      mirror fails *closed*, never corrupts); a FOD action has **no varying file inputs** (its determinism is the
+      hash, not inputs → it structurally cannot smuggle build state into a network call); two fetches with the same
+      `expected` dedup to one graph node. Composes with the other policies — FOD fetches feed a
+      `SnapshotBased`/`Deterministic` build. **Sandbox:** network OFF by default for all actions (the §7 sealed-build
+      goal — today only a convention), ON only for FOD (and the §7.6 `exec --no-network` hatch → keep the capability
+      orthogonal to cache policy). Kernel-level enforcement (Linux netns/`unshare`, macOS `sandbox-exec`) is a
+      **separable, later hardening** — the hash already gives fetch-correctness before enforcement exists.
+- [ ] **The per-ecosystem acquisition pattern (one shape everywhere).** Every modern ecosystem converged on the
+      same two things — a lockfile with per-artifact hashes + an internal content-addressed store — which *is* the
+      FOD shape: `lockfile {(coord, hash)} → one FOD fetch per artifact → assemble blobs into the tool's offline
+      layout → build/consume keyed on the **lockfile digest** (not the dep files)`. The bespoke part per ecosystem
+      is narrow and irreducible: *parse this lockfile* + *lay blobs out in this tool's offline layout*; a shared
+      **"materialize CAS blobs into a directory per a layout fn"** helper carries the rest. Adopters: **cargo**
+      (`Cargo.lock` checksums → registry), **pnpm/npm** (`pnpm-lock.yaml` SRI integrity → `.pnpm-store` — *this
+      retires the "lift `.pnpm-store` out of the snapshot" item*; the store becomes a portable FOD-populated layer),
+      **go** (`go.sum` → `GOMODCACHE`, `GOPROXY=off`), **python** (`uv.lock` / pip `--require-hashes` → wheelhouse,
+      `--no-index`), JVM, **OCI** (`FROM img@sha256:…`), generic `http_archive`. Beyond deps — the primitive is
+      "acquire immutable, hash-identified content," so it equally covers **pinned toolchains** (download a Go SDK /
+      Node / rustc by sha256 → hermetic, pinned toolchain provisioning — see Toolchains), prebuilt native artifacts,
+      ML model weights, golden test fixtures.
+- [ ] **Unifying insight + the two shared prerequisites.** anneal's CAS becomes the **meta-store**; each per-tool
+      store (`vendor/`, `.pnpm-store`, `GOMODCACHE`, a wheelhouse) is a deterministic **materialized view** of it —
+      one source of truth, re-projected into whatever layout each native tool reads offline. This is the portable
+      half of the cross-machine story (the "ecosystem package store", §cross-machine above): FOD outputs are
+      path-independent + hash-keyed → fetched once per machine, shared across all projects, remote-CAS-shareable
+      cross-machine (unlike snapshots, which are local). Two cross-cutting prerequisites — each built once, then the
+      *next* ecosystem is cheap: **(a)** the blob→layout **assembly helper**; **(b) staged-graph** for the
+      *generated-lockfile* case — a library without a committed lockfile (serde; equally a Go/JS lib) hits the
+      §14.6 phase wall, because emitting per-artifact FODs needs the lockfile and the lockfile is a *tool output* →
+      deferred analysis. So **staged-graph is the shared prerequisite for the no-committed-lock case across all
+      ecosystems**; the committed-lockfile slice ships first without it.
+- [ ] **Limits (honest).** FOD ⟺ content is **immutable + a-priori hash-identified**. Where it isn't (a moving git
+      branch, a lockfile format lacking per-artifact hashes, an ad-hoc URL) → fall back to coarse
+      "deterministic-by-trust, keyed on the lockfile" or `NonCacheable`; the boundary is sharp. git/`path` deps are
+      harder (a checkout isn't a single-hash tarball — Nix does "fetch + hash the tree"); do registry deps first.
+      Trust model = TOFU at lockfile-generation time, verified forever after (the cargo/Nix posture); vendoring
+      keeps the actual bytes in-tree (auditable-in-PR provenance) → FOD is a *trade*, not strictly better. Keep both
+      acquisition modes available.
+- [ ] **cargo: vendoring vs "more cargo-y" — the offline-layout sub-decision.** Vendoring *the **layout*** stays the
+      best target **even under FOD**: the `[source]` replacement makes the build **index-free** (no mutable registry
+      index, no network, deterministic), and that index-freedom *is* the hermeticity win. "More cargo-y" = the
+      **live registry + sparse/git index** is strictly *worse* — it reintroduces the mutable, network-dependent
+      index that vendoring/FOD exist to avoid. So FOD does **not** mean "stop vendoring"; it means: (1) swap
+      *acquisition* `cargo vendor` (network-at-setup) → per-crate FODs (hash-pinned, verified, portable); (2) make
+      the vendor tree a **shared, per-machine, CAS-materialized store** keyed by checksum (a union across projects;
+      `[source]` points at it) — materialized once, **not** per build, and **not** in the action key; (3) key the
+      build on the **lockfile digest**. Middle option, if cargo-native *resolution* matters while staying hermetic:
+      assemble a **frozen local sparse registry** (`sparse+file://`) instead of a vendor dir — cargo runs its normal
+      index path, but the index is a static, pinnable local artifact. Default to the **vendor layout** (simplest
+      assembly); reach for local-registry only if a vendor-mode limitation bites; **never** the live registry.
+      (Reframes "Anneal-managed vendoring" below — the FOD primitive *is* the action-model extension it was waiting
+      for.) **Shippable now, no FOD/staged-graph needed:** stop walking `vendor/`/`.cargo/` as inputs and key the
+      build on the lockfile digest — that step alone retires the serde input-handling slowness for the
+      committed-lockfile case (see "Treat `vendor/` as one lockfile-keyed input unit", §Performance).
+
 ## cargo_workspace completeness
 
 - [x] **External crates via vendoring — works with NO rule changes.** A workspace with `vendor/` +
@@ -330,9 +401,10 @@
       --locked` consumes them. Validated end-to-end via `anneal build` on a `syn`-dependent workspace (all 4
       actions ok, offline). So external-dep *enablement* was effectively already present.
   - [ ] **Anneal-managed vendoring** — automate the `cargo vendor` step as a network-permeable action so users
-        don't pre-vendor. The clean model needs either tree/directory artifacts (§21.1, deferred) or a build
-        action that *consumes a second snapshot* (the vendor/registry cache) while *owning* `target/` — i.e. an
-        action-model extension to restore N snapshots + own one. Until then the bench pre-vendors at setup.
+        don't pre-vendor. **Now subsumed by the FOD section** (§Hermetic dependency acquisition): the
+        fixed-output fetch primitive *is* the action-model extension this was waiting for — per-crate hash-pinned
+        FODs populate a shared CAS-materialized vendor store, the build consumes it offline. Until then the bench
+        pre-vendors at setup.
 - [ ] **Integration-test multi-binary split** (one binary per `tests/*.rs`).
 - [ ] **Separately-addressable test targets** (`//ws:crate_a_test_unit`) — falls out of named output groups + demand pruning.
 - [ ] **Per-case test durations** (needs libtest JSON, i.e. a nightly `-Z` path or alternative).
