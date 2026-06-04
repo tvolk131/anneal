@@ -10,8 +10,171 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
+        lib = pkgs.lib;
+
+        rustToolPackages = with pkgs; [
+          rustc
+          cargo
+          stdenv.cc
+        ] ++ lib.optionals pkgs.stdenv.isDarwin (with pkgs; [
+          xcbuild.xcrun
+        ]);
+        rustToolNames = [ "cargo" "rustc" "cc" ]
+          ++ lib.optionals pkgs.stdenv.isDarwin [ "xcrun" ];
+
+        runtimeToolPackages = with pkgs; [
+          bash
+          coreutils
+          curl
+          gnugrep
+          gnused
+          gnutar
+        ];
+        runtimeToolNames = [
+          "sh"
+          "cat"
+          "chmod"
+          "cp"
+          "curl"
+          "grep"
+          "head"
+          "mkdir"
+          "sed"
+          "tar"
+        ];
+
+        nodeToolPackages = with pkgs; [
+          nodejs_22
+          pnpm
+        ];
+        nodeToolNames = [ "pnpm" "node" ];
+
+        nickelToolPackages = with pkgs; [
+          nickel
+        ];
+        nickelToolNames = [ "nickel" ];
+
+        rustClosure = pkgs.closureInfo { rootPaths = rustToolPackages; };
+        runtimeClosure = pkgs.closureInfo { rootPaths = runtimeToolPackages; };
+        nodeClosure = pkgs.closureInfo { rootPaths = nodeToolPackages; };
+        nickelClosure = pkgs.closureInfo { rootPaths = nickelToolPackages; };
+
+        shellWordList = names: lib.concatStringsSep " " names;
+
+        toolchainManifest = pkgs.runCommand "anneal-toolchains.json"
+          {
+            nativeBuildInputs =
+              rustToolPackages
+              ++ runtimeToolPackages
+              ++ nodeToolPackages
+              ++ nickelToolPackages
+              ++ [ pkgs.jq ];
+          }
+          ''
+            set -eu
+
+            store_root() {
+              case "$1" in
+                /nix/store/*)
+                  entry="''${1#/nix/store/}"
+                  printf '/nix/store/%s\n' "''${entry%%/*}"
+                  ;;
+                *)
+                  echo "expected a /nix/store path, got $1" >&2
+                  exit 1
+                  ;;
+              esac
+            }
+
+            json_tools() {
+              first=1
+              printf '{'
+              for tool in "$@"; do
+                path="$(command -v "$tool")"
+                store_root "$path" >/dev/null
+                if [ "$first" -eq 0 ]; then
+                  printf ','
+                fi
+                first=0
+                printf '"%s":"%s"' "$tool" "$path"
+              done
+              printf '}'
+            }
+
+            json_roots() {
+              closure_file="$1"
+              shift
+              {
+                cat "$closure_file"
+                for tool in "$@"; do
+                  store_root "$(command -v "$tool")"
+                done
+              } | sort -u | jq -R . | jq -s .
+            }
+
+            rust_tools="$(json_tools ${shellWordList rustToolNames})"
+            rust_roots="$(json_roots ${rustClosure}/store-paths ${shellWordList rustToolNames})"
+            runtime_tools="$(json_tools ${shellWordList runtimeToolNames})"
+            runtime_roots="$(json_roots ${runtimeClosure}/store-paths ${shellWordList runtimeToolNames})"
+            node_tools="$(json_tools ${shellWordList nodeToolNames})"
+            node_roots="$(json_roots ${nodeClosure}/store-paths ${shellWordList nodeToolNames})"
+            nickel_tools="$(json_tools ${shellWordList nickelToolNames})"
+            nickel_roots="$(json_roots ${nickelClosure}/store-paths ${shellWordList nickelToolNames})"
+
+            jq -n \
+              --argjson rust_tools "$rust_tools" \
+              --argjson rust_roots "$rust_roots" \
+              --argjson runtime_tools "$runtime_tools" \
+              --argjson runtime_roots "$runtime_roots" \
+              --argjson node_tools "$node_tools" \
+              --argjson node_roots "$node_roots" \
+              --argjson nickel_tools "$nickel_tools" \
+              --argjson nickel_roots "$nickel_roots" \
+              '{
+                version: 1,
+                toolchains: {
+                  rust: {
+                    tools: $rust_tools,
+                    read_only_roots: $rust_roots
+                  },
+                  "posix-runtime": {
+                    tools: $runtime_tools,
+                    read_only_roots: $runtime_roots
+                  },
+                  node: {
+                    tools: $node_tools,
+                    read_only_roots: $node_roots
+                  },
+                  nickel: {
+                    tools: $nickel_tools,
+                    read_only_roots: $nickel_roots
+                  }
+                }
+              }' > "$out"
+          '';
+
+        devShellPackages =
+          rustToolPackages
+          ++ runtimeToolPackages
+          ++ nodeToolPackages
+          ++ nickelToolPackages
+          ++ (with pkgs; [
+            # Rust developer tools
+          clippy
+          rustfmt
+          rust-analyzer
+
+            # General build/dev utilities
+            git
+            jq
+          ])
+          ++ lib.optionals pkgs.stdenv.isLinux (with pkgs; [
+            bubblewrap
+          ]);
       in
       {
+        packages.toolchain-manifest = toolchainManifest;
+
         # `nix develop` / `nix develop --command <cmd>` gives a complete
         # contributor environment. The toolset is scoped to what the
         # Milestone 1 spikes and rules actually exercise:
@@ -19,25 +182,8 @@
         #   - Nickel          : nickel_eval, the Nickel -> TS routing demo
         #   - Node + pnpm     : pnpm_workspace, the TS consumer side
         devShells.default = pkgs.mkShell {
-          packages = with pkgs; [
-            # Rust toolchain
-            rustc
-            cargo
-            clippy
-            rustfmt
-            rust-analyzer
-
-            # Nickel (generated-native-package source for the routing demo)
-            nickel
-
-            # Node / pnpm (TS consumer side of the cross-language boundary)
-            nodejs_22
-            pnpm
-
-            # General build/dev utilities
-            git
-            jq
-          ];
+          packages = devShellPackages;
+          ANNEAL_TOOLCHAIN_MANIFEST = "${toolchainManifest}";
 
           shellHook = ''
             echo "anneal dev shell — rustc $(rustc --version | cut -d' ' -f2), nickel $(nickel --version 2>/dev/null | cut -d' ' -f2), node $(node --version), pnpm $(pnpm --version)"

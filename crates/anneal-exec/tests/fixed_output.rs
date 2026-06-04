@@ -8,13 +8,11 @@
 use anneal_core::Digest;
 use anneal_exec::{Action, ExecError, Executor, LocalExecutor};
 
-fn sh(cmd: String) -> Vec<String> {
-    vec!["/bin/sh".into(), "-c".into(), cmd]
-}
+mod support;
 
 /// A "fetch" that writes `content` to the single declared output, pinned to `expected`.
 fn fetch_action(content: &str, expected: Digest) -> Action {
-    Action::builder("fetch", sh(format!("printf '%s' '{content}' > out")))
+    support::shell_action("fetch", format!("printf '%s' '{content}' > out"))
         .output("artifact", "out")
         .fixed_output(expected)
         .build()
@@ -68,7 +66,7 @@ fn present_pin_short_circuits_the_fetch_command() {
     let exec = LocalExecutor::new(dir.path()).unwrap();
     let expected = exec.cas().put(b"already-on-this-machine").unwrap();
 
-    let action = Action::builder("fetch", sh("exit 1".into()))
+    let action = support::shell_action("fetch", "exit 1")
         .output("artifact", "out")
         .fixed_output(expected)
         .build();
@@ -86,7 +84,7 @@ fn fixed_output_requires_exactly_one_output() {
     let dir = tempfile::tempdir().unwrap();
     let exec = LocalExecutor::new(dir.path()).unwrap();
     // No declared output: malformed FOD → arity error, before any fetch.
-    let action = Action::builder("fetch", sh("true".into()))
+    let action = support::shell_action("fetch", "true")
         .fixed_output(Digest::of(b"x"))
         .build();
     match exec.execute(&action).unwrap_err() {
@@ -104,6 +102,6 @@ fn fixed_output_enables_the_network_capability() {
         "fixed_output() must permit network"
     );
     // A plain action does not.
-    let plain = Action::builder("plain", sh("true".into())).build();
+    let plain = support::shell_action("plain", "true").build();
     assert!(!plain.allows_network(), "network is off by default");
 }

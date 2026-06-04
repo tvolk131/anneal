@@ -24,9 +24,10 @@
 //!   and because it is a distinct inode we can also mark it read-only (`0444`) without
 //!   affecting the blob. This also sidesteps the per-inode hardlink-limit concern of
 //!   Spike B (no shared inode at all).
-//! * **Linux/other:** inputs are hardlinked (shared inode); strict read-only
-//!   enforcement is the future kernel bind-mount path, so we do not chmod the shared
-//!   inode here.
+//! * **Linux/other:** inputs are hardlinked (shared inode) or copied across
+//!   filesystems. The CAS does not chmod hardlinks because that would mutate the blob's
+//!   own inode; sealed Linux execution protects the shared inode by overmounting each
+//!   declared input read-only in the sandbox.
 //!
 //! Both fall back to a copy across filesystems / on non-CoW volumes.
 
@@ -362,8 +363,8 @@ fn set_read_only(path: &Path) -> io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o444))
 }
 
-/// Linux/other: hardlink (shared inode), copy across filesystems. Strict read-only
-/// enforcement is the future kernel bind-mount path, so the shared inode is left as-is.
+/// Linux/other: hardlink (shared inode), copy across filesystems. The shared inode is
+/// left as-is; sealed Linux execution overmounts declared inputs read-only.
 #[cfg(not(target_os = "macos"))]
 fn place_blob(src: &Path, dest: &Path) -> io::Result<LinkKind> {
     match fs::hard_link(src, dest) {

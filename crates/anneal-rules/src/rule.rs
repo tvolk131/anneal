@@ -53,6 +53,12 @@ impl From<AttrError> for RuleError {
     }
 }
 
+impl From<anneal_exec::ActionError> for RuleError {
+    fn from(e: anneal_exec::ActionError) -> Self {
+        RuleError::Message(format!("invalid action: {e}"))
+    }
+}
+
 impl fmt::Display for RuleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

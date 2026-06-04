@@ -4,16 +4,18 @@
 //! genuinely overlap, multi-dependency joins wait for all parents, and execution
 //! *errors* abort the run while a non-zero *exit* is a normal result.
 
-use anneal_exec::{Action, ExecError, LocalExecutor};
+use anneal_exec::{Action, ActionBuilder, ExecError, ExecutionMode, LocalExecutor};
 
-/// `/bin/sh -c <cmd>` as an owned argv (so a `format!`-built command type-checks).
-fn sh(cmd: String) -> Vec<String> {
-    vec!["/bin/sh".to_owned(), "-c".to_owned(), cmd]
+/// A permeable shell action. These tests exercise scheduling behavior, and one test
+/// intentionally coordinates through a host temp directory.
+fn shell(name: impl Into<String>, cmd: impl Into<String>) -> ActionBuilder {
+    Action::builder(name, ["/bin/sh".to_owned(), "-c".to_owned(), cmd.into()])
+        .mode(ExecutionMode::Permeable)
 }
 
 /// A leaf action that writes a fixed line to a declared output.
 fn writes(name: &str, out: &str, line: &str) -> Action {
-    Action::builder(name, sh(format!("printf '{line}' > {out}")))
+    shell(name, format!("printf '{line}' > {out}"))
         .output(out, out)
         .build()
 }
@@ -26,21 +28,15 @@ fn input_order_need_not_be_topological() {
     let exec = LocalExecutor::new(dir.path()).unwrap();
 
     let a = writes("A", "a.txt", "A\n");
-    let b = Action::builder(
-        "B",
-        ["/bin/sh", "-c", "cat a.txt > b.txt; printf 'B\\n' >> b.txt"],
-    )
-    .input_from_output("a", "a.txt", "A", "a.txt")
-    .output("b.txt", "b.txt")
-    .build();
-    let c = Action::builder(
-        "C",
-        ["/bin/sh", "-c", "cat a.txt > c.txt; printf 'C\\n' >> c.txt"],
-    )
-    .input_from_output("a", "a.txt", "A", "a.txt")
-    .output("c.txt", "c.txt")
-    .build();
-    let d = Action::builder("D", ["/bin/sh", "-c", "cat b.txt c.txt > d.txt"])
+    let b = shell("B", "cat a.txt > b.txt; printf 'B\\n' >> b.txt")
+        .input_from_output("a", "a.txt", "A", "a.txt")
+        .output("b.txt", "b.txt")
+        .build();
+    let c = shell("C", "cat a.txt > c.txt; printf 'C\\n' >> c.txt")
+        .input_from_output("a", "a.txt", "A", "a.txt")
+        .output("c.txt", "c.txt")
+        .build();
+    let d = shell("D", "cat b.txt c.txt > d.txt")
         .input_from_output("b", "b.txt", "B", "b.txt")
         .input_from_output("c", "c.txt", "C", "c.txt")
         .output("d.txt", "d.txt")
@@ -84,7 +80,7 @@ fn independent_actions_actually_overlap() {
                  do sleep 0.05; c=$((c+1)); done; \
                  [ \"$(ls {rv} | wc -l)\" -ge {N} ]"
             );
-            Action::builder(format!("rv{i}"), sh(cmd)).build()
+            shell(format!("rv{i}"), cmd).build()
         })
         .collect();
 
@@ -104,10 +100,8 @@ fn an_execution_error_aborts_dependents() {
     let dir = tempfile::tempdir().unwrap();
     let exec = LocalExecutor::new(dir.path()).unwrap();
 
-    let producer = Action::builder("p", ["/bin/sh", "-c", "exit 1"])
-        .output("out", "out.txt")
-        .build();
-    let consumer = Action::builder("c", ["/bin/sh", "-c", "cat got.txt > final.txt"])
+    let producer = shell("p", "exit 1").output("out", "out.txt").build();
+    let consumer = shell("c", "cat got.txt > final.txt")
         .input_from_output("g", "got.txt", "p", "out")
         .output("final", "final.txt")
         .build();
@@ -127,7 +121,7 @@ fn a_nonzero_exit_leaf_is_a_result_not_an_abort() {
     let exec = LocalExecutor::new(dir.path()).unwrap();
 
     let good = writes("good", "g.txt", "ok");
-    let bad = Action::builder("bad", ["/bin/sh", "-c", "exit 7"]).build();
+    let bad = shell("bad", "exit 7").build();
 
     let results = exec.execute_graph(&[good, bad]).unwrap();
     assert!(results[0].success(), "the good leaf succeeds");
@@ -145,11 +139,11 @@ fn a_dependency_cycle_is_detected() {
     let dir = tempfile::tempdir().unwrap();
     let exec = LocalExecutor::new(dir.path()).unwrap();
 
-    let x = Action::builder("x", ["/bin/sh", "-c", "true"])
+    let x = shell("x", "true")
         .input_from_output("from_y", "y.txt", "y", "o")
         .output("ox", "x.txt")
         .build();
-    let y = Action::builder("y", ["/bin/sh", "-c", "true"])
+    let y = shell("y", "true")
         .input_from_output("from_x", "x.txt", "x", "ox")
         .output("o", "y.txt")
         .build();

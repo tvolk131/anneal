@@ -6,7 +6,7 @@
 //! arbitrary files or inspect global state — which keeps the system/rule boundary
 //! sharp.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anneal_cas::Cas;
 use anneal_core::{Configuration, Label};
@@ -72,16 +72,17 @@ impl<'a> RuleContext<'a> {
     /// [`Artifact`], reading it into the CAS. This is the system performing the I/O
     /// on the rule's behalf — the rule never touches the filesystem directly.
     pub fn source_artifact(&self, rel: &Path) -> Result<Artifact, RuleError> {
-        let abs = self.package_dir.join(rel);
+        let rel = package_relative_path(rel, "source path", false)?;
+        let abs = self.package_dir.join(&rel);
         let digest = self
             .cas
             .ingest_file(&abs)
             .map_err(|error| RuleError::Source {
-                path: rel.to_path_buf(),
+                path: rel.clone(),
                 error,
             })?;
         Ok(Artifact {
-            path: rel.to_path_buf(),
+            path: rel,
             source: ArtifactSource::Source(digest),
         })
     }
@@ -93,14 +94,16 @@ impl<'a> RuleContext<'a> {
     ///
     /// [`source_artifact`]: RuleContext::source_artifact
     pub fn read_package_file(&self, rel: &Path) -> Result<String, RuleError> {
-        std::fs::read_to_string(self.package_dir.join(rel)).map_err(|error| RuleError::Source {
-            path: rel.to_path_buf(),
-            error,
-        })
+        let rel = package_relative_path(rel, "package file path", false)?;
+        std::fs::read_to_string(self.package_dir.join(&rel))
+            .map_err(|error| RuleError::Source { path: rel, error })
     }
 
     /// Whether a file exists within the package (introspection helper).
     pub fn package_file_exists(&self, rel: &Path) -> bool {
+        let Ok(rel) = package_relative_path(rel, "package file path", true) else {
+            return false;
+        };
         self.package_dir.join(rel).exists()
     }
 
@@ -108,21 +111,17 @@ impl<'a> RuleContext<'a> {
     /// paths relative to the package directory and sorted for determinism. Empty if `rel`
     /// is absent. Used to expand glob workspace members (e.g. `crates/*`).
     pub fn list_dir(&self, rel: &Path) -> Result<Vec<PathBuf>, RuleError> {
-        let base = self.package_dir.join(rel);
+        let rel = package_relative_path(rel, "directory path", true)?;
+        let base = self.package_dir.join(&rel);
         let entries = match std::fs::read_dir(&base) {
             Ok(entries) => entries,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => {
-                return Err(RuleError::Source {
-                    path: rel.to_path_buf(),
-                    error,
-                })
-            }
+            Err(error) => return Err(RuleError::Source { path: rel, error }),
         };
         let mut out = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|error| RuleError::Source {
-                path: rel.to_path_buf(),
+                path: rel.clone(),
                 error,
             })?;
             out.push(rel.join(entry.file_name()));
@@ -141,7 +140,8 @@ impl<'a> RuleContext<'a> {
         rel: &Path,
         ignore_dirs: &[&str],
     ) -> Result<Vec<Artifact>, RuleError> {
-        let base = self.package_dir.join(rel);
+        let rel = package_relative_path(rel, "source tree path", true)?;
+        let base = self.package_dir.join(&rel);
         let mut artifacts = Vec::new();
         self.walk_tree(&base, ignore_dirs, &mut artifacts)?;
         // Deterministic order so the resulting action is stable.
@@ -191,4 +191,47 @@ impl<'a> RuleContext<'a> {
         }
         Ok(())
     }
+}
+
+fn package_relative_path(rel: &Path, kind: &str, allow_dot: bool) -> Result<PathBuf, RuleError> {
+    if rel.as_os_str().is_empty() {
+        return Err(RuleError::Message(format!("{kind} must not be empty")));
+    }
+    if rel == Path::new(".") {
+        return if allow_dot {
+            Ok(PathBuf::from("."))
+        } else {
+            Err(RuleError::Message(format!("{kind} `.` is not allowed")))
+        };
+    }
+    if rel.is_absolute() {
+        return Err(RuleError::Message(format!(
+            "{kind} `{}` must be package-relative",
+            rel.display()
+        )));
+    }
+    for component in rel.components() {
+        match component {
+            Component::Normal(_) => {}
+            Component::CurDir => {
+                return Err(RuleError::Message(format!(
+                    "{kind} `{}` must not contain `.` components",
+                    rel.display()
+                )));
+            }
+            Component::ParentDir => {
+                return Err(RuleError::Message(format!(
+                    "{kind} `{}` must not contain `..` components",
+                    rel.display()
+                )));
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(RuleError::Message(format!(
+                    "{kind} `{}` must not contain a root or drive prefix",
+                    rel.display()
+                )));
+            }
+        }
+    }
+    Ok(rel.to_path_buf())
 }

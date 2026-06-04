@@ -16,14 +16,15 @@
 //! `execute` never names the sandbox or the materializer; the only knob that reaches
 //! them is the action's `execution_mode` field — data on the action, not an API.
 //!
-//! ## Milestone 1 scope
+//! ## Scope
 //!
 //! Local execution only ([`LocalExecutor`]); `Executor` is a trait so a future
-//! `RemoteExecutor` slots in without changing callers (§7.1). `snapshot_based`
-//! caching (§8.2) is Phase 3 (`anneal-snapshot`); persistent workers (§10) and
-//! `platform_requirements` are v1.x. macOS `sealed`-mode filesystem isolation is
-//! best-effort (§7.3, §22) — environment scrubbing is enforced; network is denied
-//! via `sandbox-exec`; strict input-only filesystem visibility is deferred.
+//! `RemoteExecutor` slots in without changing callers (§7.1). Linux `sealed` mode
+//! uses `bubblewrap` for strict filesystem visibility and default network denial.
+//! macOS `sealed` mode uses `sandbox-exec` for a Seatbelt filesystem/network
+//! policy, but strict Linux-style namespace hermeticity still requires running on
+//! Linux.
+//! The precise sealed-mode contract lives in `docs/sandbox-contract.md`.
 
 mod action;
 mod cache;
@@ -35,13 +36,15 @@ mod verify;
 /// snapshot-owner path via `LocalExecutor::warm_reuse`.
 mod warm;
 
-pub use action::{Action, ActionBuilder, CachePolicy, ExecutionMode, Input, InputSource};
+pub use action::{
+    Action, ActionBuilder, ActionError, CachePolicy, ExecutionMode, Input, InputSource, Toolchain,
+};
 pub use cache::action_digest;
-pub use executor::{ActionResult, ExecError, Executor, LocalExecutor, PhaseTimings};
+pub use executor::{ActionResult, ExecError, Executor, LocalExecutor, PhaseTimings, SandboxError};
 pub use verify::{
     prime_snapshot, verify_correctness_neutral, verify_warm_neutral, NeutralityReport,
 };
 
 /// Participates in every cache key (§8.1). Bump when sandbox semantics change so that
 /// a sandbox behavior change invalidates previously-cached results.
-pub(crate) const SANDBOX_VERSION: &str = "anneal-sandbox-1";
+pub(crate) const SANDBOX_VERSION: &str = "anneal-sandbox-6";
