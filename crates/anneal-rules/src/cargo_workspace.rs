@@ -534,6 +534,20 @@ fn with_crates(mut builder: ActionBuilder, deps: &[LockDep]) -> ActionBuilder {
 /// that redirects crates.io to that vendor directory — so `cargo build --offline` reads
 /// the deps with no network and no committed `vendor/`. Pure `tar`/`printf`/`cat` (on the
 /// sandbox PATH), with the checksum baked in (no `sha256sum`, which isn't on macOS).
+///
+/// Two deliberate divergences from `cargo vendor`'s own output, both validated on a real
+/// transitive tree (`anneal-analysis/tests/cargo_fetch.rs`):
+///   * **Directory names.** We name *every* dir `<name>-<version>` (the `.crate` tarball's
+///     top-level dir). `cargo vendor` uses a bare `<name>` for single-version crates and
+///     only suffixes to disambiguate multiple versions — but cargo's `directory` source
+///     reads each crate's identity from its inner `Cargo.toml`/`.cargo-checksum.json`, not
+///     the folder name, so the always-suffixed form is accepted (and avoids the bare-vs-
+///     suffixed special case).
+///   * **Empty `files` map.** `cargo vendor` writes a full per-file checksum map; we write
+///     `{"files":{},"package":"<sha>"}`. cargo verifies the `package` checksum against the
+///     lockfile and treats the per-file map as optional local-modification tracking, so an
+///     empty map builds. (If a future cargo / `--frozen` rejects it, bake the per-file
+///     checksums in instead.)
 fn assembly_prelude(deps: &[LockDep]) -> String {
     let mut s = String::from("mkdir -p vendor .cargo\n");
     for dep in deps {

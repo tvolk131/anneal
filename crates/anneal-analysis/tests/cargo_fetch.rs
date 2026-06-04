@@ -7,7 +7,7 @@
 
 use anneal_analysis::Analyzer;
 use anneal_core::{AxisValues, Configuration, Label, OptLevel, Platform};
-use anneal_exec::{Executor, LocalExecutor};
+use anneal_exec::LocalExecutor;
 use anneal_loader::load_package;
 use anneal_rules::builtin_rules;
 
@@ -80,4 +80,66 @@ fn fetch_mode_builds_a_registry_dep_offline() {
         "build should declare+capture libmylib.rlib; got {:?}",
         results[build_idx].outputs.keys().collect::<Vec<_>>()
     );
+}
+
+/// Stresses the two assembly assumptions that the trivial cfg-if case can't: many real
+/// crates with **transitive** deps, all assembled into vendor dirs we name
+/// `<name>-<version>` (cargo vendor uses bare `<name>` for single-version crates — this
+/// proves cargo reads identity from the inner Cargo.toml, not the folder name), each with
+/// an **empty `files` map** in `.cargo-checksum.json` (cargo vendor writes the full
+/// per-file map — this proves cargo accepts an empty one at build time).
+#[test]
+#[ignore = "network: downloads serde_json + its transitive deps from static.crates.io"]
+fn fetch_mode_builds_a_transitive_dep_tree_offline() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let ws = root.join("ws");
+    std::fs::create_dir_all(ws.join("mylib/src")).unwrap();
+    std::fs::write(ws.join("Cargo.toml"), "[workspace]\nmembers = [\"mylib\"]\nresolver = \"2\"\n").unwrap();
+    std::fs::write(
+        ws.join("mylib/Cargo.toml"),
+        "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nserde_json = \"1\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join("mylib/src/lib.rs"),
+        "pub fn to_json() -> String { serde_json::json!({\"a\": 1, \"b\": [2, 3]}).to_string() }\n",
+    )
+    .unwrap();
+    std::fs::write(ws.join("BUILD"), "cargo_workspace(name = \"ws\")\n").unwrap();
+    let ok = std::process::Command::new("cargo")
+        .arg("generate-lockfile")
+        .current_dir(&ws)
+        .status()
+        .expect("cargo available")
+        .success();
+    assert!(ok, "cargo generate-lockfile failed");
+    assert!(!ws.join("vendor").exists());
+
+    let registry = builtin_rules();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
+    let cfg = Configuration::new(
+        Platform::new("host", "host"),
+        AxisValues { opt_level: OptLevel::Debug, ..Default::default() },
+    );
+    let graph = load_package(root, "ws", &registry).unwrap();
+    let g = Analyzer::new(&graph, &registry, &cfg, root, exec.cas())
+        .analyze(&Label::parse("//ws:ws").unwrap())
+        .unwrap();
+    let actions: Vec<_> = g.actions().cloned().collect();
+
+    // serde_json pulls several transitive deps (serde, itoa, ryu, …) → multiple fetches.
+    let fetches = actions.iter().filter(|a| a.name().starts_with("cargo_workspace fetch")).count();
+    assert!(fetches >= 3, "expected several transitive fetch actions, got {fetches}");
+
+    let results = exec.execute_graph(&actions).unwrap();
+    assert!(
+        results.iter().all(|r| r.success()),
+        "every action (fetches + assemble + offline build) should succeed"
+    );
+    let build_idx = actions
+        .iter()
+        .position(|a| a.name().starts_with("cargo_workspace build"))
+        .unwrap();
+    assert!(results[build_idx].outputs.keys().any(|k| k.contains("libmylib.rlib")));
 }
