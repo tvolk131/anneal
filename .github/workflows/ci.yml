@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - macos-15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/determinate-nix-action@v3
+
+      - name: Rust tests (macOS host)
+        if: matrix.os == 'macos-15'
+        run: nix develop --command cargo test
+
+      - name: Resolve toolchain manifest
+        if: matrix.os == 'ubuntu-24.04'
+        id: toolchain_manifest
+        run: echo "path=$(nix build .#toolchain-manifest --print-out-paths --no-link)" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve Nix dev PATH
+        if: matrix.os == 'ubuntu-24.04'
+        id: nix_dev_path
+        run: nix develop --command sh -c 'printf "path=%s\n" "$PATH" >> "$GITHUB_OUTPUT"'
+
+      # Hosted Ubuntu can have `bwrap` installed but still fail Anneal's sealed
+      # network namespace probe. Run Linux cargo tests in a privileged container
+      # and mount the host Nix store so rule toolchains stay manifest-resolved.
+      # The outer test process also gets the Nix dev PATH because fixture setup
+      # shells out to tools such as cargo and pnpm before Anneal actions run.
+      - name: Rust tests (Linux sandbox container)
+        if: matrix.os == 'ubuntu-24.04'
+        env:
+          ANNEAL_TOOLCHAIN_MANIFEST: ${{ steps.toolchain_manifest.outputs.path }}
+          ANNEAL_LINUX_TEST_PATH: ${{ steps.nix_dev_path.outputs.path }}
+          ANNEAL_LINUX_SANDBOX_COMMAND: cargo test
+        run: ./scripts/test-linux-sandbox-docker.sh
+
+  linux-sandbox-docker:
+    name: linux sandbox docker
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux hermeticity tests
+        run: ./scripts/test-linux-sandbox-docker.sh
