@@ -25,9 +25,24 @@
 //! builds reproducible (rustc incremental codegen is not bit-stable), a precondition
 //! for the §1.4 correctness-neutral invariant.
 //!
-//! Deferred: `RUSTFLAGS`/sanitizer/coverage axes (§13.6), binary/bin-unit test
-//! targets, integration multi-binary split, separately-addressable test targets
-//! (a query/CLI concern), and dependency vendoring.
+//! # Dependency acquisition: pre-vendored, or hash-pinned fetch (§FOD)
+//!
+//! Two ways the workspace's crates.io dependencies reach the sealed `--offline` build:
+//!
+//! * **Pre-vendored** — a committed `vendor/` + `.cargo/config.toml` (from `cargo
+//!   vendor`); `source_tree` materializes them and cargo reads them offline. No fetch.
+//! * **Fetch mode** — no committed `vendor/`, but a `Cargo.lock` lists crates.io deps.
+//!   Each crate becomes a **fixed-output fetch** (`CachePolicy::FixedOutput`) pinned to
+//!   its lockfile checksum, and the compiling actions assemble a vendor tree from the
+//!   fetched `.crate` blobs in-sandbox before building. The build is keyed on the
+//!   workspace sources + the `.crate` digests (= the lockfile checksums), **not** on
+//!   thousands of individual vendored files — so a committed `vendor/` isn't required and
+//!   the per-build input-handling cost is O(workspace sources), not O(vendored files).
+//!
+//! Deferred: `RUSTFLAGS`/sanitizer/coverage axes (§13.6), binary/bin-unit test targets,
+//! integration multi-binary split, separately-addressable test targets; in fetch mode,
+//! git/`path`-registry deps and non-crates.io registries (vendor those), and a generated
+//! lockfile (needs the staged-graph pass).
 
 use std::path::{Path, PathBuf};
 
@@ -41,6 +56,14 @@ use crate::schema::{AttrSchema, AttrType};
 
 /// Directories never treated as build inputs.
 const IGNORED_DIRS: &[&str] = &["target", ".git", ".anneal"];
+
+/// In fetch mode we also ignore a committed `.cargo/` — the rule generates a fresh
+/// `.cargo/config.toml` (the vendored-source replacement) in the sandbox, and a
+/// materialized read-only copy would block that write.
+const FETCH_IGNORED_DIRS: &[&str] = &["target", ".git", ".anneal", ".cargo"];
+
+/// The crates.io registry source string as it appears in `Cargo.lock`.
+const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
 /// `data` consumes other targets' file outputs — a `nickel_eval`'s generated JSON, or
 /// a `filegroup`'s plain source files — materializing them into the workspace tree as
@@ -63,12 +86,23 @@ impl Rule for CargoWorkspace {
 
     fn analyze(&self, ctx: &RuleContext) -> Result<Analysis, RuleError> {
         let toolchain_dirs = toolchain_bin_dirs()?;
-        let sources = ctx.source_tree(Path::new("."), IGNORED_DIRS)?;
+
+        // Fetch mode (§FOD): no committed vendor/, but a lockfile with crates.io deps →
+        // hash-pin-fetch each crate and assemble a vendor tree in-sandbox. Decided first
+        // because it changes which directories count as build inputs.
+        let fetch_deps = fetch_plan(ctx)?;
+        let ignored = if fetch_deps.is_some() { FETCH_IGNORED_DIRS } else { IGNORED_DIRS };
+        let sources = ctx.source_tree(Path::new("."), ignored)?;
         if sources.is_empty() {
             return Err(RuleError::Message(
                 "cargo_workspace: no source files found in the package".to_owned(),
             ));
         }
+        // The in-sandbox vendor-assembly prelude, prepended to every compiling action's
+        // shell command in fetch mode (`None` when pre-vendored / dependency-free).
+        let prelude = fetch_deps.as_ref().map(|d| assembly_prelude(d));
+        let no_deps: Vec<LockDep> = Vec::new();
+        let crate_deps: &[LockDep] = fetch_deps.as_deref().unwrap_or(&no_deps);
 
         let opt_level = ctx.config().axes().opt_level;
         let (profile_dir, release) = match opt_level {
@@ -108,14 +142,25 @@ impl Rule for CargoWorkspace {
 
         let mut actions = Vec::new();
 
+        // --- fixed-output fetch actions (fetch mode): one per crates.io dependency,
+        // pinned to its lockfile checksum (§FOD). The compiling actions depend on these. ---
+        if let Some(deps) = &fetch_deps {
+            for dep in deps {
+                actions.push(fetch_action(dep)?);
+            }
+        }
+
         // --- coarse build action ---
-        let build_cmd = cargo_args("build", None, None, release_flag);
-        let mut build = with_data(
-            with_sources(
-                cargo_builder(format!("cargo_workspace build {label}"), build_cmd, &path_env, &rustflags),
-                &sources,
+        let build_cmd = cargo_command(prelude.as_deref(), cargo_args("build", None, None, release_flag));
+        let mut build = with_crates(
+            with_data(
+                with_sources(
+                    cargo_builder(format!("cargo_workspace build {label}"), build_cmd, &path_env, &rustflags),
+                    &sources,
+                ),
+                &data,
             ),
-            &data,
+            crate_deps,
         );
         for c in crates.iter().filter(|c| c.is_normal_lib()) {
             let lib = format!("lib{}.rlib", c.name.replace('-', "_"));
@@ -136,17 +181,20 @@ impl Rule for CargoWorkspace {
                 let compile_id = format!("cargo_workspace test-compile {label} {} unit", c.name);
                 let run_id = format!("cargo_workspace test-run {label} {} unit", c.name);
 
-                let compile = with_data(
-                    with_sources(
-                        cargo_builder(
-                            compile_id.clone(),
-                            unit_compile_script(&c.name, release_flag),
-                            &path_env,
-                            &rustflags,
+                let compile = with_crates(
+                    with_data(
+                        with_sources(
+                            cargo_builder(
+                                compile_id.clone(),
+                                shell_cmd(prelude.as_deref(), &unit_compile_body(&c.name, release_flag)),
+                                &path_env,
+                                &rustflags,
+                            ),
+                            &sources,
                         ),
-                        &sources,
+                        &data,
                     ),
-                    &data,
+                    crate_deps,
                 )
                 .output("test-bin", "test-bin")
                 .configured(ctx.config().clone(), consumed.clone())
@@ -172,17 +220,23 @@ impl Rule for CargoWorkspace {
                 actions.push(run.build());
 
                 // doc: single action (no reusable binary, §12.3).
-                let doc = with_data(
-                    with_sources(
-                        cargo_builder(
-                            format!("cargo_workspace test {label} {} doc", c.name),
-                            cargo_args("test", Some(&c.name), Some("--doc"), release_flag),
-                            &path_env,
-                            &rustflags,
+                let doc = with_crates(
+                    with_data(
+                        with_sources(
+                            cargo_builder(
+                                format!("cargo_workspace test {label} {} doc", c.name),
+                                cargo_command(
+                                    prelude.as_deref(),
+                                    cargo_args("test", Some(&c.name), Some("--doc"), release_flag),
+                                ),
+                                &path_env,
+                                &rustflags,
+                            ),
+                            &sources,
                         ),
-                        &sources,
+                        &data,
                     ),
-                    &data,
+                    crate_deps,
                 )
                 .configured(ctx.config().clone(), consumed.clone())
                 .snapshot_private(snapshot_key, snapshot_paths.clone());
@@ -191,17 +245,23 @@ impl Rule for CargoWorkspace {
 
             if c.has_tests {
                 // integration: single action for now (multi-binary split deferred).
-                let integ = with_data(
-                    with_sources(
-                        cargo_builder(
-                            format!("cargo_workspace test {label} {} integration", c.name),
-                            cargo_args("test", Some(&c.name), Some("--tests"), release_flag),
-                            &path_env,
-                            &rustflags,
+                let integ = with_crates(
+                    with_data(
+                        with_sources(
+                            cargo_builder(
+                                format!("cargo_workspace test {label} {} integration", c.name),
+                                cargo_command(
+                                    prelude.as_deref(),
+                                    cargo_args("test", Some(&c.name), Some("--tests"), release_flag),
+                                ),
+                                &path_env,
+                                &rustflags,
+                            ),
+                            &sources,
                         ),
-                        &sources,
+                        &data,
                     ),
-                    &data,
+                    crate_deps,
                 )
                 .configured(ctx.config().clone(), consumed.clone())
                 .snapshot_private(snapshot_key, snapshot_paths.clone());
@@ -332,17 +392,167 @@ fn cargo_args(sub: &str, pkg: Option<&str>, type_flag: Option<&str>, release_fla
     s.split(' ').map(str::to_owned).collect()
 }
 
-/// The shell script for a unit-test **compile** action: compile the test binary
-/// without running it, then copy it to the stable output path `test-bin`.
-fn unit_compile_script(pkg: &str, release_flag: &str) -> Vec<String> {
-    let script = format!(
-        "set -eu\n\
-         cargo test --package {pkg} --lib --no-run --offline --locked{release_flag} --message-format=json > artifacts.json\n\
+/// The shell **body** for a unit-test **compile** action: compile the test binary
+/// without running it, then copy it to the stable output path `test-bin`. The `set -eu`
+/// and any fetch-mode vendor prelude are added by [`shell_cmd`].
+fn unit_compile_body(pkg: &str, release_flag: &str) -> String {
+    format!(
+        "cargo test --package {pkg} --lib --no-run --offline --locked{release_flag} --message-format=json > artifacts.json\n\
          bin=$(grep -o '\"executable\":\"[^\"]*\"' artifacts.json | head -1 | sed 's/^\"executable\":\"//; s/\"$//')\n\
          test -n \"$bin\"\n\
          cp \"$bin\" test-bin\n"
-    );
+    )
+}
+
+/// Wrap a shell `body` as a sandbox command: `set -eu`, then the fetch-mode vendor
+/// `prelude` (if any), then the body. Used by every compiling action.
+fn shell_cmd(prelude: Option<&str>, body: &str) -> Vec<String> {
+    let mut script = String::from("set -eu\n");
+    if let Some(p) = prelude {
+        script.push_str(p);
+    }
+    script.push_str(body);
     vec!["/bin/sh".to_owned(), "-c".to_owned(), script]
+}
+
+/// Choose a compiling action's command: in pre-vendored / dependency-free builds, run
+/// the `cargo` argv directly (unchanged); in fetch mode, wrap it in a shell that first
+/// runs the vendor-assembly `prelude`.
+fn cargo_command(prelude: Option<&str>, argv: Vec<String>) -> Vec<String> {
+    match prelude {
+        None => argv,
+        // argv tokens are simple and space-free, so re-joining to a shell line is safe.
+        Some(p) => shell_cmd(Some(p), &argv.join(" ")),
+    }
+}
+
+/// One crates.io dependency pinned by `Cargo.lock`: its name, version, and the SHA-256
+/// of its `.crate` tarball (the lockfile `checksum`, which is also the fixed-output pin).
+struct LockDep {
+    name: String,
+    version: String,
+    checksum: String,
+}
+
+impl LockDep {
+    /// The `<name>-<version>` stem shared by the registry path, the `.crate` filename,
+    /// and the extracted vendor directory.
+    fn base(&self) -> String {
+        format!("{}-{}", self.name, self.version)
+    }
+}
+
+/// Decide whether to fetch dependencies (§FOD), and which. `Some(deps)` only when there
+/// is **no** committed `vendor/` **and** `Cargo.lock` lists crates.io dependencies; then
+/// each is hash-pinned-fetched and a vendor tree is assembled in-sandbox. `None` keeps
+/// the pre-vendored / dependency-free path untouched.
+///
+/// Errors on a dependency this increment can't fetch (git, `path`+registry, a non-
+/// crates.io registry, or a v1/v2 lockfile lacking inline checksums) — vendor those.
+fn fetch_plan(ctx: &RuleContext) -> Result<Option<Vec<LockDep>>, RuleError> {
+    if ctx.package_file_exists(Path::new("vendor")) || !ctx.package_file_exists(Path::new("Cargo.lock")) {
+        return Ok(None);
+    }
+    let lock: toml::Value = ctx
+        .read_package_file(Path::new("Cargo.lock"))?
+        .parse()
+        .map_err(|e| RuleError::Message(format!("parsing Cargo.lock: {e}")))?;
+    let packages = match lock.get("package").and_then(|p| p.as_array()) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    let mut deps = Vec::new();
+    for pkg in packages {
+        // No `source` ⇒ a local workspace member or path dependency: nothing to fetch.
+        let source = match pkg.get("source").and_then(|s| s.as_str()) {
+            Some(s) => s,
+            None => continue,
+        };
+        let name = pkg.get("name").and_then(|n| n.as_str()).unwrap_or_default();
+        let version = pkg.get("version").and_then(|v| v.as_str()).unwrap_or_default();
+        if source != CRATES_IO_SOURCE {
+            return Err(RuleError::Message(format!(
+                "cargo_workspace fetch mode: unsupported dependency source {source:?} for \
+                 {name} {version}; commit a vendor/ directory for this workspace instead"
+            )));
+        }
+        let checksum = pkg.get("checksum").and_then(|c| c.as_str()).ok_or_else(|| {
+            RuleError::Message(format!(
+                "cargo_workspace fetch mode: {name} {version} has no inline checksum in \
+                 Cargo.lock (regenerate with a current cargo, or vendor the workspace)"
+            ))
+        })?;
+        deps.push(LockDep {
+            name: name.to_owned(),
+            version: version.to_owned(),
+            checksum: checksum.to_owned(),
+        });
+    }
+    Ok((!deps.is_empty()).then_some(deps))
+}
+
+/// A fixed-output fetch (§FOD) for one crate: download its `.crate` from static.crates.io
+/// into the single declared output `crate`, pinned to the lockfile checksum. Cached by
+/// output (a present blob skips the download), verified against the pin (a mismatch fails
+/// closed). The graph-unique name lets the compiling actions reference it.
+fn fetch_action(dep: &LockDep) -> Result<Action, RuleError> {
+    let expected = Digest::from_hex(&dep.checksum).map_err(|e| {
+        RuleError::Message(format!("{} {}: invalid checksum hex in Cargo.lock: {e}", dep.name, dep.version))
+    })?;
+    let base = dep.base();
+    let url = format!("https://static.crates.io/crates/{}/{base}.crate", dep.name);
+    let script = format!("curl -sSL --fail --retry 3 -o crate.out '{url}'");
+    Ok(Action::builder(
+        format!("cargo_workspace fetch {base}"),
+        vec!["/bin/sh".to_owned(), "-c".to_owned(), script],
+    )
+    .env("PATH", "/usr/bin:/bin")
+    .output("crate", "crate.out")
+    .platform_independent()
+    .fixed_output(expected)
+    .build())
+}
+
+/// Add each fetched `.crate` as an input at `.anneal-crates/<base>.crate` (an action-graph
+/// edge to its fetch action). Empty `deps` ⇒ a no-op (pre-vendored / dependency-free).
+fn with_crates(mut builder: ActionBuilder, deps: &[LockDep]) -> ActionBuilder {
+    for dep in deps {
+        let base = dep.base();
+        builder = builder.input_from_output(
+            format!("crate:{base}"),
+            format!(".anneal-crates/{base}.crate"),
+            format!("cargo_workspace fetch {base}"),
+            "crate",
+        );
+    }
+    builder
+}
+
+/// The fetch-mode vendor-assembly prelude: extract each fetched `.crate` into a vendor
+/// tree with its pinned-checksum `.cargo-checksum.json`, then write a `.cargo/config.toml`
+/// that redirects crates.io to that vendor directory — so `cargo build --offline` reads
+/// the deps with no network and no committed `vendor/`. Pure `tar`/`printf`/`cat` (on the
+/// sandbox PATH), with the checksum baked in (no `sha256sum`, which isn't on macOS).
+fn assembly_prelude(deps: &[LockDep]) -> String {
+    let mut s = String::from("mkdir -p vendor .cargo\n");
+    for dep in deps {
+        let base = dep.base();
+        s.push_str(&format!("tar xzf .anneal-crates/{base}.crate -C vendor\n"));
+        s.push_str(&format!(
+            "printf '%s' '{{\"files\":{{}},\"package\":\"{}\"}}' > vendor/{base}/.cargo-checksum.json\n",
+            dep.checksum
+        ));
+    }
+    s.push_str(
+        "cat > .cargo/config.toml <<'CARGOCFG'\n\
+         [source.crates-io]\n\
+         replace-with = \"vendored-sources\"\n\
+         [source.vendored-sources]\n\
+         directory = \"vendor\"\n\
+         CARGOCFG\n",
+    );
+    s
 }
 
 /// Coarse snapshot key: `(toolchain, lockfile, target_triple, all axis values)`

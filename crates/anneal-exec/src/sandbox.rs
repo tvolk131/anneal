@@ -10,7 +10,9 @@
 //! * **Environment hermeticity (all platforms, sealed & permeable):** the
 //!   environment is cleared and reset to canonical, deterministic values (§7.4);
 //!   only `env`-declared variables are added on top. There is no host passthrough.
-//! * **Network denial (macOS, sealed):** a `sandbox-exec` profile denies network.
+//! * **Network denial (macOS, sealed):** a `sandbox-exec` profile denies network —
+//!   **unless** the action carries the network capability (`Action::allows_network`),
+//!   as a fixed-output fetch does (§FOD), where the output hash fences the impurity.
 //! * **Strict input-only filesystem visibility:** deferred. macOS `sandbox-exec` is
 //!   best-effort (§7.3, §22); Linux kernel-enforced bind mounts come with the Linux
 //!   isolation path. `native` mode applies no isolation and inherits the host env.
@@ -30,17 +32,22 @@ pub(crate) struct SandboxSpec<'a> {
     pub env: &'a BTreeMap<String, String>,
 }
 
-/// `sandbox-exec` profile: allow everything, then deny all network. Best-effort
-/// isolation — see the module docs.
+/// `sandbox-exec` profile for a sealed action: allow everything, then deny all network.
+/// Best-effort isolation — see the module docs.
 #[cfg(target_os = "macos")]
 const SEALED_PROFILE: &str = "(version 1)(allow default)(deny network*)";
+
+/// Sealed profile for a **network-permitted** action (a fixed-output fetch): network is
+/// left allowed because the output hash fences the impurity (§FOD).
+#[cfg(target_os = "macos")]
+const SEALED_NET_PROFILE: &str = "(version 1)(allow default)";
 
 /// Build the command to spawn for `action` under `spec`.
 pub(crate) fn build_command(action: &Action, spec: &SandboxSpec) -> Command {
     let program = &action.command[0];
     let args = &action.command[1..];
 
-    let mut cmd = wrap(spec.mode, program, args);
+    let mut cmd = wrap(spec.mode, action.allows_network(), program, args);
     cmd.current_dir(spec.cwd);
 
     match spec.mode {
@@ -55,11 +62,12 @@ pub(crate) fn build_command(action: &Action, spec: &SandboxSpec) -> Command {
 /// Choose the program to actually launch, wrapping in the OS isolation layer for
 /// sealed mode where available.
 #[cfg(target_os = "macos")]
-fn wrap(mode: ExecutionMode, program: &str, args: &[String]) -> Command {
+fn wrap(mode: ExecutionMode, network: bool, program: &str, args: &[String]) -> Command {
     match mode {
         ExecutionMode::Sealed => {
+            let profile = if network { SEALED_NET_PROFILE } else { SEALED_PROFILE };
             let mut cmd = Command::new("/usr/bin/sandbox-exec");
-            cmd.arg("-p").arg(SEALED_PROFILE).arg("--").arg(program).args(args);
+            cmd.arg("-p").arg(profile).arg("--").arg(program).args(args);
             cmd
         }
         ExecutionMode::Permeable | ExecutionMode::Native => {
@@ -71,7 +79,7 @@ fn wrap(mode: ExecutionMode, program: &str, args: &[String]) -> Command {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn wrap(_mode: ExecutionMode, program: &str, args: &[String]) -> Command {
+fn wrap(_mode: ExecutionMode, _network: bool, program: &str, args: &[String]) -> Command {
     // Linux kernel-enforced isolation (mount namespaces) lands with the Linux path;
     // until then, sealed differs from permeable only by env scrubbing + the
     // (future) namespace setup.
