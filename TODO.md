@@ -330,21 +330,22 @@ The Nix/Bazel model for pulling external deps over the network *without* losing 
 A foundational, rule-agnostic capability (sibling of staged-graph above); cargo is the first adopter but the
 shape is shared across every package ecosystem.
 
-- [ ] **Fixed-output fetch primitive (rule-agnostic, §7) — the "safe network" axis.** `CachePolicy::FixedOutput
-      { expected: Digest }` + a `network: bool` action capability (default `false`). A FOD action's output digest
-      is known *before* it runs — that is exactly what licenses the network (Nix fixed-output derivation; Bazel
-      `http_archive(sha256)`). Slots into `executor.rs::execute()` as a new branch: the cache lookup becomes
-      `cas.has(expected)` — content-addressed by **output**, not inputs (`action_digest` is irrelevant) → hit =
-      synthesize the result, **no sandbox / no network / no fetch**; miss = run with network on, capture the single
-      declared output, verify `Digest::of(output) == expected` (else hard-fail `FetchHashMismatch`), store under
-      `expected`. Properties: trivially **§1.4 correctness-neutral** (the hash is the arbiter — a bad/compromised
-      mirror fails *closed*, never corrupts); a FOD action has **no varying file inputs** (its determinism is the
-      hash, not inputs → it structurally cannot smuggle build state into a network call); two fetches with the same
-      `expected` dedup to one graph node. Composes with the other policies — FOD fetches feed a
-      `SnapshotBased`/`Deterministic` build. **Sandbox:** network OFF by default for all actions (the §7 sealed-build
-      goal — today only a convention), ON only for FOD (and the §7.6 `exec --no-network` hatch → keep the capability
-      orthogonal to cache policy). Kernel-level enforcement (Linux netns/`unshare`, macOS `sandbox-exec`) is a
-      **separable, later hardening** — the hash already gives fetch-correctness before enforcement exists.
+- [x] **Fixed-output fetch primitive (rule-agnostic, §7) — the "safe network" axis.** `CachePolicy::FixedOutput
+      { expected: Digest }` + a `network: bool` action capability (default `false`; `.network()` /
+      `.allows_network()`; `.fixed_output()` turns it on). A FOD action's output digest is known *before* it runs —
+      that is exactly what licenses the network (Nix fixed-output derivation; Bazel `http_archive(sha256)`).
+      `executor.rs::execute()` routes `FixedOutput` to `run_fixed_output`: the cache check is `cas.has(expected)` —
+      content-addressed by **output**, not inputs → hit = synthesize the result, **no sandbox / no network / no
+      fetch** (cross-build/-project dedup); miss = run with network on (no snapshot restore/save), capture the single
+      declared output, verify `== expected` (else hard-fail `FixedOutputMismatch`); exactly one output
+      (`FixedOutputArity`). Trivially **§1.4 correctness-neutral** (the hash is the sole arbiter — a bad/compromised
+      mirror fails *closed*, never corrupts); a FOD action has **no varying file inputs** (determinism is the hash,
+      not inputs → cannot smuggle build state into a network call). Composes with the other policies. 5 tests
+      (`tests/fixed_output.rs`). **Deferred hardening (not done):** network-off is enforced only by *convention*
+      (the capability is recorded, not yet kernel-enforced) — Linux netns/`unshare`, macOS `sandbox-exec` for
+      non-FOD actions is separable, the hash already gives fetch-correctness; graph-level dedup of
+      identical-`expected` nodes is a later optimization (the `cas.has` short-circuit already makes the duplicate a
+      no-op).
 - [ ] **The per-ecosystem acquisition pattern (one shape everywhere).** Every modern ecosystem converged on the
       same two things — a lockfile with per-artifact hashes + an internal content-addressed store — which *is* the
       FOD shape: `lockfile {(coord, hash)} → one FOD fetch per artifact → assemble blobs into the tool's offline
