@@ -197,11 +197,22 @@
         lockfile-keyed unit rather than hashing thousands of rarely-changing files per build. This is now the
         real overhead-gate lever at scale (supersedes the trivial-crate "snapshot save" framing for file-heavy
         repos).
-  - [ ] **Input-digest caching (mtime+size keyed)** — the fix the serde gate motivates: `load+analyze` currently
-        reads + SHA-256s every declared input on every invocation, so cost scales with file count and is paid even
-        on a no-op. Cache `(path, mtime, size) → digest`; re-hash only files whose mtime/size moved. Cuts no-op,
-        warm-incremental, and the action-key computation from O(all files) toward O(changed files); also the lever
-        that flips the serde no-op from 0.7× back to a win. Pairs with treating `vendor/` as a lockfile-keyed unit.
+  - [x] **Input-digest caching (mtime+size keyed)** — `Cas::ingest_file(path)` (the cached form of
+        `put(&fs::read(path))`) keys `(path, mtime, size) → digest` and, on a match whose blob is still present,
+        returns the digest after only a `stat` — never reading/hashing the body. Self-heals via `has()` (a GC'd or
+        corrupt blob → fall back to read+hash), persisted atomically under `<store>/digest-cache`, flushed on
+        drop, thread-safe; `context.rs`'s two input sites now use it; `reads()` exposes the miss count. Content-
+        blind (same trade-off as cargo's fingerprint), documented on the method. **Measured (serde): no-op 42.8 ms
+        (0.7×, *lost* to cargo) → 15.0 ms (1.7× faster); fresh-checkout 76× → 192×; warm 1-change +125% → +109%.**
+        Cold is structurally unchanged (first build caches nothing).
+  - [ ] **Treat `vendor/` as one lockfile-keyed input unit** — now the dominant *remaining* per-build input cost.
+        With re-hashing gone, the residual that scales with file count is the rest of `analyze`: walking the whole
+        tree (`read_dir` recursion), `stat`-ing every file, and assembling + sorting + hashing the action key over
+        thousands of `Artifact`s — almost all of them rarely-changing vendored deps. This is most of the warm
+        single-change residual (+109%) and what keeps cold's `materialize` at ~185 ms. Fix: represent `vendor/`
+        (and `.cargo/`) as a single unit addressed by `Cargo.lock`'s digest, so an unchanged lockfile means we
+        neither enumerate nor `stat` the vendored tree — O(workspace sources), not O(vendored files). Symmetric
+        with the pnpm `.pnpm-store` / lockfile story.
   - [ ] **pnpm harness**, then competitor baselines (sccache, Turborepo/Nx, Bazel) and real cross-machine CI
         cold-start (needs the remote cache, v1.x).
 
