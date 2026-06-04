@@ -247,8 +247,11 @@ impl Rule for CargoWorkspace {
                         // It captures the framework output to `results.txt` and always exits 0
                         // so a *test failure* is a recorded result (parsed into structured
                         // form by anneal-test), not a lost action error.
-                        let run_script = "chmod u+x test-bin\n\
-                     ./test-bin > results.txt 2>&1; code=$?\n\
+                        // `test-bin` is a declared input and Linux sealed mode mounts inputs
+                        // read-only, so copy it before restoring the executable bit.
+                        let run_script = "cp test-bin test-bin.run\n\
+                     chmod u+x test-bin.run\n\
+                     ./test-bin.run > results.txt 2>&1; code=$?\n\
                      printf 'ANNEAL_TEST_EXIT=%s\\n' \"$code\" >> results.txt\n";
                         let run = Action::builder(
                             run_id,

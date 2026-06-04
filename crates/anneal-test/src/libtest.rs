@@ -17,6 +17,7 @@ pub struct LibtestReport {
     pub failed: usize,
     pub ignored: usize,
     pub duration_ms: u64,
+    pub runner_exit: Option<i32>,
 }
 
 /// Parse libtest human output.
@@ -28,6 +29,7 @@ pub fn parse_libtest(output: &str) -> LibtestReport {
     let mut failed = 0;
     let mut ignored = 0;
     let mut duration_ms = 0;
+    let mut runner_exit = None;
 
     let mut i = 0;
     while i < lines.len() {
@@ -39,6 +41,8 @@ pub fn parse_libtest(output: &str) -> LibtestReport {
             failed = summary.1;
             ignored = summary.2;
             duration_ms = summary.3;
+        } else if let Some(code) = line.strip_prefix("ANNEAL_TEST_EXIT=") {
+            runner_exit = code.trim().parse().ok();
         } else if let Some((name, outcome)) = parse_case_line(line) {
             cases.push(TestCase {
                 name,
@@ -83,6 +87,7 @@ pub fn parse_libtest(output: &str) -> LibtestReport {
         failed,
         ignored,
         duration_ms,
+        runner_exit,
     }
 }
 
@@ -168,6 +173,8 @@ mod tests {
         \n\
         test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s\n";
 
+    const RUNNER_ERROR: &str = "./test-bin.run: Permission denied\nANNEAL_TEST_EXIT=126\n";
+
     #[test]
     fn parses_all_passing() {
         let r = parse_libtest(ALL_PASS);
@@ -205,5 +212,12 @@ mod tests {
         let r = parse_libtest("\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n");
         assert!(r.cases.is_empty());
         assert_eq!(r.failed, 0);
+    }
+
+    #[test]
+    fn parses_runner_exit_marker() {
+        let r = parse_libtest(RUNNER_ERROR);
+        assert_eq!(r.runner_exit, Some(126));
+        assert!(r.cases.is_empty());
     }
 }
