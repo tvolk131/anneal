@@ -991,6 +991,8 @@ pub enum SandboxError {
         status: Option<i32>,
         stderr: String,
     },
+    /// Linux sealed execution could not prepare synthetic account files.
+    SyntheticEtcFailed { message: String },
     /// The child process could not be prepared with sealed/permeable fd hardening.
     ProcessHardeningFailed { message: String },
 }
@@ -1024,6 +1026,9 @@ impl fmt::Display for SandboxError {
                         stderr
                     )
                 }
+            }
+            SandboxError::SyntheticEtcFailed { message } => {
+                write!(f, "failed to prepare synthetic sandbox /etc: {message}")
             }
             SandboxError::ProcessHardeningFailed { message } => {
                 write!(

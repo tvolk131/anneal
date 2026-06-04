@@ -15,11 +15,12 @@
 //!   **unless** the action carries the network capability (`Action::allows_network`),
 //!   as a fixed-output fetch does (§FOD), where the output hash fences the impurity.
 //! * **Strict filesystem visibility (Linux sealed):** `bubblewrap` exposes the
-//!   prepared work tree, private `HOME`/`TMPDIR`, `/proc`, `/dev`, and declared
-//!   toolchain roots only. Declared inputs are overmounted read-only inside `/work`.
-//!   Linux sealed actions also drop effective capabilities, run in a new session, get
-//!   a private `/dev/shm`, require a user namespace with a fixed uid/gid, and try to
-//!   isolate cgroup namespaces when the host supports it.
+//!   prepared work tree, private `HOME`/`TMPDIR`, synthetic `/etc/passwd` and
+//!   `/etc/group`, `/proc`, `/dev`, and declared toolchain roots only. Declared
+//!   inputs are overmounted read-only inside `/work`. Linux sealed actions also drop
+//!   effective capabilities, run in a new session, get a private `/dev/shm`, require
+//!   a user namespace with a fixed uid/gid, and try to isolate cgroup namespaces when
+//!   the host supports it.
 //! * **Filesystem visibility (macOS sealed):** `sandbox-exec` applies a generated
 //!   Seatbelt profile that denies network by default and denies undeclared host file
 //!   reads/writes, while allowing the prepared sandbox, declared toolchains, and a
@@ -71,6 +72,8 @@ const GUEST_TMP: &str = "/tmp";
 const SANDBOX_UID: &str = "1000";
 #[cfg(target_os = "linux")]
 const SANDBOX_GID: &str = "1000";
+#[cfg(target_os = "linux")]
+const SYNTHETIC_ETC_DIR: &str = ".anneal-synthetic-etc";
 
 /// Build the command to spawn for `action` under `spec`.
 pub(crate) fn build_command(action: &Action, spec: &SandboxSpec) -> Result<Command, SandboxError> {
@@ -338,6 +341,7 @@ fn wrap(action: &Action, spec: &SandboxSpec) -> Result<Command, SandboxError> {
         ExecutionMode::Sealed => {
             let bwrap = bwrap_program()?;
             ensure_bwrap_works(&bwrap, action.allows_network())?;
+            let synthetic_etc = prepare_synthetic_etc(spec.root)?;
             let mut cmd = Command::new(bwrap);
             cmd.arg("--die-with-parent")
                 .arg("--unshare-pid")
@@ -375,6 +379,15 @@ fn wrap(action: &Action, spec: &SandboxSpec) -> Result<Command, SandboxError> {
                 .arg("--bind")
                 .arg(spec.tmp)
                 .arg(GUEST_TMP);
+
+            cmd.arg("--dir")
+                .arg("/etc")
+                .arg("--ro-bind")
+                .arg(synthetic_etc.join("passwd"))
+                .arg("/etc/passwd")
+                .arg("--ro-bind")
+                .arg(synthetic_etc.join("group"))
+                .arg("/etc/group");
 
             for input in action.inputs.values() {
                 cmd.arg("--ro-bind")
@@ -416,6 +429,39 @@ fn wrap(action: &Action, spec: &SandboxSpec) -> Result<Command, SandboxError> {
     let mut cmd = Command::new(&action.command[0]);
     cmd.args(&action.command[1..]).current_dir(spec.cwd);
     Ok(cmd)
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_synthetic_etc(root: &Path) -> Result<PathBuf, SandboxError> {
+    let etc = root.join(SYNTHETIC_ETC_DIR);
+    std::fs::create_dir_all(&etc).map_err(synthetic_etc_error)?;
+    let passwd = etc.join("passwd");
+    let group = etc.join("group");
+    std::fs::write(
+        &passwd,
+        format!("anneal:x:{SANDBOX_UID}:{SANDBOX_GID}:Anneal Sandbox:{GUEST_HOME}:/bin/sh\n"),
+    )
+    .map_err(synthetic_etc_error)?;
+    std::fs::write(&group, format!("anneal:x:{SANDBOX_GID}:\n")).map_err(synthetic_etc_error)?;
+    set_permissions(&passwd, 0o444)?;
+    set_permissions(&group, 0o444)?;
+    set_permissions(&etc, 0o555)?;
+    Ok(etc)
+}
+
+#[cfg(target_os = "linux")]
+fn set_permissions(path: &Path, mode: u32) -> Result<(), SandboxError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .map_err(synthetic_etc_error)
+}
+
+#[cfg(target_os = "linux")]
+fn synthetic_etc_error(error: io::Error) -> SandboxError {
+    SandboxError::SyntheticEtcFailed {
+        message: error.to_string(),
+    }
 }
 
 #[cfg(target_os = "linux")]

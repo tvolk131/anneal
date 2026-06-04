@@ -318,7 +318,7 @@ fn sealed_action_only_sees_declared_roots_plus_sandbox_roots() {
         [
             shell_name.as_str(),
             "-c",
-            "for p in /bin/sh /etc/passwd /root /var /opt /nix/store; do\n\
+            "for p in /bin/sh /etc/passwd /etc/group /etc/shadow /root /var /opt /nix/store; do\n\
                if test -e \"$p\"; then printf '%s\\n' \"$p\"; fi\n\
              done > visible.txt\n",
         ],
@@ -330,7 +330,10 @@ fn sealed_action_only_sees_declared_roots_plus_sandbox_roots() {
 
     let result = exec.execute(&action).unwrap();
     assert!(result.success());
-    assert_eq!(output_text(&exec, &result, "visible"), "");
+    assert_eq!(
+        output_text(&exec, &result, "visible"),
+        "/etc/passwd\n/etc/group\n"
+    );
 }
 
 #[test]
@@ -464,6 +467,50 @@ fn sealed_action_has_normalized_uid_gid_and_groups() {
         identity,
         "env_user=anneal\nuid=1000\ngid=1000\ngroups=1000\n"
     );
+}
+
+#[test]
+fn sealed_action_gets_synthetic_account_files() {
+    if !bwrap_available() {
+        eprintln!("skipping: bwrap is not installed");
+        return;
+    }
+    let Some((runtime, shell)) = declared_system_runtime() else {
+        eprintln!("skipping: no /usr/bin shell found");
+        return;
+    };
+    let shell_name = shell.file_name().unwrap().to_string_lossy().into_owned();
+    let path_env = path_env(&runtime);
+
+    let dir = tempfile::tempdir().unwrap();
+    let exec = LocalExecutor::new(dir.path().join(".anneal")).unwrap();
+    let action = Action::builder(
+        "synthetic-account",
+        [
+            shell_name.as_str(),
+            "-c",
+            "cat /etc/passwd > account.txt\n\
+             cat /etc/group >> account.txt\n\
+             if (printf bad > /work/.anneal-synthetic-etc/passwd) 2>/dev/null; then\n\
+               printf writable > backing.txt\n\
+             else\n\
+               printf readonly > backing.txt\n\
+             fi\n",
+        ],
+    )
+    .toolchain(runtime)
+    .env("PATH", path_env)
+    .output("account", "account.txt")
+    .output("backing", "backing.txt")
+    .build();
+
+    let result = exec.execute(&action).unwrap();
+    assert!(result.success());
+    assert_eq!(
+        output_text(&exec, &result, "account"),
+        "anneal:x:1000:1000:Anneal Sandbox:/home/anneal:/bin/sh\nanneal:x:1000:\n"
+    );
+    assert_eq!(output_text(&exec, &result, "backing"), "readonly");
 }
 
 #[test]

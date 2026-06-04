@@ -28,13 +28,14 @@ The command sees these guest paths:
 | `/home/anneal` | Private writable `HOME`. |
 | `/tmp` | Private writable `TMPDIR`. |
 | `/dev/shm` | Private writable tmpfs. |
+| `/etc/passwd`, `/etc/group` | Synthetic Anneal-owned account files for UID/GID `1000`; not host `/etc`. |
 | declared toolchain roots | Mounted read-only at their declared absolute paths. |
 | `/proc` | Private proc mount, but still exposes kernel/process information. |
 | `/dev` | Bubblewrap-created device tree, including private `/dev/pts` and `/dev/shm`. Device availability is not a determinism guarantee. |
 
 Everything else is absent unless it is contained in a declared toolchain root. In
-particular, sealed actions do not get implicit access to host `/bin`, `/etc`, `/var`,
-`/opt`, `/root`, or `/nix/store`.
+particular, sealed actions do not get implicit access to host `/bin`, host `/etc`,
+`/var`, `/opt`, `/root`, or `/nix/store`.
 
 The Linux wrapper also:
 
@@ -167,6 +168,7 @@ deterministic.
 | Private home, temp, and work paths are stable | `sealed_action_gets_private_home_tmp_and_work_paths` |
 | Hostname is fixed and effective capabilities are dropped | `sealed_action_has_fixed_hostname_and_no_effective_capabilities` |
 | UID/GID/group identity is normalized | `sealed_action_has_normalized_uid_gid_and_groups` |
+| Synthetic `/etc/passwd` and `/etc/group` describe the normalized account | `sealed_action_gets_synthetic_account_files` |
 | `/dev/shm` is private and writable | `sealed_action_gets_private_writable_dev_shm` |
 | `/dev/pts` is private inside the device tree | `sealed_action_gets_a_private_dev_pts_mount` |
 | Declared inputs are read-only and cannot corrupt the CAS | `declared_inputs_are_read_only_and_do_not_corrupt_the_cas` |
