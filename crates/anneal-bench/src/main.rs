@@ -19,7 +19,7 @@
 //!
 //! Run with `cargo run -p anneal-bench --release [-- N]` (default N=8).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -30,22 +30,49 @@ use anneal_loader::load_package;
 use anneal_rules::builtin_rules;
 
 fn main() {
-    // `heavy` builds a workspace with a heavy *real* external dependency (`syn`,
-    // vendored), so real compile time dominates and the verdict isn't an artifact of
-    // trivial crates. Otherwise N trivial dependency-free crates. Both keep package
-    // name "ws" so the scenario plumbing is identical.
-    let heavy = std::env::args().any(|a| a == "heavy");
-    let n: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(8);
+    // Three workloads:
+    //  * `--repo <ws> --edit <rel-src>` — a pre-vendored *real* repo (clone + `cargo vendor`
+    //    + a BUILD file done by the caller); pkg = the dir's basename.
+    //  * `heavy` — a synthetic workspace with a heavy real dep (`syn`, vendored here).
+    //  * default `[N]` — N trivial dependency-free crates.
+    let args: Vec<String> = std::env::args().collect();
 
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let root = tmp.path();
-    let ws = root.join("ws");
-    let edit_rel = if heavy { "app/src/lib.rs" } else { "crate0/src/lib.rs" };
-    if heavy {
-        make_heavy_fixture(&ws);
+    let _tmp; // holds the synthetic-mode tempdir alive (None in --repo mode)
+    let ws: PathBuf;
+    let root: PathBuf;
+    let pkg: String;
+    let edit_rel: String;
+    let workload: String;
+
+    if let Some(repo) = arg_value(&args, "--repo") {
+        _tmp = None::<tempfile::TempDir>;
+        ws = PathBuf::from(&repo);
+        root = ws.parent().expect("--repo path needs a parent dir").to_path_buf();
+        pkg = ws.file_name().unwrap().to_string_lossy().into_owned();
+        edit_rel = arg_value(&args, "--edit").expect("--repo requires --edit <relative-source-file>");
+        workload = format!("real repo: {pkg} (vendored)");
     } else {
-        make_fixture(&ws, n);
+        let heavy = args.iter().any(|a| a == "heavy");
+        let n: usize = args.iter().skip(1).find_map(|s| s.parse().ok()).unwrap_or(8);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        ws = tmp.path().join("ws");
+        root = tmp.path().to_path_buf();
+        pkg = "ws".to_string();
+        edit_rel = if heavy { "app/src/lib.rs" } else { "crate0/src/lib.rs" }.to_string();
+        if heavy {
+            make_heavy_fixture(&ws);
+        } else {
+            make_fixture(&ws, n);
+        }
+        workload = if heavy {
+            "1 crate + heavy real dep (syn, full), vendored".to_string()
+        } else {
+            format!("{n} dependency-free crates")
+        };
+        _tmp = Some(tmp);
     }
+    let root = root.as_path();
+    let edit_rel = edit_rel.as_str();
 
     // --- native cargo baseline (same invocation the rule wraps) ---
     clean_target(&ws);
@@ -53,12 +80,11 @@ fn main() {
     let cargo_noop = timed(3, || assert!(cargo_build(&ws).success(), "cargo no-op build failed"));
 
     // --- anneal (library pipeline; the build action only, to mirror `cargo build`) ---
-    let label = Label::parse("//ws:ws").unwrap();
     // Warm reuse is on by default now; this exec is the fresh-per-build contrast for the
     // cold / no-op / non-warm-change rows.
     let exec = LocalExecutor::new(root.join(".anneal")).expect("open .anneal").warm_reuse(false);
-    let anneal_cold = timed(1, || run_anneal_build(&exec, root, &label));
-    let anneal_warm = timed(3, || run_anneal_build(&exec, root, &label));
+    let anneal_cold = timed(1, || run_anneal_build(&exec, root, &pkg));
+    let anneal_warm = timed(3, || run_anneal_build(&exec, root, &pkg));
 
     // --- single-package change (the canonical incremental case, §20.3 "must beat") ---
     // Both caches are now warm. Edit one crate and rebuild: native cargo recompiles
@@ -70,7 +96,7 @@ fn main() {
     for i in 0..3 {
         edit_source(&ws, edit_rel, i);
         cargo_change = cargo_change.min(timed(1, || assert!(cargo_build(&ws).success(), "cargo incremental failed")));
-        anneal_change = anneal_change.min(timed(1, || run_anneal_build(&exec, root, &label)));
+        anneal_change = anneal_change.min(timed(1, || run_anneal_build(&exec, root, &pkg)));
     }
 
     // --- single-package change WITH warm-sandbox reuse (the optimization under test) ---
@@ -78,18 +104,13 @@ fn main() {
     // loop: the snapshot owner keeps target/ in place and syncs only the changed source,
     // so restore + teardown drop off the critical path.
     let warm_exec = LocalExecutor::new(root.join(".anneal-warm")).expect("open warm store"); // warm by default
-    run_anneal_build(&warm_exec, root, &label); // cold-populate the warm tree
+    run_anneal_build(&warm_exec, root, &pkg); // cold-populate the warm tree
     let mut anneal_change_warm = Duration::MAX;
     for i in 100..103 {
         edit_source(&ws, edit_rel, i);
-        anneal_change_warm = anneal_change_warm.min(timed(1, || run_anneal_build(&warm_exec, root, &label)));
+        anneal_change_warm = anneal_change_warm.min(timed(1, || run_anneal_build(&warm_exec, root, &pkg)));
     }
 
-    let workload = if heavy {
-        "1 crate + heavy real dep (syn, full), vendored".to_string()
-    } else {
-        format!("{n} dependency-free crates")
-    };
     report(&workload, cargo_cold, cargo_noop, anneal_cold, anneal_warm, cargo_change, anneal_change, anneal_change_warm);
 
     // --- phase breakdowns: a cold build, then an incremental rebuild, on a fresh,
@@ -98,13 +119,18 @@ fn main() {
         .expect("open profile store")
         .warm_reuse(false) // the breakdown contrasts the fresh-per-build path
         .record_timings();
-    run_anneal_build(&profile, root, &label); // cold (from scratch)
+    run_anneal_build(&profile, root, &pkg); // cold (from scratch)
     let cold_phases = profile.take_timings();
     edit_source(&ws, edit_rel, 99); // warm snapshot now exists; this rebuild is incremental
-    run_anneal_build(&profile, root, &label);
+    run_anneal_build(&profile, root, &pkg);
     let incremental_phases = profile.take_timings();
     report_phases("Cold build", &cold_phases);
     report_phases("Single-package change (incremental)", &incremental_phases);
+}
+
+/// Look up `--flag <value>` in argv.
+fn arg_value(args: &[String], flag: &str) -> Option<String> {
+    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
 }
 
 /// Append a unique function to one source file — a content change that busts the action
@@ -112,7 +138,10 @@ fn main() {
 fn edit_source(ws: &Path, rel: &str, marker: usize) {
     let path = ws.join(rel);
     let mut src = std::fs::read_to_string(&path).unwrap();
-    src.push_str(&format!("pub fn touched_{marker}() {{}}\n"));
+    // A trailing comment changes the content (so cargo recompiles and our action cache
+    // misses) while being lint-safe in any crate — real repos often deny missing_docs /
+    // dead_code, which a stray `pub fn` would trip.
+    src.push_str(&format!("\n// anneal-bench touch {marker}\n"));
     std::fs::write(&path, src).unwrap();
 }
 
@@ -155,17 +184,18 @@ fn run(cmd: &mut Command, what: &str) {
     assert!(ok, "{what} failed");
 }
 
-/// Run the full Anneal build pipeline for `//ws:ws`, executing just the coarse
+/// Run the full Anneal build pipeline for `//pkg:pkg`, executing just the coarse
 /// `cargo_workspace build` action so the comparison mirrors `cargo build`.
-fn run_anneal_build(exec: &LocalExecutor, root: &Path, label: &Label) {
+fn run_anneal_build(exec: &LocalExecutor, root: &Path, pkg: &str) {
     let registry = builtin_rules();
-    let graph = load_package(root, "ws", &registry).expect("load_package");
+    let graph = load_package(root, pkg, &registry).expect("load_package");
     let cfg = Configuration::new(
         Platform::new("host", "host"),
         AxisValues { opt_level: OptLevel::Debug, ..Default::default() },
     );
+    let label = Label::parse(&format!("//{pkg}:{pkg}")).expect("label");
     let analyzed = Analyzer::new(&graph, &registry, &cfg, root, exec.cas())
-        .analyze(label)
+        .analyze(&label)
         .expect("analyze");
     let build: Vec<Action> = analyzed
         .actions()
