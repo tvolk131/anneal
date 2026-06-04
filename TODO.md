@@ -181,6 +181,27 @@
         edit perturbed) → true incremental → +62%** (89 ms vs 55 ms native, a ~23× speedup over non-warm). So warm
         reuse isn't an optimization, it's what makes incremental *work at all* on a real `target/`; its residual
         is the synchronous full-`target/` save (→ §5.8). No-op 4.3× / fresh-checkout 472× faster.
+  - [x] **Real-repo gate (serde, vendored)** — `anneal-bench --repo <ws> --edit <rel-src>` (caller does clone +
+        `cargo vendor` + `BUILD`; first run pinned serde `5f0f18b`). Cold **+15%**, warm single-change **+125%**
+        (vs non-warm **+1110%** — the path-sensitivity full rebuild, reconfirmed on a real repo), no-op **0.7×
+        (SLOWER than cargo)**, fresh-checkout **76× faster**. **The finding the synthetic fixtures HID:** on a
+        real, file-heavy repo the dominant Anneal overhead is **input handling**, not the snapshot `save` (save is
+        only ~2% here). Two costs, both scaling with *input file count* — which vendored deps blow up (thousands
+        of files): (1) **cold materialize** = 190 ms (6% of cold, vs ~0 on syn) hardlinking/cloning the whole tree
+        incl `vendor/`; (2) **per-invocation `load+analyze` re-hashes every input file every build** (~40 ms for
+        serde, vs ~10 ms on syn) — this is what makes the warm single-change +125% (the residual over native's
+        225 ms is mostly re-hash, not build) AND what makes the no-op *lose* to cargo (anneal's 43 ms re-hash >
+        cargo's 29 ms fingerprint scan) AND what dampens the cache wins (76× not 472×). **Fix → input-digest
+        caching:** cache file digests keyed on `(path, mtime, size)` and re-hash only changed files (the §5.8
+        incremental-save trick applied to *input* hashing); separately, treat `vendor/` as a single
+        lockfile-keyed unit rather than hashing thousands of rarely-changing files per build. This is now the
+        real overhead-gate lever at scale (supersedes the trivial-crate "snapshot save" framing for file-heavy
+        repos).
+  - [ ] **Input-digest caching (mtime+size keyed)** — the fix the serde gate motivates: `load+analyze` currently
+        reads + SHA-256s every declared input on every invocation, so cost scales with file count and is paid even
+        on a no-op. Cache `(path, mtime, size) → digest`; re-hash only files whose mtime/size moved. Cuts no-op,
+        warm-incremental, and the action-key computation from O(all files) toward O(changed files); also the lever
+        that flips the serde no-op from 0.7× back to a win. Pairs with treating `vendor/` as a lockfile-keyed unit.
   - [ ] **pnpm harness**, then competitor baselines (sccache, Turborepo/Nx, Bazel) and real cross-machine CI
         cold-start (needs the remote cache, v1.x).
 
