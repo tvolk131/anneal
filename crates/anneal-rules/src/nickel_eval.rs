@@ -52,7 +52,11 @@ impl Rule for NickelEval {
         let src = ctx.attrs().string("src")?.to_owned();
 
         // Pick and validate the format against the rule's capability (§5.6).
-        let format = ctx.attrs().string_opt("format")?.unwrap_or("json").to_owned();
+        let format = ctx
+            .attrs()
+            .string_opt("format")?
+            .unwrap_or("json")
+            .to_owned();
         if !CAPABILITY.contains(&format.as_str()) {
             return Err(RuleError::Message(format!(
                 "nickel_eval: unsupported format {format:?}; nickel exports {CAPABILITY:?}"

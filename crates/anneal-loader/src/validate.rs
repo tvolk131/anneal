@@ -19,7 +19,10 @@ pub(crate) fn build_target(
     let location = raw.location.clone();
 
     let rule = registry.get(raw.kind).ok_or_else(|| {
-        LoadError::schema(format!("unknown rule kind `{}`", raw.kind), location.clone())
+        LoadError::schema(
+            format!("unknown rule kind `{}`", raw.kind),
+            location.clone(),
+        )
     })?;
     let schema = rule.schema();
 
@@ -92,7 +95,8 @@ fn coerce(ty: AttrType, raw: &RawValue) -> Result<(AttrValue, Vec<Label>), Strin
         (AttrType::LabelList, RawValue::StringList(v)) => {
             let mut labels = Vec::with_capacity(v.len());
             for s in v {
-                labels.push(Label::parse(s).map_err(|e| format!("must contain valid labels: {e}"))?);
+                labels
+                    .push(Label::parse(s).map_err(|e| format!("must contain valid labels: {e}"))?);
             }
             Ok((AttrValue::LabelList(labels.clone()), labels))
         }

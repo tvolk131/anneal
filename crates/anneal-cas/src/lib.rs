@@ -175,7 +175,11 @@ impl Cas {
             let mut cache = self.digest_cache.lock().unwrap();
             cache.entries.insert(
                 path.to_path_buf(),
-                CacheEntry { mtime_nanos: mtime, size, digest },
+                CacheEntry {
+                    mtime_nanos: mtime,
+                    size,
+                    digest,
+                },
             );
             cache.dirty = true;
         }
@@ -209,9 +213,11 @@ impl Cas {
             );
         }
         let nonce = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let tmp = self
-            .cache_path
-            .with_file_name(format!(".digest-cache.tmp.{}.{}", std::process::id(), nonce));
+        let tmp = self.cache_path.with_file_name(format!(
+            ".digest-cache.tmp.{}.{}",
+            std::process::id(),
+            nonce
+        ));
         fs::write(&tmp, &buf)?;
         fs::rename(&tmp, &self.cache_path)?;
         cache.dirty = false;
@@ -270,7 +276,12 @@ impl Drop for Cas {
 /// `(mtime-nanoseconds, size)` identity for the digest cache, or `None` if the platform
 /// can't give a stable mtime (then we always read+hash — safe, just not cached).
 fn file_identity(meta: &fs::Metadata) -> Option<(u128, u64)> {
-    let mtime = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_nanos();
+    let mtime = meta
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
     Some((mtime, meta.len()))
 }
 
@@ -292,10 +303,20 @@ fn load_digest_cache(path: &Path) -> DigestCache {
             else {
                 continue;
             };
-            entries.insert(PathBuf::from(p), CacheEntry { mtime_nanos, size, digest });
+            entries.insert(
+                PathBuf::from(p),
+                CacheEntry {
+                    mtime_nanos,
+                    size,
+                    digest,
+                },
+            );
         }
     }
-    DigestCache { entries, dirty: false }
+    DigestCache {
+        entries,
+        dirty: false,
+    }
 }
 
 /// Place a blob at `dest` using the cheapest store-safe mechanism for the platform.
@@ -367,7 +388,10 @@ mod tests {
         let digest = cas.put(b"hello world").unwrap();
         assert_eq!(digest, Digest::of(b"hello world"));
         assert!(cas.has(&digest));
-        assert_eq!(cas.get(&digest).unwrap().as_deref(), Some(&b"hello world"[..]));
+        assert_eq!(
+            cas.get(&digest).unwrap().as_deref(),
+            Some(&b"hello world"[..])
+        );
     }
 
     #[test]
@@ -444,9 +468,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cas = Cas::open(dir.path()).unwrap();
         let absent = Digest::of(b"absent");
-        let err = cas
-            .link_into(&absent, &dir.path().join("x"))
-            .unwrap_err();
+        let err = cas.link_into(&absent, &dir.path().join("x")).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
@@ -458,7 +480,11 @@ mod tests {
         fs::write(&f, b"fn main() {}").unwrap();
 
         let d1 = cas.ingest_file(&f).unwrap();
-        assert_eq!(d1, Digest::of(b"fn main() {}"), "ingest addresses by content like put");
+        assert_eq!(
+            d1,
+            Digest::of(b"fn main() {}"),
+            "ingest addresses by content like put"
+        );
         assert_eq!(cas.reads(), 1, "first ingest reads the file");
 
         // Unchanged file (same mtime + size): a cache hit, no second read.
@@ -502,6 +528,10 @@ mod tests {
         let cas2 = Cas::open(dir.path()).unwrap();
         let d2 = cas2.ingest_file(&f).unwrap();
         assert_eq!(d, d2);
-        assert_eq!(cas2.reads(), 0, "a persisted entry means no read after reopen");
+        assert_eq!(
+            cas2.reads(),
+            0,
+            "a persisted entry means no read after reopen"
+        );
     }
 }

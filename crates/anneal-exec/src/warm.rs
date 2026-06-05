@@ -57,7 +57,9 @@ impl InputManifest {
         }
         let tmp = path.with_file_name(format!(
             "{}.tmp.{}",
-            path.file_name().and_then(|s| s.to_str()).unwrap_or("inputs"),
+            path.file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("inputs"),
             std::process::id()
         ));
         fs::write(&tmp, serialize(self))?;
@@ -125,7 +127,10 @@ pub(crate) fn sync(
 /// which is the freshness cargo's mtime-based check requires (§5.5).
 fn place_fresh(cas: &Cas, dest: &Path, digest: &Digest) -> io::Result<()> {
     let bytes = cas.get(digest)?.ok_or_else(|| {
-        io::Error::new(io::ErrorKind::NotFound, format!("CAS blob {digest} not present"))
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("CAS blob {digest} not present"),
+        )
     })?;
     remove(dest)?;
     if let Some(parent) = dest.parent() {
@@ -174,10 +179,16 @@ fn parse(text: &str) -> io::Result<InputManifest> {
             continue;
         }
         let (hex, path) = line.split_once('\t').ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("manifest line {}: missing tab", i + 1))
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("manifest line {}: missing tab", i + 1),
+            )
         })?;
         let digest = Digest::from_hex(hex).map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("manifest line {}: {e}", i + 1))
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("manifest line {}: {e}", i + 1),
+            )
         })?;
         entries.insert(PathBuf::from(path), digest);
     }
@@ -223,11 +234,31 @@ mod tests {
         let before_ino = inode(&cwd.join("src/lib.rs"));
         let before_mtime = mtime(&cwd.join("src/lib.rs"));
 
-        let stats = sync(&cas, &cwd, &manifest(&[("src/lib.rs", d)]), &desired(&[("src/lib.rs", d)])).unwrap();
+        let stats = sync(
+            &cas,
+            &cwd,
+            &manifest(&[("src/lib.rs", d)]),
+            &desired(&[("src/lib.rs", d)]),
+        )
+        .unwrap();
 
-        assert_eq!(stats, SyncStats { left: 1, ..Default::default() });
-        assert_eq!(inode(&cwd.join("src/lib.rs")), before_ino, "unchanged file must not be rewritten");
-        assert_eq!(mtime(&cwd.join("src/lib.rs")), before_mtime, "unchanged file must keep its mtime");
+        assert_eq!(
+            stats,
+            SyncStats {
+                left: 1,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            inode(&cwd.join("src/lib.rs")),
+            before_ino,
+            "unchanged file must not be rewritten"
+        );
+        assert_eq!(
+            mtime(&cwd.join("src/lib.rs")),
+            before_mtime,
+            "unchanged file must keep its mtime"
+        );
     }
 
     #[test]
@@ -244,17 +275,47 @@ mod tests {
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         fs::write(&p, b"const V: u32 = 1;").unwrap();
         let stale = SystemTime::now() - Duration::from_secs(3600);
-        OpenOptions::new().write(true).open(&p).unwrap().set_modified(stale).unwrap();
-        assert!(mtime(&p) < SystemTime::now() - Duration::from_secs(1800), "precondition: mtime is stale");
+        OpenOptions::new()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_modified(stale)
+            .unwrap();
+        assert!(
+            mtime(&p) < SystemTime::now() - Duration::from_secs(1800),
+            "precondition: mtime is stale"
+        );
 
         let before = SystemTime::now();
-        let stats = sync(&cas, &cwd, &manifest(&[("src/lib.rs", old)]), &desired(&[("src/lib.rs", new)])).unwrap();
+        let stats = sync(
+            &cas,
+            &cwd,
+            &manifest(&[("src/lib.rs", old)]),
+            &desired(&[("src/lib.rs", new)]),
+        )
+        .unwrap();
 
-        assert_eq!(stats, SyncStats { replaced: 1, ..Default::default() });
-        assert_eq!(fs::read(&p).unwrap(), b"const V: u32 = 2;", "content must be the new blob");
-        assert!(mtime(&p) >= before, "changed file must get a fresh mtime, not the stale one");
+        assert_eq!(
+            stats,
+            SyncStats {
+                replaced: 1,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            fs::read(&p).unwrap(),
+            b"const V: u32 = 2;",
+            "content must be the new blob"
+        );
+        assert!(
+            mtime(&p) >= before,
+            "changed file must get a fresh mtime, not the stale one"
+        );
         // Read-only, like a materialized input.
-        assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o444);
+        assert_eq!(
+            fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o444
+        );
     }
 
     #[test]
@@ -274,9 +335,20 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(stats, SyncStats { left: 1, added: 1, removed: 1, ..Default::default() });
+        assert_eq!(
+            stats,
+            SyncStats {
+                left: 1,
+                added: 1,
+                removed: 1,
+                ..Default::default()
+            }
+        );
         assert!(cwd.join("new.rs").exists(), "added file must be created");
-        assert!(!cwd.join("gone.rs").exists(), "removed file must be unlinked");
+        assert!(
+            !cwd.join("gone.rs").exists(),
+            "removed file must be unlinked"
+        );
         assert_eq!(fs::read(cwd.join("new.rs")).unwrap(), b"fresh");
     }
 
@@ -287,20 +359,35 @@ mod tests {
         let a = cas.put(b"a").unwrap();
         let b = cas.put(b"b").unwrap();
         place_fresh(&cas, &cwd.join("x.rs"), &a).unwrap();
-        assert_eq!(fs::metadata(cwd.join("x.rs")).unwrap().permissions().mode() & 0o777, 0o444);
+        assert_eq!(
+            fs::metadata(cwd.join("x.rs")).unwrap().permissions().mode() & 0o777,
+            0o444
+        );
 
-        sync(&cas, &cwd, &manifest(&[("x.rs", a)]), &desired(&[("x.rs", b)])).unwrap();
+        sync(
+            &cas,
+            &cwd,
+            &manifest(&[("x.rs", a)]),
+            &desired(&[("x.rs", b)]),
+        )
+        .unwrap();
         assert_eq!(fs::read(cwd.join("x.rs")).unwrap(), b"b");
     }
 
     #[test]
     fn manifest_round_trips_through_disk() {
         let (_t, _cas, cwd) = setup();
-        let m = manifest(&[("Cargo.toml", Digest::of(b"1")), ("a/src/lib.rs", Digest::of(b"2"))]);
+        let m = manifest(&[
+            ("Cargo.toml", Digest::of(b"1")),
+            ("a/src/lib.rs", Digest::of(b"2")),
+        ]);
         let path = cwd.join("meta/inputs");
         m.save_atomic(&path).unwrap();
         assert_eq!(InputManifest::load(&path).unwrap(), Some(m));
         // Absent manifest → None (the "no clean baseline" signal).
-        assert_eq!(InputManifest::load(&cwd.join("meta/missing")).unwrap(), None);
+        assert_eq!(
+            InputManifest::load(&cwd.join("meta/missing")).unwrap(),
+            None
+        );
     }
 }

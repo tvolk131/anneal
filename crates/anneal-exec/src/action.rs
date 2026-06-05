@@ -196,7 +196,12 @@ pub struct ActionBuilder {
 impl ActionBuilder {
     /// Declare an input from a concrete CAS blob: materialize `digest` at `path`
     /// (relative to the working directory) under the logical `name`.
-    pub fn input(mut self, name: impl Into<String>, path: impl Into<PathBuf>, digest: Digest) -> Self {
+    pub fn input(
+        mut self,
+        name: impl Into<String>,
+        path: impl Into<PathBuf>,
+        digest: Digest,
+    ) -> Self {
         self.action.inputs.insert(
             name.into(),
             Input {

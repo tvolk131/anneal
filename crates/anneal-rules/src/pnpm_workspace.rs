@@ -83,13 +83,15 @@ impl Rule for PnpmWorkspace {
                 "pnpm_workspace: no package.json found in the package".to_owned(),
             ));
         }
-        let lockfile = ctx.source_artifact(Path::new("pnpm-lock.yaml")).map_err(|_| {
-            RuleError::Message(
-                "pnpm_workspace: pnpm-lock.yaml not found; run `pnpm install` first \
+        let lockfile = ctx
+            .source_artifact(Path::new("pnpm-lock.yaml"))
+            .map_err(|_| {
+                RuleError::Message(
+                    "pnpm_workspace: pnpm-lock.yaml not found; run `pnpm install` first \
                  (we install with --frozen-lockfile)"
-                    .to_owned(),
-            )
-        })?;
+                        .to_owned(),
+                )
+            })?;
         let package_json = ctx.source_artifact(Path::new("package.json"))?;
 
         let label = ctx.label().clone();
@@ -266,11 +268,15 @@ fn with_sources(mut builder: ActionBuilder, sources: &[Artifact]) -> ActionBuild
 fn resolve_data(ctx: &RuleContext) -> Result<Vec<Artifact>, RuleError> {
     let mut routed = Vec::new();
     for (dep_label, dest) in ctx.attrs().label_keyed_strings_opt("data")? {
-        let dep = ctx.deps().iter().find(|d| &d.label == dep_label).ok_or_else(|| {
-            RuleError::Message(format!(
-                "pnpm_workspace: data dependency {dep_label} was not resolved"
-            ))
-        })?;
+        let dep = ctx
+            .deps()
+            .iter()
+            .find(|d| &d.label == dep_label)
+            .ok_or_else(|| {
+                RuleError::Message(format!(
+                    "pnpm_workspace: data dependency {dep_label} was not resolved"
+                ))
+            })?;
         let files = dep
             .providers
             .files
@@ -308,7 +314,10 @@ fn with_routed(mut builder: ActionBuilder, routed: &[Artifact]) -> ActionBuilder
             ArtifactSource::Source(digest) => {
                 builder = builder.input(name, artifact.path.clone(), *digest);
             }
-            ArtifactSource::Output { action, name: output } => {
+            ArtifactSource::Output {
+                action,
+                name: output,
+            } => {
                 builder = builder.input_from_output(name, artifact.path.clone(), action, output);
             }
         }

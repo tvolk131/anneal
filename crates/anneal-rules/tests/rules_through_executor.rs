@@ -5,8 +5,8 @@
 
 use anneal_core::{AxisValues, Configuration, Platform};
 use anneal_exec::{Executor, LocalExecutor};
-use anneal_rules::{Attrs, GenRule, ProviderSet, ResolvedDep, Rule, RuleContext};
 use anneal_rules::{Alias, FileGroup};
+use anneal_rules::{Attrs, GenRule, ProviderSet, ResolvedDep, Rule, RuleContext};
 
 fn host_config() -> Configuration {
     Configuration::new(Platform::new("host", "host"), AxisValues::default())
@@ -50,14 +50,7 @@ fn genrule_analyzes_executes_and_caches() {
         .string("cmd", "cat $(SRCS) > $(OUTS)")
         .build();
     let label = anneal_core::Label::parse("//pkg:combined").unwrap();
-    let ctx = RuleContext::new(
-        label,
-        &attrs,
-        &config,
-        &fx.package_dir,
-        fx.exec.cas(),
-        &[],
-    );
+    let ctx = RuleContext::new(label, &attrs, &config, &fx.package_dir, fx.exec.cas(), &[]);
 
     // Analyze: the rule emits exactly one action.
     let analysis = GenRule.analyze(&ctx).unwrap();
@@ -94,7 +87,10 @@ fn filegroup_provides_resolved_sources() {
 
     let analysis = FileGroup.analyze(&ctx).unwrap();
     assert!(analysis.actions.is_empty());
-    let files = analysis.providers.files.expect("filegroup exposes a FileSet");
+    let files = analysis
+        .providers
+        .files
+        .expect("filegroup exposes a FileSet");
     assert_eq!(files.files.len(), 2);
     // Sources are resolved content addresses.
     assert_eq!(
@@ -113,7 +109,14 @@ fn alias_forwards_dependency_providers() {
     // First analyze a filegroup, then feed its providers to an alias as a dep.
     let fg_attrs = Attrs::builder().strings("srcs", ["z.txt"]).build();
     let fg_label = anneal_core::Label::parse("//pkg:group").unwrap();
-    let fg_ctx = RuleContext::new(fg_label.clone(), &fg_attrs, &config, &fx.package_dir, fx.exec.cas(), &[]);
+    let fg_ctx = RuleContext::new(
+        fg_label.clone(),
+        &fg_attrs,
+        &config,
+        &fx.package_dir,
+        fx.exec.cas(),
+        &[],
+    );
     let fg = FileGroup.analyze(&fg_ctx).unwrap();
 
     let deps = [ResolvedDep {
@@ -124,10 +127,20 @@ fn alias_forwards_dependency_providers() {
         .label("actual", anneal_core::Label::parse("//pkg:group").unwrap())
         .build();
     let alias_label = anneal_core::Label::parse("//pkg:g").unwrap();
-    let alias_ctx = RuleContext::new(alias_label, &alias_attrs, &config, &fx.package_dir, fx.exec.cas(), &deps);
+    let alias_ctx = RuleContext::new(
+        alias_label,
+        &alias_attrs,
+        &config,
+        &fx.package_dir,
+        fx.exec.cas(),
+        &deps,
+    );
 
     let analysis = Alias.analyze(&alias_ctx).unwrap();
-    assert_eq!(analysis.providers, fg.providers, "alias forwards the dep's providers");
+    assert_eq!(
+        analysis.providers, fg.providers,
+        "alias forwards the dep's providers"
+    );
 }
 
 #[test]

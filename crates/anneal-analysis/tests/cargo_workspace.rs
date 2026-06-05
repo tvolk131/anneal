@@ -87,7 +87,10 @@ fn cargo_workspace_builds_hermetically_and_caches() {
 
     // Identical inputs → cache hit, no rebuild.
     let second = exec.execute(&action).unwrap();
-    assert!(second.cache_hit, "identical workspace should hit the action cache");
+    assert!(
+        second.cache_hit,
+        "identical workspace should hit the action cache"
+    );
 }
 
 #[test]
@@ -123,7 +126,10 @@ fn editing_a_source_busts_the_cache() {
     };
     let after_edit = exec.execute(&build_action(&g2)).unwrap();
     assert!(after_edit.success());
-    assert!(!after_edit.cache_hit, "a source edit must bust the build cache");
+    assert!(
+        !after_edit.cache_hit,
+        "a source edit must bust the build cache"
+    );
 }
 
 #[test]
@@ -137,21 +143,36 @@ fn profile_axis_changes_the_build() {
     let graph = load_package(root, "ws", &registry).unwrap();
 
     let debug_action = build_action(
-        &Analyzer::new(&graph, &registry, &config(OptLevel::Debug), root, exec.cas())
-            .analyze(&label)
-            .unwrap(),
+        &Analyzer::new(
+            &graph,
+            &registry,
+            &config(OptLevel::Debug),
+            root,
+            exec.cas(),
+        )
+        .analyze(&label)
+        .unwrap(),
     );
     let release_action = build_action(
-        &Analyzer::new(&graph, &registry, &config(OptLevel::Release), root, exec.cas())
-            .analyze(&label)
-            .unwrap(),
+        &Analyzer::new(
+            &graph,
+            &registry,
+            &config(OptLevel::Release),
+            root,
+            exec.cas(),
+        )
+        .analyze(&label)
+        .unwrap(),
     );
 
     assert!(exec.execute(&debug_action).unwrap().success());
     // Release is a different action; first run is a miss, not served from debug's cache.
     let release = exec.execute(&release_action).unwrap();
     assert!(release.success());
-    assert!(!release.cache_hit, "release build must not reuse the debug cache entry");
+    assert!(
+        !release.cache_hit,
+        "release build must not reuse the debug cache entry"
+    );
 }
 
 /// Generate `Cargo.lock` for a workspace fixture so `--locked` is satisfied.
@@ -165,14 +186,22 @@ fn gen_lockfile(ws: &std::path::Path) {
     assert!(ok, "cargo generate-lockfile failed");
 }
 
-fn build_and_outputs(root: &std::path::Path) -> std::collections::BTreeMap<String, anneal_core::Digest> {
+fn build_and_outputs(
+    root: &std::path::Path,
+) -> std::collections::BTreeMap<String, anneal_core::Digest> {
     let registry = builtin_rules();
     let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
     let graph = load_package(root, "ws", &registry).unwrap();
     let action = build_action(
-        &Analyzer::new(&graph, &registry, &config(OptLevel::Debug), root, exec.cas())
-            .analyze(&anneal_core::Label::parse("//ws:ws").unwrap())
-            .unwrap(),
+        &Analyzer::new(
+            &graph,
+            &registry,
+            &config(OptLevel::Debug),
+            root,
+            exec.cas(),
+        )
+        .analyze(&anneal_core::Label::parse("//ws:ws").unwrap())
+        .unwrap(),
     );
     let result = exec.execute(&action).unwrap();
     assert!(result.success(), "build failed (exit {})", result.exit_code);
@@ -188,8 +217,16 @@ fn proc_macro_member_does_not_break_the_build() {
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(ws.join("mylib/src")).unwrap();
     std::fs::create_dir_all(ws.join("mymacro/src")).unwrap();
-    std::fs::write(ws.join("Cargo.toml"), "[workspace]\nmembers = [\"mylib\", \"mymacro\"]\nresolver = \"2\"\n").unwrap();
-    std::fs::write(ws.join("mylib/Cargo.toml"), "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(
+        ws.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"mylib\", \"mymacro\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join("mylib/Cargo.toml"),
+        "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
     std::fs::write(ws.join("mylib/src/lib.rs"), "pub fn f() -> i32 { 1 }\n").unwrap();
     // A trivial proc-macro — needs only the built-in `proc_macro` crate, so still offline.
     std::fs::write(
@@ -223,7 +260,11 @@ fn glob_members_are_expanded() {
     // `members = ["crates/*"]` must enumerate each subcrate (we previously skipped globs).
     let tmp = tempfile::tempdir().unwrap();
     let ws = tmp.path().join("ws");
-    std::fs::write(ws_path(&ws, "Cargo.toml"), "[workspace]\nmembers = [\"crates/*\"]\nresolver = \"2\"\n").unwrap();
+    std::fs::write(
+        ws_path(&ws, "Cargo.toml"),
+        "[workspace]\nmembers = [\"crates/*\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
     for name in ["alpha", "beta"] {
         std::fs::create_dir_all(ws.join(format!("crates/{name}/src"))).unwrap();
         std::fs::write(
@@ -231,7 +272,11 @@ fn glob_members_are_expanded() {
             format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
         )
         .unwrap();
-        std::fs::write(ws.join(format!("crates/{name}/src/lib.rs")), "pub fn f() {}\n").unwrap();
+        std::fs::write(
+            ws.join(format!("crates/{name}/src/lib.rs")),
+            "pub fn f() {}\n",
+        )
+        .unwrap();
     }
     std::fs::write(ws.join("BUILD"), "cargo_workspace(name = \"ws\")\n").unwrap();
     gen_lockfile(&ws);
@@ -239,7 +284,9 @@ fn glob_members_are_expanded() {
     let outputs = build_and_outputs(tmp.path());
     for name in ["alpha", "beta"] {
         assert!(
-            outputs.keys().any(|k| k.contains(&format!("lib{name}.rlib"))),
+            outputs
+                .keys()
+                .any(|k| k.contains(&format!("lib{name}.rlib"))),
             "glob member {name} should be enumerated and its rlib captured; got {:?}",
             outputs.keys().collect::<Vec<_>>()
         );

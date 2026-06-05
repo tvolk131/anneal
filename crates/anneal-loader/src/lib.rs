@@ -128,7 +128,8 @@ pub fn load_workspace(
 }
 
 /// Directories never descended into while scanning for `BUILD` files.
-const WORKSPACE_IGNORED_DIRS: &[&str] = &[".git", ".hg", ".svn", ".anneal", "target", "node_modules"];
+const WORKSPACE_IGNORED_DIRS: &[&str] =
+    &[".git", ".hg", ".svn", ".anneal", "target", "node_modules"];
 
 /// Recursively collect package paths (directories containing a `BUILD` file), relative to
 /// the workspace root and `/`-separated. Symlinked directories are not followed.
@@ -137,8 +138,8 @@ fn collect_packages(root: &Path, rel: &Path, out: &mut Vec<String>) -> Result<()
     if dir.join("BUILD").is_file() {
         out.push(package_path(rel));
     }
-    let entries =
-        std::fs::read_dir(&dir).map_err(|e| LoadError::io(format!("scanning {}: {e}", dir.display())))?;
+    let entries = std::fs::read_dir(&dir)
+        .map_err(|e| LoadError::io(format!("scanning {}: {e}", dir.display())))?;
     for entry in entries {
         let entry = entry.map_err(|e| LoadError::io(format!("scanning {}: {e}", dir.display())))?;
         let file_type = entry
@@ -148,7 +149,10 @@ fn collect_packages(root: &Path, rel: &Path, out: &mut Vec<String>) -> Result<()
         // (not a dir) and is skipped — avoiding symlink cycles.
         if file_type.is_dir() {
             let name = entry.file_name();
-            if WORKSPACE_IGNORED_DIRS.iter().any(|ig| std::ffi::OsStr::new(ig) == name) {
+            if WORKSPACE_IGNORED_DIRS
+                .iter()
+                .any(|ig| std::ffi::OsStr::new(ig) == name)
+            {
                 continue;
             }
             collect_packages(root, &rel.join(name), out)?;

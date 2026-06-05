@@ -65,7 +65,11 @@ pub(crate) fn build_command(action: &Action, spec: &SandboxSpec) -> Command {
 fn wrap(mode: ExecutionMode, network: bool, program: &str, args: &[String]) -> Command {
     match mode {
         ExecutionMode::Sealed => {
-            let profile = if network { SEALED_NET_PROFILE } else { SEALED_PROFILE };
+            let profile = if network {
+                SEALED_NET_PROFILE
+            } else {
+                SEALED_PROFILE
+            };
             let mut cmd = Command::new("/usr/bin/sandbox-exec");
             cmd.arg("-p").arg(profile).arg("--").arg(program).args(args);
             cmd

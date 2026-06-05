@@ -53,11 +53,21 @@ fn changing_input_content_busts_the_cache() {
     let dir = tempfile::tempdir().unwrap();
     let exec = LocalExecutor::new(dir.path()).unwrap();
 
-    let a = exec.execute(&copy_upper_action(exec.cas().put(b"one").unwrap())).unwrap();
-    let b = exec.execute(&copy_upper_action(exec.cas().put(b"two").unwrap())).unwrap();
+    let a = exec
+        .execute(&copy_upper_action(exec.cas().put(b"one").unwrap()))
+        .unwrap();
+    let b = exec
+        .execute(&copy_upper_action(exec.cas().put(b"two").unwrap()))
+        .unwrap();
 
-    assert!(!a.cache_hit && !b.cache_hit, "different inputs are different actions");
-    assert_ne!(a.outputs, b.outputs, "different inputs produce different outputs");
+    assert!(
+        !a.cache_hit && !b.cache_hit,
+        "different inputs are different actions"
+    );
+    assert_ne!(
+        a.outputs, b.outputs,
+        "different inputs produce different outputs"
+    );
 }
 
 #[test]
@@ -74,7 +84,10 @@ fn non_cacheable_action_always_reruns() {
 
     let first = exec.execute(&action).unwrap();
     let second = exec.execute(&action).unwrap();
-    assert!(!first.cache_hit && !second.cache_hit, "non-cacheable never hits");
+    assert!(
+        !first.cache_hit && !second.cache_hit,
+        "non-cacheable never hits"
+    );
     // ...but it still produces correct, content-identical outputs each time.
     assert_eq!(first.outputs, second.outputs);
 }
@@ -101,7 +114,11 @@ fn environment_is_scrubbed_but_declared_vars_pass_through() {
     .build();
 
     let result = exec.execute(&action).unwrap();
-    let out = exec.cas().get(result.outputs.get("result").unwrap()).unwrap().unwrap();
+    let out = exec
+        .cas()
+        .get(result.outputs.get("result").unwrap())
+        .unwrap()
+        .unwrap();
     assert_eq!(String::from_utf8(out).unwrap(), "CLEAN|present");
 }
 
@@ -171,7 +188,10 @@ fn executing_an_unresolved_action_directly_errors() {
         .output("o", "o.txt")
         .build();
     let err = exec.execute(&action).unwrap_err();
-    assert!(matches!(err, anneal_exec::ExecError::UnresolvedInput { .. }));
+    assert!(matches!(
+        err,
+        anneal_exec::ExecError::UnresolvedInput { .. }
+    ));
 }
 
 #[test]

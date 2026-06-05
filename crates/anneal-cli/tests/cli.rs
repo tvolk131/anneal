@@ -26,11 +26,16 @@ fn workspace(build: &str) -> tempfile::TempDir {
 
 #[test]
 fn build_runs_the_graph_and_caches() {
-    let ws = workspace("genrule(name = \"gen\", outs = [\"out.txt\"], cmd = \"echo hi > $(OUTS)\")\n");
+    let ws =
+        workspace("genrule(name = \"gen\", outs = [\"out.txt\"], cmd = \"echo hi > $(OUTS)\")\n");
 
     let out = anneal(ws.path(), &["build", "//pkg:gen"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(stdout.contains("genrule //pkg:gen"), "stdout:\n{stdout}");
     assert!(stdout.contains("build ok"), "stdout:\n{stdout}");
 
@@ -49,7 +54,11 @@ fn test_summarizes_a_passing_result() {
         "genrule(name = \"t\", outs = [\"results.txt\"], cmd = \"printf 'ANNEAL_TEST_EXIT=0' > $(OUTS)\")\n",
     );
     let out = anneal(ws.path(), &["test", "//pkg:t"]);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("1 passed, 0 failed"),
         "stdout:\n{}",
@@ -74,11 +83,19 @@ fn unknown_target_and_bad_flags_exit_2() {
     let ws = workspace("genrule(name = \"gen\", outs = [\"o\"], cmd = \"echo x > $(OUTS)\")\n");
 
     let unknown = anneal(ws.path(), &["build", "//pkg:nope"]);
-    assert_eq!(unknown.status.code(), Some(2), "unknown target is a usage error");
+    assert_eq!(
+        unknown.status.code(),
+        Some(2),
+        "unknown target is a usage error"
+    );
     assert!(String::from_utf8_lossy(&unknown.stderr).contains("error:"));
 
     let bad_flag = anneal(ws.path(), &["build", "//pkg:gen", "--opt-level", "bogus"]);
-    assert_eq!(bad_flag.status.code(), Some(2), "an invalid axis value is a usage error");
+    assert_eq!(
+        bad_flag.status.code(),
+        Some(2),
+        "an invalid axis value is a usage error"
+    );
 }
 
 /// A `base → lib → app` chain across three packages, with a tracked file in `base`.
@@ -89,7 +106,10 @@ fn chain_workspace() -> tempfile::TempDir {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("BUILD"), build).unwrap();
     };
-    write("base", "genrule(name = \"base\", outs = [\"b\"], cmd = \"echo > $(OUTS)\")\n");
+    write(
+        "base",
+        "genrule(name = \"base\", outs = [\"b\"], cmd = \"echo > $(OUTS)\")\n",
+    );
     write("lib", "genrule(name = \"lib\", deps = [\"//base:base\"], outs = [\"l\"], cmd = \"echo > $(OUTS)\")\n");
     write("app", "genrule(name = \"app\", deps = [\"//lib:lib\"], outs = [\"a\"], cmd = \"echo > $(OUTS)\")\n");
     std::fs::write(tmp.path().join("base/data.txt"), "orig").unwrap();
@@ -100,7 +120,11 @@ fn chain_workspace() -> tempfile::TempDir {
 fn why_shows_a_path_and_requires_a_query() {
     let ws = chain_workspace();
     let out = anneal(ws.path(), &["why", "//app:app", "//base:base"]);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("//app:app → //lib:lib → //base:base"),
         "stdout:\n{}",
@@ -120,7 +144,14 @@ fn affected_and_why_since_track_a_git_change() {
     let root = ws.path();
     let git = |args: &[&str]| {
         let ok = Command::new("git")
-            .args(["-c", "user.email=t@t", "-c", "user.name=t", "-c", "init.defaultBranch=main"])
+            .args([
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "-c",
+                "init.defaultBranch=main",
+            ])
             .args(args)
             .current_dir(root)
             .status()
@@ -136,10 +167,17 @@ fn affected_and_why_since_track_a_git_change() {
 
     // affected --since lists base and everything that transitively depends on it.
     let aff = anneal(root, &["affected", "--since", "HEAD"]);
-    assert!(aff.status.success(), "stderr: {}", String::from_utf8_lossy(&aff.stderr));
+    assert!(
+        aff.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&aff.stderr)
+    );
     let aff_out = String::from_utf8_lossy(&aff.stdout);
     for label in ["//app:app", "//base:base", "//lib:lib"] {
-        assert!(aff_out.contains(label), "affected should include {label}; got:\n{aff_out}");
+        assert!(
+            aff_out.contains(label),
+            "affected should include {label}; got:\n{aff_out}"
+        );
     }
 
     // why --since explains app's affectedness with the path to the change.

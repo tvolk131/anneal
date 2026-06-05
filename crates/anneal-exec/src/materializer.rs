@@ -72,7 +72,12 @@ pub(crate) fn layout(action: &Action, root: PathBuf) -> Result<PreparedSandbox, 
         }
     }
 
-    Ok(PreparedSandbox { root, cwd, home, tmp })
+    Ok(PreparedSandbox {
+        root,
+        cwd,
+        home,
+        tmp,
+    })
 }
 
 /// Materialize all declared inputs of `action` into `cwd` (hardlink/clone from the CAS).
@@ -89,7 +94,8 @@ fn materialize_inputs(cas: &Cas, action: &Action, cwd: &Path) -> Result<(), Exec
                 })
             }
         };
-        cas.link_into(digest, &cwd.join(&input.path)).map_err(ExecError::Io)?;
+        cas.link_into(digest, &cwd.join(&input.path))
+            .map_err(ExecError::Io)?;
     }
     Ok(())
 }

@@ -134,17 +134,13 @@ impl fmt::Display for LabelParseError {
             LabelParseError::RepoUnsupported => {
                 f.write_str("repo prefixes (`@repo//…`) are reserved but unsupported in v1")
             }
-            LabelParseError::NotAbsolute => {
-                f.write_str("label must be absolute (start with `//`)")
-            }
+            LabelParseError::NotAbsolute => f.write_str("label must be absolute (start with `//`)"),
             LabelParseError::Glob => {
                 f.write_str("glob labels (`...`, `*`) are not a concrete target")
             }
             LabelParseError::BadPackage(p) => write!(f, "invalid package path {p:?}"),
             LabelParseError::BadTarget(t) => write!(f, "invalid target name {t:?}"),
-            LabelParseError::MissingTarget => {
-                f.write_str("label `//` needs an explicit `:target`")
-            }
+            LabelParseError::MissingTarget => f.write_str("label `//` needs an explicit `:target`"),
         }
     }
 }
@@ -189,7 +185,10 @@ mod tests {
 
     #[test]
     fn rejects_bad_forms() {
-        assert_eq!(Label::parse("@repo//pkg"), Err(LabelParseError::RepoUnsupported));
+        assert_eq!(
+            Label::parse("@repo//pkg"),
+            Err(LabelParseError::RepoUnsupported)
+        );
         assert_eq!(Label::parse("pkg:t"), Err(LabelParseError::NotAbsolute));
         assert_eq!(Label::parse("//crates/..."), Err(LabelParseError::Glob));
         assert_eq!(Label::parse("//pkg:*"), Err(LabelParseError::Glob));

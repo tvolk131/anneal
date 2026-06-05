@@ -55,7 +55,10 @@ pub fn parse_libtest(output: &str) -> LibtestReport {
             i += 1;
             while i < lines.len() {
                 let l = lines[i];
-                if l.starts_with("---- ") || l.starts_with("failures:") || l.starts_with("test result:") {
+                if l.starts_with("---- ")
+                    || l.starts_with("failures:")
+                    || l.starts_with("test result:")
+                {
                     break;
                 }
                 message.push_str(l);
@@ -182,7 +185,10 @@ mod tests {
         let broken = r.cases.iter().find(|c| c.name == "tests::broken").unwrap();
         assert_eq!(broken.outcome, TestOutcome::Failed);
         let msg = broken.failure_message.as_ref().unwrap();
-        assert!(msg.contains("assertion"), "captured failure detail: {msg:?}");
+        assert!(
+            msg.contains("assertion"),
+            "captured failure detail: {msg:?}"
+        );
         assert!(msg.contains("left: 5"));
     }
 

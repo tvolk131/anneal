@@ -43,12 +43,7 @@ impl NeutralityReport {
     /// Output names whose cold and warm digests differ (or that appear in only one).
     /// Empty iff [`is_neutral`](Self::is_neutral).
     pub fn divergences(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .cold
-            .keys()
-            .chain(self.warm.keys())
-            .cloned()
-            .collect();
+        let mut names: Vec<String> = self.cold.keys().chain(self.warm.keys()).cloned().collect();
         names.sort();
         names.dedup();
         names
@@ -68,8 +63,18 @@ pub fn verify_correctness_neutral(
     action: &Action,
 ) -> Result<NeutralityReport, ExecError> {
     // Same sandbox path for both runs ⇒ embedded paths match ⇒ outputs comparable.
-    let cold = exec.run_uncached(action, VERIFY_SANDBOX, /*restore*/ false, /*save*/ false)?;
-    let warm = exec.run_uncached(action, VERIFY_SANDBOX, /*restore*/ true, /*save*/ false)?;
+    let cold = exec.run_uncached(
+        action,
+        VERIFY_SANDBOX,
+        /*restore*/ false,
+        /*save*/ false,
+    )?;
+    let warm = exec.run_uncached(
+        action,
+        VERIFY_SANDBOX,
+        /*restore*/ true,
+        /*save*/ false,
+    )?;
     Ok(NeutralityReport {
         cold: cold.outputs,
         warm: warm.outputs,
@@ -80,7 +85,12 @@ pub fn verify_correctness_neutral(
 /// an earlier source state to populate the snapshot that
 /// [`verify_correctness_neutral`] will restore for the warm run.
 pub fn prime_snapshot(exec: &LocalExecutor, action: &Action) -> Result<ActionResult, ExecError> {
-    exec.run_uncached(action, VERIFY_SANDBOX, /*restore*/ false, /*save*/ true)
+    exec.run_uncached(
+        action,
+        VERIFY_SANDBOX,
+        /*restore*/ false,
+        /*save*/ true,
+    )
 }
 
 /// Verify that **warm-sandbox reuse** is correctness-neutral (§5, §1.4) — distinct from

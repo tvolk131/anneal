@@ -68,9 +68,15 @@ fn run_and_collect(lib_rs: &str) -> TestResult {
         .position(|a| a.name().contains("test-run") && a.name().contains("unit"))
         .expect("a unit test-run action");
     let run = &results[run_idx];
-    assert!(run.success(), "run action records results even on test failure");
+    assert!(
+        run.success(),
+        "run action records results even on test failure"
+    );
 
-    let output_digest = run.outputs.get("results.txt").expect("captured results.txt");
+    let output_digest = run
+        .outputs
+        .get("results.txt")
+        .expect("captured results.txt");
     let output = String::from_utf8(exec.cas().get(output_digest).unwrap().unwrap()).unwrap();
     TestResult::from_libtest(label, cfg, &output)
 }
@@ -89,7 +95,11 @@ fn passing_tests_produce_structured_passes() {
     assert_eq!(result.count(TestOutcome::Passed), 2);
     assert_eq!(result.count(TestOutcome::Failed), 0);
     // Per-case identity is stable and target-qualified.
-    let adds = result.cases.iter().find(|c| c.name == "tests::adds").unwrap();
+    let adds = result
+        .cases
+        .iter()
+        .find(|c| c.name == "tests::adds")
+        .unwrap();
     assert_eq!(result.case_id(adds), "//ws:ws#tests::adds");
 }
 
@@ -107,10 +117,18 @@ fn a_failing_test_is_a_recorded_result_not_an_error() {
     assert_eq!(result.count(TestOutcome::Passed), 1);
     assert_eq!(result.count(TestOutcome::Failed), 1);
 
-    let broken = result.cases.iter().find(|c| c.name == "tests::broken").unwrap();
+    let broken = result
+        .cases
+        .iter()
+        .find(|c| c.name == "tests::broken")
+        .unwrap();
     assert_eq!(broken.outcome, TestOutcome::Failed);
     assert!(
-        broken.failure_message.as_deref().unwrap_or("").contains("assertion"),
+        broken
+            .failure_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("assertion"),
         "the failure detail should be captured: {:?}",
         broken.failure_message
     );

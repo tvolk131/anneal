@@ -92,7 +92,11 @@ fn snapshot_restored_build_is_correctness_neutral() {
     // v1: prime the snapshot (clean build of both crates, snapshot saved).
     let v1 = build_action(&exec);
     let primed = prime_snapshot(&exec, &v1).unwrap();
-    assert!(primed.success(), "priming build failed (exit {})", primed.exit_code);
+    assert!(
+        primed.success(),
+        "priming build failed (exit {})",
+        primed.exit_code
+    );
     assert_eq!(primed.outputs.len(), 2, "two library rlibs expected");
 
     // Edit ONLY applib → v2. corelib is unchanged, so the warm build reuses it.
@@ -157,7 +161,10 @@ fn warm_reuse_build_is_correctness_neutral() {
     let v2 = build_action(&exec);
 
     let report = verify_warm_neutral(&exec, &v1, &v2).unwrap();
-    assert!(!report.cold.is_empty(), "there must be declared outputs to compare");
+    assert!(
+        !report.cold.is_empty(),
+        "there must be declared outputs to compare"
+    );
     assert!(
         report.is_neutral(),
         "warm-reuse build diverged from cold build on: {:?}\ncold={:?}\nwarm={:?}",
@@ -208,7 +215,10 @@ fn warm_reuse_is_neutral_across_a_revert() {
     // build). Compare to a clean build of X. Neutral ⇒ the revert recompiled correctly
     // despite the old blob — i.e. the sync gave the reverted file a fresh mtime.
     let report = verify_warm_neutral(&exec, &vy, &vx).unwrap();
-    assert!(!report.cold.is_empty(), "there must be declared outputs to compare");
+    assert!(
+        !report.cold.is_empty(),
+        "there must be declared outputs to compare"
+    );
     assert!(
         report.is_neutral(),
         "warm-reuse revert diverged from cold build on: {:?}\ncold={:?}\nwarm={:?}",

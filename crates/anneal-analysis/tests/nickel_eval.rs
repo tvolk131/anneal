@@ -28,7 +28,8 @@ fn analyze(
 ) -> Result<ActionGraph, AnalysisError> {
     let registry = builtin_rules();
     let graph = load_package(root, "cfg", &registry).unwrap();
-    Analyzer::new(&graph, &registry, config, root, exec.cas()).analyze(&Label::parse(target).unwrap())
+    Analyzer::new(&graph, &registry, config, root, exec.cas())
+        .analyze(&Label::parse(target).unwrap())
 }
 
 fn host() -> Configuration {
@@ -37,7 +38,8 @@ fn host() -> Configuration {
 
 #[test]
 fn evaluates_to_json_by_default_and_exposes_it() {
-    let tmp = workspace("nickel_eval(name = \"config\", src = \"config.ncl\", out = \"config.json\")\n");
+    let tmp =
+        workspace("nickel_eval(name = \"config\", src = \"config.ncl\", out = \"config.json\")\n");
     let root = tmp.path();
     let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
 
@@ -51,15 +53,29 @@ fn evaluates_to_json_by_default_and_exposes_it() {
         .files
         .as_ref()
         .unwrap();
-    assert!(matches!(files.files[0].source, ArtifactSource::Output { .. }));
+    assert!(matches!(
+        files.files[0].source,
+        ArtifactSource::Output { .. }
+    ));
 
     let action = g.actions().next().unwrap().clone();
     let result = exec.execute(&action).unwrap();
-    assert!(result.success(), "nickel export failed (exit {})", result.exit_code);
-    let json =
-        String::from_utf8(exec.cas().get(result.outputs.get("config.json").unwrap()).unwrap().unwrap())
-            .unwrap();
-    assert!(json.contains("\"demo\"") && json.contains("8080"), "got: {json}");
+    assert!(
+        result.success(),
+        "nickel export failed (exit {})",
+        result.exit_code
+    );
+    let json = String::from_utf8(
+        exec.cas()
+            .get(result.outputs.get("config.json").unwrap())
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        json.contains("\"demo\"") && json.contains("8080"),
+        "got: {json}"
+    );
 }
 
 #[test]
@@ -73,11 +89,18 @@ fn produces_toml_when_requested() {
     let g = analyze(root, "//cfg:config", &host(), &exec).unwrap();
     let result = exec.execute(&g.actions().next().unwrap().clone()).unwrap();
     assert!(result.success());
-    let toml =
-        String::from_utf8(exec.cas().get(result.outputs.get("config.toml").unwrap()).unwrap().unwrap())
-            .unwrap();
+    let toml = String::from_utf8(
+        exec.cas()
+            .get(result.outputs.get("config.toml").unwrap())
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
     // TOML rendering of the same Nickel value.
-    assert!(toml.contains("name = \"demo\""), "expected TOML, got: {toml}");
+    assert!(
+        toml.contains("name = \"demo\""),
+        "expected TOML, got: {toml}"
+    );
     assert!(toml.contains("port = 8080"));
 }
 
@@ -99,12 +122,16 @@ fn format_changes_the_cache_key() {
             .clone()
     };
     // Same source, different format ⇒ different command ⇒ different cache key.
-    assert_ne!(action_digest(&pick("//cfg:j")), action_digest(&pick("//cfg:t")));
+    assert_ne!(
+        action_digest(&pick("//cfg:j")),
+        action_digest(&pick("//cfg:t"))
+    );
 }
 
 #[test]
 fn is_configuration_invariant() {
-    let tmp = workspace("nickel_eval(name = \"config\", src = \"config.ncl\", out = \"config.json\")\n");
+    let tmp =
+        workspace("nickel_eval(name = \"config\", src = \"config.ncl\", out = \"config.json\")\n");
     let root = tmp.path();
     let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
 
@@ -119,8 +146,18 @@ fn is_configuration_invariant() {
             ..Default::default()
         },
     );
-    let a = analyze(root, "//cfg:config", &cfg_a, &exec).unwrap().actions().next().unwrap().clone();
-    let b = analyze(root, "//cfg:config", &cfg_b, &exec).unwrap().actions().next().unwrap().clone();
+    let a = analyze(root, "//cfg:config", &cfg_a, &exec)
+        .unwrap()
+        .actions()
+        .next()
+        .unwrap()
+        .clone();
+    let b = analyze(root, "//cfg:config", &cfg_b, &exec)
+        .unwrap()
+        .actions()
+        .next()
+        .unwrap()
+        .clone();
     // No axes consumed and platform-independent ⇒ identical key across configurations.
     assert_eq!(action_digest(&a), action_digest(&b));
 }

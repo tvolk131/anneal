@@ -59,7 +59,11 @@ pub struct TestResult {
 
 impl TestResult {
     /// Translate libtest human output into a structured result for `test_target`.
-    pub fn from_libtest(test_target: Label, configuration: Configuration, output: &str) -> TestResult {
+    pub fn from_libtest(
+        test_target: Label,
+        configuration: Configuration,
+        output: &str,
+    ) -> TestResult {
         let report = parse_libtest(output);
         // Target outcome: any failed case fails the target; otherwise it passed.
         let outcome = if report.failed > 0 {

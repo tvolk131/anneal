@@ -66,16 +66,27 @@ fn cross_package_dependency_analyzes_and_builds() {
 
     // The dependency (`//lib:data`) is analyzed before its dependent (`//app:app`).
     let order = g.order();
-    let lib_pos = order.iter().position(|l| l == &Label::parse("//lib:data").unwrap());
+    let lib_pos = order
+        .iter()
+        .position(|l| l == &Label::parse("//lib:data").unwrap());
     let app_pos = order.iter().position(|l| l == &app);
-    assert!(lib_pos < app_pos, "dependency precedes dependent across packages");
+    assert!(
+        lib_pos < app_pos,
+        "dependency precedes dependent across packages"
+    );
 
     let actions: Vec<Action> = g.actions().cloned().collect();
     let results = exec.execute_graph(&actions).unwrap();
-    assert!(results.iter().all(|r| r.success()), "all actions succeed across packages");
+    assert!(
+        results.iter().all(|r| r.success()),
+        "all actions succeed across packages"
+    );
 
     // `app`'s genrule consumed `lib`'s generated file across the package boundary.
-    let idx = actions.iter().position(|a| a.name() == "genrule //app:app").unwrap();
+    let idx = actions
+        .iter()
+        .position(|a| a.name() == "genrule //app:app")
+        .unwrap();
     let combined = String::from_utf8(
         exec.cas()
             .get(results[idx].outputs.get("combined.txt").unwrap())
@@ -133,9 +144,15 @@ fn transitive_closure_spans_multiple_hops() {
         .unwrap();
     let actions: Vec<Action> = g.actions().cloned().collect();
     let results = exec.execute_graph(&actions).unwrap();
-    assert!(results.iter().all(|r| r.success()), "the whole chain builds");
+    assert!(
+        results.iter().all(|r| r.success()),
+        "the whole chain builds"
+    );
 
-    let idx = actions.iter().position(|a| a.name() == "genrule //app:app").unwrap();
+    let idx = actions
+        .iter()
+        .position(|a| a.name() == "genrule //app:app")
+        .unwrap();
     let out = String::from_utf8(
         exec.cas()
             .get(results[idx].outputs.get("o.txt").unwrap())
@@ -143,7 +160,11 @@ fn transitive_closure_spans_multiple_hops() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(out.trim(), "base", "content flowed base → mid → app across three packages");
+    assert_eq!(
+        out.trim(),
+        "base",
+        "content flowed base → mid → app across three packages"
+    );
 }
 
 #[test]
@@ -160,5 +181,8 @@ fn missing_dependency_package_is_a_clean_error() {
 
     let err = load_closure(tmp.path(), &app, &registry).unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("nope"), "error should name the missing package; got: {msg}");
+    assert!(
+        msg.contains("nope"),
+        "error should name the missing package; got: {msg}"
+    );
 }

@@ -34,7 +34,11 @@ fn fixture() -> tempfile::TempDir {
         "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
     )
     .unwrap();
-    std::fs::write(ws.join("mylib/src/lib.rs"), "pub fn add(a: i32, b: i32) -> i32 { a + b }\n").unwrap();
+    std::fs::write(
+        ws.join("mylib/src/lib.rs"),
+        "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+    )
+    .unwrap();
     std::fs::write(ws.join("BUILD"), "cargo_workspace(name = \"ws\")\n").unwrap();
     let status = std::process::Command::new("cargo")
         .arg("generate-lockfile")

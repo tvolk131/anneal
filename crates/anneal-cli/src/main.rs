@@ -249,7 +249,12 @@ fn git_changed_files(root: &Path, since: &str) -> Result<Vec<PathBuf>, String> {
 }
 
 /// Analyze and execute a target's action graph; return the process exit code.
-fn build(target: &str, config: &Configuration, root: &Path, jobs: Option<usize>) -> Result<i32, String> {
+fn build(
+    target: &str,
+    config: &Configuration,
+    root: &Path,
+    jobs: Option<usize>,
+) -> Result<i32, String> {
     let (actions, results, exec) = analyze_and_run(target, config, root, jobs)?;
     report_actions(&actions, &results);
 
@@ -266,7 +271,12 @@ fn build(target: &str, config: &Configuration, root: &Path, jobs: Option<usize>)
 }
 
 /// Build, then summarize the actions that produced a test result (`results.txt`).
-fn test(target: &str, config: &Configuration, root: &Path, jobs: Option<usize>) -> Result<i32, String> {
+fn test(
+    target: &str,
+    config: &Configuration,
+    root: &Path,
+    jobs: Option<usize>,
+) -> Result<i32, String> {
     let (actions, results, exec) = analyze_and_run(target, config, root, jobs)?;
     report_actions(&actions, &results);
 

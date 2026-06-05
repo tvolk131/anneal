@@ -145,7 +145,8 @@ pub struct AttrsBuilder {
 
 impl AttrsBuilder {
     pub fn string(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        self.map.insert(name.into(), AttrValue::String(value.into()));
+        self.map
+            .insert(name.into(), AttrValue::String(value.into()));
         self
     }
 
@@ -179,7 +180,10 @@ impl AttrsBuilder {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttrError {
     Missing(String),
-    WrongType { name: String, expected: &'static str },
+    WrongType {
+        name: String,
+        expected: &'static str,
+    },
 }
 
 impl AttrError {

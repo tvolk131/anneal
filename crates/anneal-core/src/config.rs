@@ -226,10 +226,7 @@ mod tests {
         };
         // Declared out of order; result must be canonical (opt_level before coverage).
         let consumed = a.consumed(&[Axis::Coverage, Axis::OptLevel]);
-        assert_eq!(
-            consumed,
-            vec![("opt_level", "release"), ("coverage", "on")]
-        );
+        assert_eq!(consumed, vec![("opt_level", "release"), ("coverage", "on")]);
     }
 
     #[test]

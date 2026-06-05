@@ -26,14 +26,20 @@ fn input_order_need_not_be_topological() {
     let exec = LocalExecutor::new(dir.path()).unwrap();
 
     let a = writes("A", "a.txt", "A\n");
-    let b = Action::builder("B", ["/bin/sh", "-c", "cat a.txt > b.txt; printf 'B\\n' >> b.txt"])
-        .input_from_output("a", "a.txt", "A", "a.txt")
-        .output("b.txt", "b.txt")
-        .build();
-    let c = Action::builder("C", ["/bin/sh", "-c", "cat a.txt > c.txt; printf 'C\\n' >> c.txt"])
-        .input_from_output("a", "a.txt", "A", "a.txt")
-        .output("c.txt", "c.txt")
-        .build();
+    let b = Action::builder(
+        "B",
+        ["/bin/sh", "-c", "cat a.txt > b.txt; printf 'B\\n' >> b.txt"],
+    )
+    .input_from_output("a", "a.txt", "A", "a.txt")
+    .output("b.txt", "b.txt")
+    .build();
+    let c = Action::builder(
+        "C",
+        ["/bin/sh", "-c", "cat a.txt > c.txt; printf 'C\\n' >> c.txt"],
+    )
+    .input_from_output("a", "a.txt", "A", "a.txt")
+    .output("c.txt", "c.txt")
+    .build();
     let d = Action::builder("D", ["/bin/sh", "-c", "cat b.txt c.txt > d.txt"])
         .input_from_output("b", "b.txt", "B", "b.txt")
         .input_from_output("c", "c.txt", "C", "c.txt")
@@ -43,10 +49,17 @@ fn input_order_need_not_be_topological() {
     // Scrambled: a consumer appears before its producers.
     let results = exec.execute_graph(&[d, c, a, b]).unwrap();
     assert_eq!(results.len(), 4);
-    assert!(results.iter().all(|r| r.success()), "every action should succeed");
+    assert!(
+        results.iter().all(|r| r.success()),
+        "every action should succeed"
+    );
 
     // results[0] is D (slice index 0), whatever order it actually ran in.
-    let d_out = exec.cas().get(results[0].outputs.get("d.txt").unwrap()).unwrap().unwrap();
+    let d_out = exec
+        .cas()
+        .get(results[0].outputs.get("d.txt").unwrap())
+        .unwrap()
+        .unwrap();
     assert_eq!(String::from_utf8(d_out).unwrap(), "A\nB\nA\nC\n");
 }
 
@@ -118,7 +131,10 @@ fn a_nonzero_exit_leaf_is_a_result_not_an_abort() {
 
     let results = exec.execute_graph(&[good, bad]).unwrap();
     assert!(results[0].success(), "the good leaf succeeds");
-    assert!(!results[1].success(), "the bad leaf is a non-success result");
+    assert!(
+        !results[1].success(),
+        "the bad leaf is a non-success result"
+    );
     assert_eq!(results[1].exit_code, 7);
 }
 
@@ -139,7 +155,10 @@ fn a_dependency_cycle_is_detected() {
         .build();
 
     let err = exec.execute_graph(&[x, y]).unwrap_err();
-    assert!(matches!(err, ExecError::DependencyCycle), "expected DependencyCycle, got {err:?}");
+    assert!(
+        matches!(err, ExecError::DependencyCycle),
+        "expected DependencyCycle, got {err:?}"
+    );
 }
 
 #[test]

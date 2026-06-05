@@ -49,7 +49,10 @@ fn wrong_hash_fails_closed() {
         .execute(&fetch_action("something else entirely", expected))
         .unwrap_err();
     match err {
-        ExecError::FixedOutputMismatch { expected: e, actual } => {
+        ExecError::FixedOutputMismatch {
+            expected: e,
+            actual,
+        } => {
             assert_eq!(e, expected);
             assert_ne!(actual, expected);
         }
@@ -71,7 +74,10 @@ fn present_pin_short_circuits_the_fetch_command() {
         .build();
 
     let r = exec.execute(&action).unwrap();
-    assert!(r.cache_hit && r.success(), "a present pin must short-circuit the failing fetch");
+    assert!(
+        r.cache_hit && r.success(),
+        "a present pin must short-circuit the failing fetch"
+    );
     assert_eq!(r.outputs.get("artifact").copied(), Some(expected));
 }
 
@@ -93,7 +99,10 @@ fn fixed_output_requires_exactly_one_output() {
 fn fixed_output_enables_the_network_capability() {
     // The builder turns the capability on (the pin fences the impurity).
     let action = fetch_action("x", Digest::of(b"x"));
-    assert!(action.allows_network(), "fixed_output() must permit network");
+    assert!(
+        action.allows_network(),
+        "fixed_output() must permit network"
+    );
     // A plain action does not.
     let plain = Action::builder("plain", sh("true".into())).build();
     assert!(!plain.allows_network(), "network is off by default");

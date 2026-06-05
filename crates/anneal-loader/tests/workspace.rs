@@ -22,7 +22,7 @@ fn enumerates_all_packages_and_skips_ignored_dirs() {
     build_file(&root.join("app"), "app");
     build_file(&root.join("lib"), "lib");
     build_file(&root.join("crates/deep/nested"), "nested"); // arbitrarily deep
-    // BUILD files inside ignored directories must NOT be picked up.
+                                                            // BUILD files inside ignored directories must NOT be picked up.
     build_file(&root.join("target/junk"), "junk");
     build_file(&root.join(".git/hooks"), "hook");
     build_file(&root.join("node_modules/pkg"), "vendored");

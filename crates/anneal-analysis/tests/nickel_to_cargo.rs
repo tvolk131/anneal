@@ -28,7 +28,11 @@ fn fixture(greeting: &str) -> tempfile::TempDir {
     let app = tmp.path().join("app");
     std::fs::create_dir_all(app.join("thecrate/src")).unwrap();
 
-    std::fs::write(app.join("config.ncl"), format!("{{ greeting = \"{greeting}\", count = 3 }}\n")).unwrap();
+    std::fs::write(
+        app.join("config.ncl"),
+        format!("{{ greeting = \"{greeting}\", count = 3 }}\n"),
+    )
+    .unwrap();
     std::fs::write(
         app.join("Cargo.toml"),
         "[workspace]\nmembers = [\"thecrate\"]\nresolver = \"2\"\n",
@@ -84,7 +88,10 @@ fn cargo_crate_embeds_nickel_generated_json() {
 
     // The build action compiled — which can only happen if the generated JSON was
     // materialized into the tree (else include_str! is a compile error).
-    let build_idx = actions.iter().position(|a| a.name().starts_with("cargo_workspace build")).unwrap();
+    let build_idx = actions
+        .iter()
+        .position(|a| a.name().starts_with("cargo_workspace build"))
+        .unwrap();
     assert!(
         results[build_idx].success(),
         "build failed (exit {}) — generated JSON likely not materialized",
@@ -99,13 +106,22 @@ fn cargo_crate_embeds_nickel_generated_json() {
         .unwrap();
     let run = &results[run_idx];
     let output = String::from_utf8(
-        exec.cas().get(run.outputs.get("results.txt").unwrap()).unwrap().unwrap(),
+        exec.cas()
+            .get(run.outputs.get("results.txt").unwrap())
+            .unwrap()
+            .unwrap(),
     )
     .unwrap();
     let result = TestResult::from_libtest(label, cfg, &output);
-    assert_eq!(result.outcome, TestOutcome::Passed, "unit test output:\n{output}");
-    assert!(result.cases.iter().any(|c| c.name == "tests::embeds_generated_config"
-        && c.outcome == TestOutcome::Passed));
+    assert_eq!(
+        result.outcome,
+        TestOutcome::Passed,
+        "unit test output:\n{output}"
+    );
+    assert!(result
+        .cases
+        .iter()
+        .any(|c| c.name == "tests::embeds_generated_config" && c.outcome == TestOutcome::Passed));
 }
 
 #[test]
@@ -123,7 +139,9 @@ fn editing_nickel_source_rebuilds_the_consuming_workspace() {
     // Run just the producer + the build action and return the build's result.
     let run_build = |exec: &LocalExecutor| -> ActionResult {
         let graph = load_package(root, "app", &registry).unwrap();
-        let g = Analyzer::new(&graph, &registry, &cfg, root, exec.cas()).analyze(&label).unwrap();
+        let g = Analyzer::new(&graph, &registry, &cfg, root, exec.cas())
+            .analyze(&label)
+            .unwrap();
         let actions: Vec<Action> = g
             .actions()
             .filter(|a| {
@@ -140,11 +158,21 @@ fn editing_nickel_source_rebuilds_the_consuming_workspace() {
     };
 
     assert!(!run_build(&exec).cache_hit, "first build is a miss");
-    assert!(run_build(&exec).cache_hit, "identical re-run hits the build cache");
+    assert!(
+        run_build(&exec).cache_hit,
+        "identical re-run hits the build cache"
+    );
 
     // Edit the Nickel source → regenerated JSON propagates across the routing edge.
-    std::fs::write(root.join("app/config.ncl"), "{ greeting = \"hello there\", count = 4 }\n").unwrap();
+    std::fs::write(
+        root.join("app/config.ncl"),
+        "{ greeting = \"hello there\", count = 4 }\n",
+    )
+    .unwrap();
     let after = run_build(&exec);
-    assert!(!after.cache_hit, "editing the Nickel source must rebuild the consuming workspace");
+    assert!(
+        !after.cache_hit,
+        "editing the Nickel source must rebuild the consuming workspace"
+    );
     assert!(after.success());
 }

@@ -48,7 +48,10 @@ alias(name = "c", actual = "//pkg:combined")
 
     let genrule = graph.get(&Label::parse("//pkg:combined").unwrap()).unwrap();
     assert_eq!(genrule.kind, "genrule");
-    assert_eq!(genrule.attrs.string("cmd").unwrap(), "cat $(SRCS) > $(OUTS)");
+    assert_eq!(
+        genrule.attrs.string("cmd").unwrap(),
+        "cat $(SRCS) > $(OUTS)"
+    );
     assert_eq!(
         genrule.attrs.string_list("srcs").unwrap(),
         &["a.txt".to_owned(), "b.txt".to_owned()]
@@ -71,15 +74,24 @@ fn missing_required_attribute_is_located() {
 #[test]
 fn unknown_attribute_is_rejected() {
     let err = load(r#"filegroup(name = "x", srcs = ["a"], bogus = "y")"#).unwrap_err();
-    assert!(err.message().contains("bogus"), "message: {}", err.message());
+    assert!(
+        err.message().contains("bogus"),
+        "message: {}",
+        err.message()
+    );
 }
 
 #[test]
 fn wrong_type_is_rejected() {
     // `cmd` must be a string, not a list.
-    let err = load(r#"genrule(name = "x", outs = ["o"], cmd = ["not", "a", "string"])"#).unwrap_err();
+    let err =
+        load(r#"genrule(name = "x", outs = ["o"], cmd = ["not", "a", "string"])"#).unwrap_err();
     assert!(err.message().contains("cmd"), "message: {}", err.message());
-    assert!(err.message().contains("string"), "message: {}", err.message());
+    assert!(
+        err.message().contains("string"),
+        "message: {}",
+        err.message()
+    );
 }
 
 #[test]
@@ -91,7 +103,11 @@ filegroup(name = "dup", srcs = ["b"])
 "#,
     )
     .unwrap_err();
-    assert!(err.message().contains("duplicate"), "message: {}", err.message());
+    assert!(
+        err.message().contains("duplicate"),
+        "message: {}",
+        err.message()
+    );
 }
 
 #[test]
@@ -104,7 +120,11 @@ fn syntax_error_has_a_location() {
 fn invalid_label_in_attribute_is_rejected() {
     // `actual` is a label-typed attribute; a non-label string must fail.
     let err = load(r#"alias(name = "a", actual = "not a label")"#).unwrap_err();
-    assert!(err.message().contains("actual"), "message: {}", err.message());
+    assert!(
+        err.message().contains("actual"),
+        "message: {}",
+        err.message()
+    );
 }
 
 /// Phase 2 exit criterion, end to end.
@@ -136,7 +156,9 @@ genrule(
     // 1. Load the real BUILD file from disk.
     let registry = builtin_rules();
     let graph = load_package(root, "greeter", &registry).unwrap();
-    let decl = graph.get(&Label::parse("//greeter:greeting").unwrap()).unwrap();
+    let decl = graph
+        .get(&Label::parse("//greeter:greeting").unwrap())
+        .unwrap();
 
     // 2. Analyze the loaded target through its rule.
     let exec = LocalExecutor::new(root.join(".anneal")).unwrap();

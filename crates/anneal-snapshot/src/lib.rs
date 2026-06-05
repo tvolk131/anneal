@@ -175,7 +175,11 @@ fn collect(root: &Path, current: &Path, cas: &Cas, out: &mut Vec<Entry>) -> io::
 }
 
 fn mtime_parts(meta: &fs::Metadata) -> (u64, u32) {
-    match meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()) {
+    match meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+    {
         Some(d) => (d.as_secs(), d.subsec_nanos()),
         None => (0, 0),
     }
@@ -183,7 +187,10 @@ fn mtime_parts(meta: &fs::Metadata) -> (u64, u32) {
 
 fn set_mtime(path: &Path, secs: u64, nanos: u32) -> io::Result<()> {
     let when = UNIX_EPOCH + Duration::new(secs, nanos);
-    OpenOptions::new().write(true).open(path)?.set_modified(when)
+    OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .set_modified(when)
 }
 
 // --- Manifest encoding (length-prefixed binary) ---

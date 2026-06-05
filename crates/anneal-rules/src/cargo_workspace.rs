@@ -91,7 +91,11 @@ impl Rule for CargoWorkspace {
         // hash-pin-fetch each crate and assemble a vendor tree in-sandbox. Decided first
         // because it changes which directories count as build inputs.
         let fetch_deps = fetch_plan(ctx)?;
-        let ignored = if fetch_deps.is_some() { FETCH_IGNORED_DIRS } else { IGNORED_DIRS };
+        let ignored = if fetch_deps.is_some() {
+            FETCH_IGNORED_DIRS
+        } else {
+            IGNORED_DIRS
+        };
         let sources = ctx.source_tree(Path::new("."), ignored)?;
         if sources.is_empty() {
             return Err(RuleError::Message(
@@ -151,11 +155,19 @@ impl Rule for CargoWorkspace {
         }
 
         // --- coarse build action ---
-        let build_cmd = cargo_command(prelude.as_deref(), cargo_args("build", None, None, release_flag));
+        let build_cmd = cargo_command(
+            prelude.as_deref(),
+            cargo_args("build", None, None, release_flag),
+        );
         let mut build = with_crates(
             with_data(
                 with_sources(
-                    cargo_builder(format!("cargo_workspace build {label}"), build_cmd, &path_env, &rustflags),
+                    cargo_builder(
+                        format!("cargo_workspace build {label}"),
+                        build_cmd,
+                        &path_env,
+                        &rustflags,
+                    ),
                     &sources,
                 ),
                 &data,
@@ -186,7 +198,10 @@ impl Rule for CargoWorkspace {
                         with_sources(
                             cargo_builder(
                                 compile_id.clone(),
-                                shell_cmd(prelude.as_deref(), &unit_compile_body(&c.name, release_flag)),
+                                shell_cmd(
+                                    prelude.as_deref(),
+                                    &unit_compile_body(&c.name, release_flag),
+                                ),
                                 &path_env,
                                 &rustflags,
                             ),
@@ -252,7 +267,12 @@ impl Rule for CargoWorkspace {
                                 format!("cargo_workspace test {label} {} integration", c.name),
                                 cargo_command(
                                     prelude.as_deref(),
-                                    cargo_args("test", Some(&c.name), Some("--tests"), release_flag),
+                                    cargo_args(
+                                        "test",
+                                        Some(&c.name),
+                                        Some("--tests"),
+                                        release_flag,
+                                    ),
                                 ),
                                 &path_env,
                                 &rustflags,
@@ -299,7 +319,12 @@ impl CrateInfo {
 /// Build a base `cargo` action builder with the shared environment (toolchain on
 /// PATH, deterministic settings, and the axis-derived `RUSTFLAGS`). `command` is the
 /// full argv.
-fn cargo_builder(name: String, command: Vec<String>, path_env: &str, rustflags: &str) -> ActionBuilder {
+fn cargo_builder(
+    name: String,
+    command: Vec<String>,
+    path_env: &str,
+    rustflags: &str,
+) -> ActionBuilder {
     let mut builder = Action::builder(name, command)
         .env("PATH", path_env)
         .env("CARGO_TERM_COLOR", "never")
@@ -368,7 +393,10 @@ fn with_data(mut builder: ActionBuilder, data: &[Artifact]) -> ActionBuilder {
             ArtifactSource::Source(digest) => {
                 builder = builder.input(name, artifact.path.clone(), *digest);
             }
-            ArtifactSource::Output { action, name: output } => {
+            ArtifactSource::Output {
+                action,
+                name: output,
+            } => {
                 builder = builder.input_from_output(name, artifact.path.clone(), action, output);
             }
         }
@@ -377,7 +405,12 @@ fn with_data(mut builder: ActionBuilder, data: &[Artifact]) -> ActionBuilder {
 }
 
 /// `cargo <sub> [--package <pkg>] [<type_flag>] --offline --locked [--release] [--workspace]`.
-fn cargo_args(sub: &str, pkg: Option<&str>, type_flag: Option<&str>, release_flag: &str) -> Vec<String> {
+fn cargo_args(
+    sub: &str,
+    pkg: Option<&str>,
+    type_flag: Option<&str>,
+    release_flag: &str,
+) -> Vec<String> {
     let mut s = format!("cargo {sub} --offline --locked");
     match pkg {
         Some(p) => s.push_str(&format!(" --package {p}")),
@@ -450,7 +483,9 @@ impl LockDep {
 /// Errors on a dependency this increment can't fetch (git, `path`+registry, a non-
 /// crates.io registry, or a v1/v2 lockfile lacking inline checksums) — vendor those.
 fn fetch_plan(ctx: &RuleContext) -> Result<Option<Vec<LockDep>>, RuleError> {
-    if ctx.package_file_exists(Path::new("vendor")) || !ctx.package_file_exists(Path::new("Cargo.lock")) {
+    if ctx.package_file_exists(Path::new("vendor"))
+        || !ctx.package_file_exists(Path::new("Cargo.lock"))
+    {
         return Ok(None);
     }
     let lock: toml::Value = ctx
@@ -470,19 +505,25 @@ fn fetch_plan(ctx: &RuleContext) -> Result<Option<Vec<LockDep>>, RuleError> {
             None => continue,
         };
         let name = pkg.get("name").and_then(|n| n.as_str()).unwrap_or_default();
-        let version = pkg.get("version").and_then(|v| v.as_str()).unwrap_or_default();
+        let version = pkg
+            .get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         if source != CRATES_IO_SOURCE {
             return Err(RuleError::Message(format!(
                 "cargo_workspace fetch mode: unsupported dependency source {source:?} for \
                  {name} {version}; commit a vendor/ directory for this workspace instead"
             )));
         }
-        let checksum = pkg.get("checksum").and_then(|c| c.as_str()).ok_or_else(|| {
-            RuleError::Message(format!(
-                "cargo_workspace fetch mode: {name} {version} has no inline checksum in \
+        let checksum = pkg
+            .get("checksum")
+            .and_then(|c| c.as_str())
+            .ok_or_else(|| {
+                RuleError::Message(format!(
+                    "cargo_workspace fetch mode: {name} {version} has no inline checksum in \
                  Cargo.lock (regenerate with a current cargo, or vendor the workspace)"
-            ))
-        })?;
+                ))
+            })?;
         deps.push(LockDep {
             name: name.to_owned(),
             version: version.to_owned(),
@@ -498,7 +539,10 @@ fn fetch_plan(ctx: &RuleContext) -> Result<Option<Vec<LockDep>>, RuleError> {
 /// closed). The graph-unique name lets the compiling actions reference it.
 fn fetch_action(dep: &LockDep) -> Result<Action, RuleError> {
     let expected = Digest::from_hex(&dep.checksum).map_err(|e| {
-        RuleError::Message(format!("{} {}: invalid checksum hex in Cargo.lock: {e}", dep.name, dep.version))
+        RuleError::Message(format!(
+            "{} {}: invalid checksum hex in Cargo.lock: {e}",
+            dep.name, dep.version
+        ))
     })?;
     let base = dep.base();
     let url = format!("https://static.crates.io/crates/{}/{base}.crate", dep.name);
@@ -619,16 +663,28 @@ fn workspace_crates(ctx: &RuleContext) -> Result<Vec<CrateInfo>, RuleError> {
     let exclude: Vec<PathBuf> = workspace
         .and_then(|w| w.get("exclude"))
         .and_then(|e| e.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(PathBuf::from).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(PathBuf::from)
+                .collect()
+        })
         .unwrap_or_default();
 
     let mut dirs: Vec<PathBuf> = vec![PathBuf::new()]; // the root package, if any
-    if let Some(members) = workspace.and_then(|w| w.get("members")).and_then(|m| m.as_array()) {
+    if let Some(members) = workspace
+        .and_then(|w| w.get("members"))
+        .and_then(|m| m.as_array())
+    {
         for member in members.iter().filter_map(|m| m.as_str()) {
             // Expand a trailing single-level glob (`crates/*`, or a bare `*`) by listing
             // the immediate subdirectories that contain a `Cargo.toml`. Multi-level globs
             // (`**`, `a/*/b`) are not yet supported and are skipped.
-            let glob_prefix = if member == "*" { Some("") } else { member.strip_suffix("/*") };
+            let glob_prefix = if member == "*" {
+                Some("")
+            } else {
+                member.strip_suffix("/*")
+            };
             match glob_prefix {
                 Some(prefix) => {
                     for entry in ctx.list_dir(Path::new(prefix))? {

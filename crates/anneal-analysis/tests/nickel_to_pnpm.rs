@@ -80,7 +80,11 @@ fn idx(actions: &[Action], needle: &str) -> usize {
 }
 
 /// Load → analyze → execute the whole graph; return the actions and their aligned results.
-fn run(exec: &LocalExecutor, root: &std::path::Path, cfg: &Configuration) -> (Vec<Action>, Vec<ActionResult>) {
+fn run(
+    exec: &LocalExecutor,
+    root: &std::path::Path,
+    cfg: &Configuration,
+) -> (Vec<Action>, Vec<ActionResult>) {
     let registry = builtin_rules();
     let label = Label::parse("//app:app").unwrap();
     let graph = load_package(root, "app", &registry).unwrap();
@@ -96,7 +100,11 @@ fn results_txt(exec: &LocalExecutor, actions: &[Action], results: &[ActionResult
     let test = &results[idx(actions, "pnpm_workspace test")];
     String::from_utf8(
         exec.cas()
-            .get(test.outputs.get("results.txt").expect("results.txt captured"))
+            .get(
+                test.outputs
+                    .get("results.txt")
+                    .expect("results.txt captured"),
+            )
             .unwrap()
             .unwrap(),
     )
@@ -113,14 +121,26 @@ fn pnpm_test_reads_the_nickel_generated_json() {
     let (actions, results) = run(&exec, root, &cfg);
 
     // The Nickel producer is a dependency of the workspace, analyzed (and run) before it.
-    assert!(results[idx(&actions, "nickel_eval")].success(), "nickel failed");
-    assert!(results[idx(&actions, "pnpm_workspace install")].success(), "install failed");
+    assert!(
+        results[idx(&actions, "nickel_eval")].success(),
+        "nickel failed"
+    );
+    assert!(
+        results[idx(&actions, "pnpm_workspace install")].success(),
+        "install failed"
+    );
 
     let out = results_txt(&exec, &actions, &results);
     // Routing worked: the script read the materialized JSON by relative path, and the
     // assertion passed (exit 0 ⇒ the value was present and well-typed).
-    assert!(out.contains("GREETING=hello"), "routed value not seen; results:\n{out}");
-    assert!(out.contains("ANNEAL_TEST_EXIT=0"), "test should have passed; results:\n{out}");
+    assert!(
+        out.contains("GREETING=hello"),
+        "routed value not seen; results:\n{out}"
+    );
+    assert!(
+        out.contains("ANNEAL_TEST_EXIT=0"),
+        "test should have passed; results:\n{out}"
+    );
 }
 
 #[test]
@@ -132,20 +152,35 @@ fn composing_caches_across_the_boundary() {
 
     // Cold build.
     let (a1, r1) = run(&exec, root, &cfg);
-    assert!(!r1[idx(&a1, "nickel_eval")].cache_hit, "first nickel run is a miss");
+    assert!(
+        !r1[idx(&a1, "nickel_eval")].cache_hit,
+        "first nickel run is a miss"
+    );
     assert!(results_txt(&exec, &a1, &r1).contains("GREETING=hello"));
 
     // Edit only the consumer is unnecessary to show the cached direction — an identical
     // re-run already proves the generator is cached when nothing it depends on changed.
     let (a2, r2) = run(&exec, root, &cfg);
-    assert!(r2[idx(&a2, "nickel_eval")].cache_hit, "unchanged re-run: generator stays cached");
+    assert!(
+        r2[idx(&a2, "nickel_eval")].cache_hit,
+        "unchanged re-run: generator stays cached"
+    );
 
     // Edit the Nickel source → the new value must propagate through the routing edge.
     write_config(&root.join("app"), "howdy");
     let (a3, r3) = run(&exec, root, &cfg);
-    assert!(!r3[idx(&a3, "nickel_eval")].cache_hit, "editing .ncl rebuilds the generator");
+    assert!(
+        !r3[idx(&a3, "nickel_eval")].cache_hit,
+        "editing .ncl rebuilds the generator"
+    );
     // install is config-agnostic under plain-path: a Nickel edit does not reinstall.
-    assert!(r3[idx(&a3, "pnpm_workspace install")].cache_hit, "config edit must not reinstall");
+    assert!(
+        r3[idx(&a3, "pnpm_workspace install")].cache_hit,
+        "config edit must not reinstall"
+    );
     let out = results_txt(&exec, &a3, &r3);
-    assert!(out.contains("GREETING=howdy"), "new Nickel value did not reach the consumer:\n{out}");
+    assert!(
+        out.contains("GREETING=howdy"),
+        "new Nickel value did not reach the consumer:\n{out}"
+    );
 }

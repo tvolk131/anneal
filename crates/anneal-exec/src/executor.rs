@@ -249,22 +249,30 @@ fn build_edges(actions: &[Action]) -> Result<Edges, ExecError> {
 
     let mut deps: Vec<Vec<usize>> = vec![Vec::new(); actions.len()];
     let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); actions.len()];
-    let add_edge = |from: usize, to: usize, deps: &mut Vec<Vec<usize>>, dependents: &mut Vec<Vec<usize>>| {
-        // `from` depends on `to`; dedup so a multi-output producer is listed once.
-        if from != to && !deps[from].contains(&to) {
-            deps[from].push(to);
-            dependents[to].push(from);
-        }
-    };
+    let add_edge =
+        |from: usize, to: usize, deps: &mut Vec<Vec<usize>>, dependents: &mut Vec<Vec<usize>>| {
+            // `from` depends on `to`; dedup so a multi-output producer is listed once.
+            if from != to && !deps[from].contains(&to) {
+                deps[from].push(to);
+                dependents[to].push(from);
+            }
+        };
 
     for (i, a) in actions.iter().enumerate() {
         // Data edges.
         for input in a.inputs.values() {
-            if let InputSource::Output { action: producer, name } = &input.source {
-                let &p = by_name.get(producer.as_str()).ok_or_else(|| ExecError::UnresolvedInput {
-                    action: producer.clone(),
-                    output: name.clone(),
-                })?;
+            if let InputSource::Output {
+                action: producer,
+                name,
+            } = &input.source
+            {
+                let &p =
+                    by_name
+                        .get(producer.as_str())
+                        .ok_or_else(|| ExecError::UnresolvedInput {
+                            action: producer.clone(),
+                            output: name.clone(),
+                        })?;
                 add_edge(i, p, &mut deps, &mut dependents);
             }
         }
@@ -377,7 +385,8 @@ fn complete(
         }
         Ok(result) => {
             for (output_name, digest) in &result.outputs {
-                st.produced.insert((name.to_owned(), output_name.clone()), *digest);
+                st.produced
+                    .insert((name.to_owned(), output_name.clone()), *digest);
             }
             if st.failed.is_none() {
                 for &dep in &edges.dependents[idx] {
@@ -396,7 +405,9 @@ fn complete(
 
 /// The machine's available parallelism, or 1 if it cannot be determined.
 fn default_parallelism() -> usize {
-    std::thread::available_parallelism().map(NonZeroUsize::get).unwrap_or(1)
+    std::thread::available_parallelism()
+        .map(NonZeroUsize::get)
+        .unwrap_or(1)
 }
 
 /// Return a copy of `action` with every [`InputSource::Output`] replaced by the
@@ -440,7 +451,11 @@ impl LocalExecutor {
     /// moved artifact) fails *closed*. Verification makes the result trivially §1.4
     /// correctness-neutral — the hash is the sole arbiter, so a bad network can fail the
     /// build but never corrupt it.
-    fn run_fixed_output(&self, action: &Action, expected: Digest) -> Result<ActionResult, ExecError> {
+    fn run_fixed_output(
+        &self,
+        action: &Action,
+        expected: Digest,
+    ) -> Result<ActionResult, ExecError> {
         // The pin is a single digest, so a FOD pins exactly one artifact.
         if action.outputs.len() != 1 {
             return Err(ExecError::FixedOutputArity {
@@ -583,8 +598,12 @@ impl LocalExecutor {
         // Include the pid so two `anneal` processes never collide on a sandbox path. (The
         // coarse workspace lock already serializes mutating commands; this is cheap
         // defense-in-depth, and what makes relaxing that lock safe later.)
-        self.sandboxes
-            .join(format!("{}-{}-{}", &key.to_hex()[..16], std::process::id(), nonce))
+        self.sandboxes.join(format!(
+            "{}-{}-{}",
+            &key.to_hex()[..16],
+            std::process::id(),
+            nonce
+        ))
     }
 
     /// The per-snapshot-key serialization lock for a warm dir, created on first use.
@@ -659,7 +678,8 @@ impl LocalExecutor {
             t_materialize = m.elapsed();
             let r = Instant::now();
             for path in &action.snapshot_paths {
-                self.snapshots.restore(&self.cas, &skey, &prepared.cwd.join(path))?;
+                self.snapshots
+                    .restore(&self.cas, &skey, &prepared.cwd.join(path))?;
             }
             t_restore = r.elapsed();
             prepared
@@ -692,7 +712,8 @@ impl LocalExecutor {
             // unconditional, so warm reuse works regardless.
             if save {
                 for path in &action.snapshot_paths {
-                    self.snapshots.save(&self.cas, &skey, &prepared.cwd.join(path))?;
+                    self.snapshots
+                        .save(&self.cas, &skey, &prepared.cwd.join(path))?;
                 }
             }
             t_save = s.elapsed();
@@ -717,7 +738,11 @@ impl LocalExecutor {
             });
         }
 
-        Ok(ActionResult { exit_code, outputs, cache_hit: false })
+        Ok(ActionResult {
+            exit_code,
+            outputs,
+            cache_hit: false,
+        })
     }
 
     /// Run an action **outside the action cache**, in a caller-named sandbox, with
@@ -743,7 +768,11 @@ impl LocalExecutor {
     /// the backstop for the mtime-based under-rebuild hazard (`docs/sandboxing.md` §5.5).
     /// The snapshot is not saved (`save = false`); the commit manifest is still written, so
     /// a following reuse run sees the prior state.
-    pub fn run_warm_uncached(&self, action: &Action, fresh: bool) -> Result<ActionResult, ExecError> {
+    pub fn run_warm_uncached(
+        &self,
+        action: &Action,
+        fresh: bool,
+    ) -> Result<ActionResult, ExecError> {
         guard_resolved(action)?;
         let skey = action
             .snapshot_key
@@ -891,7 +920,10 @@ impl fmt::Display for ExecError {
                 write!(f, "action did not produce declared output {name:?}")
             }
             ExecError::UnresolvedInput { action, output } => {
-                write!(f, "input references unproduced output {output:?} of action {action:?}")
+                write!(
+                    f,
+                    "input references unproduced output {output:?} of action {action:?}"
+                )
             }
             ExecError::Timeout { timeout_ms } => {
                 write!(f, "action exceeded its {timeout_ms}ms timeout")

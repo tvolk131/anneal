@@ -73,10 +73,13 @@ impl<'a> RuleContext<'a> {
     /// on the rule's behalf — the rule never touches the filesystem directly.
     pub fn source_artifact(&self, rel: &Path) -> Result<Artifact, RuleError> {
         let abs = self.package_dir.join(rel);
-        let digest = self.cas.ingest_file(&abs).map_err(|error| RuleError::Source {
-            path: rel.to_path_buf(),
-            error,
-        })?;
+        let digest = self
+            .cas
+            .ingest_file(&abs)
+            .map_err(|error| RuleError::Source {
+                path: rel.to_path_buf(),
+                error,
+            })?;
         Ok(Artifact {
             path: rel.to_path_buf(),
             source: ArtifactSource::Source(digest),
@@ -109,11 +112,19 @@ impl<'a> RuleContext<'a> {
         let entries = match std::fs::read_dir(&base) {
             Ok(entries) => entries,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(RuleError::Source { path: rel.to_path_buf(), error }),
+            Err(error) => {
+                return Err(RuleError::Source {
+                    path: rel.to_path_buf(),
+                    error,
+                })
+            }
         };
         let mut out = Vec::new();
         for entry in entries {
-            let entry = entry.map_err(|error| RuleError::Source { path: rel.to_path_buf(), error })?;
+            let entry = entry.map_err(|error| RuleError::Source {
+                path: rel.to_path_buf(),
+                error,
+            })?;
             out.push(rel.join(entry.file_name()));
         }
         out.sort();
@@ -155,7 +166,10 @@ impl<'a> RuleContext<'a> {
             let file_type = entry.file_type().map_err(|e| source_err(&path, e))?;
             if file_type.is_dir() {
                 let name = entry.file_name();
-                if ignore_dirs.iter().any(|ig| std::ffi::OsStr::new(ig) == name) {
+                if ignore_dirs
+                    .iter()
+                    .any(|ig| std::ffi::OsStr::new(ig) == name)
+                {
                     continue;
                 }
                 self.walk_tree(&path, ignore_dirs, out)?;
@@ -164,7 +178,10 @@ impl<'a> RuleContext<'a> {
                     .strip_prefix(self.package_dir)
                     .unwrap_or(&path)
                     .to_path_buf();
-                let digest = self.cas.ingest_file(&path).map_err(|e| source_err(&rel, e))?;
+                let digest = self
+                    .cas
+                    .ingest_file(&path)
+                    .map_err(|e| source_err(&rel, e))?;
                 out.push(Artifact {
                     path: rel,
                     source: ArtifactSource::Source(digest),

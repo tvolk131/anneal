@@ -37,7 +37,12 @@ impl WorkspaceLock {
     pub fn acquire(store_root: &Path) -> io::Result<Self> {
         fs::create_dir_all(store_root)?;
         let path = store_root.join("lock");
-        let file = OpenOptions::new().create(true).read(true).write(true).truncate(false).open(&path)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)?;
         let fd = file.as_raw_fd();
 
         // SAFETY: `fd` is a valid open descriptor owned by `file` for the call's duration.
@@ -47,7 +52,10 @@ impl WorkspaceLock {
                 return Err(err);
             }
             // Contended: report who holds it (best-effort) and block.
-            match fs::read_to_string(&path).ok().filter(|s| !s.trim().is_empty()) {
+            match fs::read_to_string(&path)
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+            {
                 Some(holder) => eprintln!(
                     "Blocking: waiting for another anneal process (PID {}) on {}",
                     holder.trim(),
@@ -83,10 +91,20 @@ mod tests {
         // A second descriptor to the same lock file: a non-blocking exclusive flock must
         // be denied while we hold the lock (flock treats independent descriptors as
         // independent, so this models another process).
-        let other = OpenOptions::new().read(true).write(true).open(store.join("lock")).unwrap();
+        let other = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(store.join("lock"))
+            .unwrap();
         let denied = unsafe { libc::flock(other.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        assert_ne!(denied, 0, "a second exclusive lock must be denied while held");
-        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EWOULDBLOCK));
+        assert_ne!(
+            denied, 0,
+            "a second exclusive lock must be denied while held"
+        );
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::EWOULDBLOCK)
+        );
 
         drop(lock);
 

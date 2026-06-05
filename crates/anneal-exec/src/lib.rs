@@ -38,7 +38,9 @@ mod warm;
 pub use action::{Action, ActionBuilder, CachePolicy, ExecutionMode, Input, InputSource};
 pub use cache::action_digest;
 pub use executor::{ActionResult, ExecError, Executor, LocalExecutor, PhaseTimings};
-pub use verify::{prime_snapshot, verify_correctness_neutral, verify_warm_neutral, NeutralityReport};
+pub use verify::{
+    prime_snapshot, verify_correctness_neutral, verify_warm_neutral, NeutralityReport,
+};
 
 /// Participates in every cache key (§8.1). Bump when sandbox semantics change so that
 /// a sandbox behavior change invalidates previously-cached results.

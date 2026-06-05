@@ -81,7 +81,11 @@ pub fn affected(workspace_root: &Path, graph: &TargetGraph, changed: &[PathBuf])
     if !unowned.is_empty() {
         let mut targets: Vec<Label> = graph.targets().map(|t| t.label.clone()).collect();
         targets.sort();
-        return Affected { targets, workspace_wide: true, unowned };
+        return Affected {
+            targets,
+            workspace_wide: true,
+            unowned,
+        };
     }
 
     // 3. Seeds: every target in a changed package (package granularity).
@@ -141,7 +145,9 @@ pub fn shortest_path(
     queue.push_back(from.clone());
 
     while let Some(node) = queue.pop_front() {
-        let Some(decl) = graph.get(&node) else { continue };
+        let Some(decl) = graph.get(&node) else {
+            continue;
+        };
         let mut deps: Vec<&Label> = decl.deps.iter().collect();
         deps.sort();
         for dep in deps {
@@ -207,7 +213,10 @@ mod tests {
         assert_eq!(own(root, "app/src/lib.rs").as_deref(), Some("app"));
         // The nested package shadows its parent.
         assert_eq!(own(root, "app/sub/mod.rs").as_deref(), Some("app/sub"));
-        assert_eq!(own(root, "crates/lib/src/x.rs").as_deref(), Some("crates/lib"));
+        assert_eq!(
+            own(root, "crates/lib/src/x.rs").as_deref(),
+            Some("crates/lib")
+        );
     }
 
     #[test]
@@ -222,7 +231,10 @@ mod tests {
     fn deleted_file_path_still_resolves() {
         let ws = workspace();
         // The file does not exist; ownership is by path, so `app` still owns it.
-        assert_eq!(own(ws.path(), "app/was/here/gone.rs").as_deref(), Some("app"));
+        assert_eq!(
+            own(ws.path(), "app/was/here/gone.rs").as_deref(),
+            Some("app")
+        );
     }
 
     #[test]
@@ -252,10 +264,16 @@ mod affected_tests {
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("BUILD"), build).unwrap();
         };
-        write("base", "genrule(name = \"base\", outs = [\"b\"], cmd = \"echo > $(OUTS)\")\n");
+        write(
+            "base",
+            "genrule(name = \"base\", outs = [\"b\"], cmd = \"echo > $(OUTS)\")\n",
+        );
         write("lib", "genrule(name = \"lib\", deps = [\"//base:base\"], outs = [\"l\"], cmd = \"echo > $(OUTS)\")\n");
         write("app", "genrule(name = \"app\", deps = [\"//lib:lib\"], outs = [\"a\"], cmd = \"echo > $(OUTS)\")\n");
-        write("other", "genrule(name = \"other\", outs = [\"o\"], cmd = \"echo > $(OUTS)\")\n");
+        write(
+            "other",
+            "genrule(name = \"other\", outs = [\"o\"], cmd = \"echo > $(OUTS)\")\n",
+        );
         tmp
     }
 
@@ -296,7 +314,10 @@ mod affected_tests {
         let graph = load_workspace(tmp.path(), &builtin_rules()).unwrap();
 
         let result = affected(tmp.path(), &graph, &[PathBuf::from("flake.nix")]);
-        assert!(result.workspace_wide, "an unowned change forces workspace-wide");
+        assert!(
+            result.workspace_wide,
+            "an unowned change forces workspace-wide"
+        );
         assert_eq!(result.unowned, vec![PathBuf::from("flake.nix")]);
         // Every target is affected.
         assert_eq!(result.targets.len(), 4);
@@ -325,20 +346,33 @@ mod why_tests {
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("BUILD"), build).unwrap();
         };
-        write("base", "genrule(name = \"base\", outs = [\"b\"], cmd = \"echo > $(OUTS)\")\n");
+        write(
+            "base",
+            "genrule(name = \"base\", outs = [\"b\"], cmd = \"echo > $(OUTS)\")\n",
+        );
         write("lib", "genrule(name = \"lib\", deps = [\"//base:base\"], outs = [\"l\"], cmd = \"echo > $(OUTS)\")\n");
         write("app", "genrule(name = \"app\", deps = [\"//lib:lib\"], outs = [\"a\"], cmd = \"echo > $(OUTS)\")\n");
-        write("other", "genrule(name = \"other\", outs = [\"o\"], cmd = \"echo > $(OUTS)\")\n");
+        write(
+            "other",
+            "genrule(name = \"other\", outs = [\"o\"], cmd = \"echo > $(OUTS)\")\n",
+        );
         let graph = load_workspace(tmp.path(), &builtin_rules()).unwrap();
 
         assert_eq!(
             path_str(&graph, "//app:app", "//base:base"),
-            Some(vec!["//app:app".into(), "//lib:lib".into(), "//base:base".into()]),
+            Some(vec![
+                "//app:app".into(),
+                "//lib:lib".into(),
+                "//base:base".into()
+            ]),
         );
         // No path to an independent target.
         assert_eq!(path_str(&graph, "//app:app", "//other:other"), None);
         // A target trivially reaches itself.
-        assert_eq!(path_str(&graph, "//app:app", "//app:app"), Some(vec!["//app:app".into()]));
+        assert_eq!(
+            path_str(&graph, "//app:app", "//app:app"),
+            Some(vec!["//app:app".into()])
+        );
     }
 
     #[test]
@@ -352,7 +386,10 @@ mod why_tests {
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("BUILD"), build).unwrap();
         };
-        write("base", "genrule(name = \"base\", outs = [\"b\"], cmd = \"echo > $(OUTS)\")\n");
+        write(
+            "base",
+            "genrule(name = \"base\", outs = [\"b\"], cmd = \"echo > $(OUTS)\")\n",
+        );
         write("ma", "genrule(name = \"m\", deps = [\"//base:base\"], outs = [\"x\"], cmd = \"echo > $(OUTS)\")\n");
         write("mz", "genrule(name = \"m\", deps = [\"//base:base\"], outs = [\"x\"], cmd = \"echo > $(OUTS)\")\n");
         // Declare deps in NON-sorted order (mz before ma) to prove the result is
@@ -362,7 +399,11 @@ mod why_tests {
 
         assert_eq!(
             path_str(&graph, "//app:app", "//base:base"),
-            Some(vec!["//app:app".into(), "//ma:m".into(), "//base:base".into()]),
+            Some(vec![
+                "//app:app".into(),
+                "//ma:m".into(),
+                "//base:base".into()
+            ]),
             "sorted-label tie-break picks the `ma` route despite `mz` being declared first",
         );
     }

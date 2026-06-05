@@ -236,7 +236,9 @@ mod tests {
     fn command_and_env_change_the_key() {
         let base = Action::builder("a", ["/bin/echo", "x"]).build();
         let diff_cmd = Action::builder("a", ["/bin/echo", "y"]).build();
-        let diff_env = Action::builder("a", ["/bin/echo", "x"]).env("K", "V").build();
+        let diff_env = Action::builder("a", ["/bin/echo", "x"])
+            .env("K", "V")
+            .build();
         assert_ne!(action_digest(&base), action_digest(&diff_cmd));
         assert_ne!(action_digest(&base), action_digest(&diff_env));
     }
@@ -269,7 +271,10 @@ mod tests {
         let mut outputs = BTreeMap::new();
         outputs.insert("bin".to_owned(), Digest::of(b"binary"));
         outputs.insert("log".to_owned(), Digest::of(b"log"));
-        let stored = StoredResult { exit_code: 0, outputs };
+        let stored = StoredResult {
+            exit_code: 0,
+            outputs,
+        };
 
         assert_eq!(cache.lookup(&key).unwrap(), None);
         cache.insert(&key, &stored).unwrap();

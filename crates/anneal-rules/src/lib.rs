@@ -34,9 +34,9 @@ mod schema;
 
 pub use attrs::{AttrError, AttrValue, Attrs};
 pub use cargo_workspace::CargoWorkspace;
+pub use context::{ResolvedDep, RuleContext};
 pub use nickel_eval::NickelEval;
 pub use pnpm_workspace::PnpmWorkspace;
-pub use context::{ResolvedDep, RuleContext};
 pub use providers::{Artifact, ArtifactSource, FileSet, ProviderSet};
 pub use rule::{Analysis, Rule, RuleError};
 pub use rules::{builtin_rules, Alias, FileGroup, GenRule, RuleRegistry};

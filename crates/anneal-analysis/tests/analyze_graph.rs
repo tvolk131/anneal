@@ -94,7 +94,9 @@ genrule(
     let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
 
     let analyzer = Analyzer::new(&graph, &registry, &config, root, exec.cas());
-    let g = analyzer.analyze(&Label::parse("//pkg:second").unwrap()).unwrap();
+    let g = analyzer
+        .analyze(&Label::parse("//pkg:second").unwrap())
+        .unwrap();
 
     // Both genrules contribute an action; `first` precedes `second`.
     assert_eq!(
@@ -135,11 +137,18 @@ alias(name = "data_alias", actual = "//pkg:data")
     let cas = anneal_cas::Cas::open(root.join("cas")).unwrap();
 
     let analyzer = Analyzer::new(&graph, &registry, &config, root, &cas);
-    let g = analyzer.analyze(&Label::parse("//pkg:data_alias").unwrap()).unwrap();
+    let g = analyzer
+        .analyze(&Label::parse("//pkg:data_alias").unwrap())
+        .unwrap();
 
-    let alias_providers = g.providers(&Label::parse("//pkg:data_alias").unwrap()).unwrap();
+    let alias_providers = g
+        .providers(&Label::parse("//pkg:data_alias").unwrap())
+        .unwrap();
     let data_providers = g.providers(&Label::parse("//pkg:data").unwrap()).unwrap();
-    assert_eq!(alias_providers, data_providers, "alias forwards data's providers");
+    assert_eq!(
+        alias_providers, data_providers,
+        "alias forwards data's providers"
+    );
     assert_eq!(action_count_for_files(alias_providers), 1);
 }
 
@@ -167,7 +176,9 @@ genrule(name = "right", deps = ["//pkg:data"], outs = ["r.txt"], cmd = "cat $(SR
     let analyzer = Analyzer::new(&graph, &registry, &config, root, &cas);
 
     // Analyze "left"; the filegroup appears exactly once in the order.
-    let g = analyzer.analyze(&Label::parse("//pkg:left").unwrap()).unwrap();
+    let g = analyzer
+        .analyze(&Label::parse("//pkg:left").unwrap())
+        .unwrap();
     let data = Label::parse("//pkg:data").unwrap();
     assert_eq!(g.order().iter().filter(|l| **l == data).count(), 1);
 }
@@ -185,7 +196,9 @@ fn missing_dependency_is_reported() {
     let cas = anneal_cas::Cas::open(root.join("cas")).unwrap();
     let analyzer = Analyzer::new(&graph, &registry, &config, root, &cas);
 
-    let err = analyzer.analyze(&Label::parse("//pkg:g").unwrap()).unwrap_err();
+    let err = analyzer
+        .analyze(&Label::parse("//pkg:g").unwrap())
+        .unwrap_err();
     assert!(matches!(err, AnalysisError::MissingTarget(l) if l.target() == "nope"));
 }
 
@@ -206,6 +219,11 @@ alias(name = "b", actual = "//pkg:a")
     let cas = anneal_cas::Cas::open(root.join("cas")).unwrap();
     let analyzer = Analyzer::new(&graph, &registry, &config, root, &cas);
 
-    let err = analyzer.analyze(&Label::parse("//pkg:a").unwrap()).unwrap_err();
-    assert!(matches!(err, AnalysisError::Cycle(_)), "expected a cycle, got {err}");
+    let err = analyzer
+        .analyze(&Label::parse("//pkg:a").unwrap())
+        .unwrap_err();
+    assert!(
+        matches!(err, AnalysisError::Cycle(_)),
+        "expected a cycle, got {err}"
+    );
 }

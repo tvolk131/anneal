@@ -42,7 +42,10 @@ fn fixture() -> tempfile::TempDir {
         .status()
         .expect("pnpm available");
     assert!(status.success(), "pnpm install --lockfile-only failed");
-    assert!(app.join("pnpm-lock.yaml").exists(), "lockfile not generated");
+    assert!(
+        app.join("pnpm-lock.yaml").exists(),
+        "lockfile not generated"
+    );
     tmp
 }
 
@@ -101,9 +104,16 @@ fn install_is_snapshot_cacheable_across_runs() {
     };
 
     let first = run(&exec);
-    assert!(first.success(), "first install failed (exit {})", first.exit_code);
+    assert!(
+        first.success(),
+        "first install failed (exit {})",
+        first.exit_code
+    );
     assert!(!first.cache_hit, "first install is a cache miss");
 
     let second = run(&exec);
-    assert!(second.cache_hit, "identical re-run hits the install action cache");
+    assert!(
+        second.cache_hit,
+        "identical re-run hits the install action cache"
+    );
 }

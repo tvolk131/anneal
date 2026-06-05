@@ -81,13 +81,21 @@ fn unit_test_compile_run_split_with_run_cache_hit() {
 
     // The rule emits a unit compile + run (the split) and a doc action for the crate.
     let actions = analyze();
-    assert!(actions.iter().any(|a| a.name().contains("test-compile") && a.name().contains("unit")));
-    assert!(actions.iter().any(|a| a.name().contains("test-run") && a.name().contains("unit")));
+    assert!(actions
+        .iter()
+        .any(|a| a.name().contains("test-compile") && a.name().contains("unit")));
+    assert!(actions
+        .iter()
+        .any(|a| a.name().contains("test-run") && a.name().contains("unit")));
 
     // First run of the whole graph: the unit test actually executes and passes.
     let first = exec.execute_graph(&actions).unwrap();
     let run1 = result_for(&actions, &first, "test-run");
-    assert!(run1.success(), "unit tests should run and pass (exit {})", run1.exit_code);
+    assert!(
+        run1.success(),
+        "unit tests should run and pass (exit {})",
+        run1.exit_code
+    );
     assert!(!run1.cache_hit, "first run executes the test binary");
 
     // Edit an UNRELATED file (the README). Cargo never reads it, but it is part of the

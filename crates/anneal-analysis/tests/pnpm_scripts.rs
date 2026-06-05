@@ -91,7 +91,11 @@ fn declared_scripts_run_against_the_installed_workspace() {
 
     // install succeeded (so node_modules was saved to the snapshot).
     let install = &results[idx(&actions, "pnpm_workspace install")];
-    assert!(install.success(), "install failed (exit {})", install.exit_code);
+    assert!(
+        install.success(),
+        "install failed (exit {})",
+        install.exit_code
+    );
 
     // The test script ran against the restored node_modules; it always exits 0, and the
     // captured output proves the script body actually executed and passed.
@@ -99,7 +103,11 @@ fn declared_scripts_run_against_the_installed_workspace() {
     assert!(test.success(), "test action wrapper should always exit 0");
     let results_txt = String::from_utf8(
         exec.cas()
-            .get(test.outputs.get("results.txt").expect("results.txt captured"))
+            .get(
+                test.outputs
+                    .get("results.txt")
+                    .expect("results.txt captured"),
+            )
             .unwrap()
             .unwrap(),
     )
@@ -133,7 +141,10 @@ fn declared_scripts_run_against_the_installed_workspace() {
         .as_ref()
         .expect("a file provider");
     assert!(
-        files.files.iter().any(|a| a.path == std::path::Path::new("dist.txt")),
+        files
+            .files
+            .iter()
+            .any(|a| a.path == std::path::Path::new("dist.txt")),
         "build output should be provided"
     );
 }
