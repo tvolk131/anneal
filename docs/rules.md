@@ -111,6 +111,42 @@ guess the outputs" automation onto pnpm would be a *lie about the ecosystem* tha
 silent correctness bugs. When an ecosystem is unstructured, the honest rule is more
 declarative, and the messiness surfaces as explicit attributes rather than hidden guesses.
 
+## 3.5 Generated outputs: producer-owned paths, routed consumption
+
+Anneal uses **producer-owned canonical generated paths**. A path-shaped output declaration
+such as `outs = ["foo.txt"]` means "this target owns the generated workspace path
+`pkg/foo.txt`" (package path + action working directory + output path). That path is the
+producer's stable artifact identity: it is what diagnostics can name, what future
+`materialize` can write, and what source/generated ownership checks can reason about.
+
+Two analysis-time checks follow from that contract:
+
+- **One generated owner per workspace-relative path.** Within one analyzed action graph, two
+  actions may not both declare the same generated output path. `//pkg:a` and `//pkg:b`
+  cannot both produce `foo.txt`, because both claim `pkg/foo.txt`. `//a:x` and `//b:y` may
+  both produce `foo.txt`, because they claim different workspace paths (`a/foo.txt` and
+  `b/foo.txt`).
+- **Generated outputs do not shadow sources.** If analysis observed a source path (direct
+  source artifact, package metadata read, existence probe, directory listing, or `BUILD`
+  file), an action cannot declare a generated output at that same workspace path.
+
+This is intentionally a **producer ownership** rule, not a statement that every consumer
+must use the producer's path. The lower action model separates the two: an input edge says
+"materialize producer action `A`'s output `name` at this consumer-chosen path." Current rule
+APIs expose that flexibility unevenly: path-preserving consumers like `genrule` and
+`cargo_workspace(data = ...)` mostly use the provider's path, while `pnpm_workspace(data =
+{ "//pkg:t": "dest/path" })` lets the consumer choose a destination for a single-file
+provider. Richer per-file routing for multi-file providers is a future rule/API feature,
+but it does not require weakening producer-owned generated paths.
+
+The rejected alternative is treating `outs = ["foo.txt"]` as only an action-local or
+suggested filename, with all placement owned by consumers. That is more flexible, but it
+removes the canonical generated path: `materialize`, IDE integration, `owner(path)`-style
+diagnostics, and source/generated collision checks would all need a second mechanism to
+recover the meaning that a path-shaped `outs` declaration currently provides. Anneal keeps
+the canonical producer path and adds explicit consumer routing where a consuming rule needs
+different placement.
+
 ## 4. Cacheability: hermeticity is not determinism
 
 A rule decides whether an action is cacheable, but for an engine whose behavior the rule
