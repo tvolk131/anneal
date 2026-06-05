@@ -122,7 +122,10 @@ impl Rule for PnpmWorkspace {
             &toolchain,
             &runtime,
         );
-        let install = add_source(add_source(install, &package_json), &lockfile)
+        // pnpm may atomically refresh the lockfile even under `--frozen-lockfile`
+        // (tempfile + rename with identical content). Give it a private writable copy
+        // while keeping the lockfile digest in the action key.
+        let install = add_writable_source(add_source(install, &package_json), &lockfile)
             .configured(ctx.config().clone(), Vec::new())
             .snapshot(snapshot_key, snapshot_paths.clone())
             .try_build()?;
@@ -260,7 +263,11 @@ fn with_env(
 /// Add every resolved source artifact as a content-addressed input at its own path.
 fn with_sources(mut builder: ActionBuilder, sources: &[Artifact]) -> ActionBuilder {
     for artifact in sources {
-        builder = add_source(builder, artifact);
+        builder = if is_pnpm_lockfile(&artifact.path) {
+            add_writable_source(builder, artifact)
+        } else {
+            add_source(builder, artifact)
+        };
     }
     builder
 }
@@ -333,6 +340,16 @@ fn with_routed(mut builder: ActionBuilder, routed: &[Artifact]) -> ActionBuilder
 fn add_source(builder: ActionBuilder, artifact: &Artifact) -> ActionBuilder {
     let name = artifact.path.to_string_lossy().into_owned();
     builder.input(name, artifact.path.clone(), source_digest(artifact))
+}
+
+/// Add a source artifact as a private writable input while preserving its digest identity.
+fn add_writable_source(builder: ActionBuilder, artifact: &Artifact) -> ActionBuilder {
+    let name = artifact.path.to_string_lossy().into_owned();
+    builder.writable_input(name, artifact.path.clone(), source_digest(artifact))
+}
+
+fn is_pnpm_lockfile(path: &Path) -> bool {
+    path == Path::new("pnpm-lock.yaml")
 }
 
 /// Extract the CAS digest of a resolved source artifact. `source_artifact`/`source_tree`

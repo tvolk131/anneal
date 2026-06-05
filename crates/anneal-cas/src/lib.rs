@@ -462,6 +462,17 @@ mod tests {
         // The clone diverged; the store blob is intact.
         assert_eq!(fs::read(&dest).unwrap(), b"corrupted!!!");
         assert_eq!(cas.get(&digest).unwrap().as_deref(), Some(&b"original"[..]));
+
+        // pnpm-style atomic replacement: write a temp file, then rename it over a
+        // materialized input. The sandbox path changes; the CAS blob does not.
+        let renamed_dest = dir.path().join("sandbox/renamed.txt");
+        cas.link_into(&digest, &renamed_dest).unwrap();
+        let tmp = dir.path().join("sandbox/renamed.txt.tmp");
+        fs::write(&tmp, b"renamed!!!").unwrap();
+        fs::rename(&tmp, &renamed_dest).unwrap();
+
+        assert_eq!(fs::read(&renamed_dest).unwrap(), b"renamed!!!");
+        assert_eq!(cas.get(&digest).unwrap().as_deref(), Some(&b"original"[..]));
     }
 
     #[test]

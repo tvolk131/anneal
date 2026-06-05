@@ -656,6 +656,46 @@ fn declared_inputs_are_read_only_and_do_not_corrupt_the_cas() {
 }
 
 #[test]
+fn writable_inputs_are_private_copies_and_do_not_corrupt_the_cas() {
+    if !bwrap_available() {
+        eprintln!("skipping: bwrap is not installed");
+        return;
+    }
+    let Some((runtime, shell)) = declared_system_runtime() else {
+        eprintln!("skipping: no /usr/bin shell found");
+        return;
+    };
+    let shell_name = shell.file_name().unwrap().to_string_lossy().into_owned();
+    let path_env = path_env(&runtime);
+
+    let dir = tempfile::tempdir().unwrap();
+    let exec = LocalExecutor::new(dir.path().join(".anneal")).unwrap();
+    let digest = exec.cas().put(b"original").unwrap();
+    let action = Action::builder(
+        "writable-input",
+        [
+            shell_name.as_str(),
+            "-c",
+            "printf mutated > input.txt\n\
+             cat input.txt > out.txt\n",
+        ],
+    )
+    .toolchain(runtime)
+    .env("PATH", path_env)
+    .writable_input("input", "input.txt", digest)
+    .output("out", "out.txt")
+    .build();
+
+    let result = exec.execute(&action).unwrap();
+    assert!(result.success());
+    assert_eq!(output_text(&exec, &result, "out"), "mutated");
+    assert_eq!(
+        exec.cas().get(&digest).unwrap().as_deref(),
+        Some(&b"original"[..])
+    );
+}
+
+#[test]
 fn declared_toolchain_roots_are_visible_but_read_only() {
     if !bwrap_available() {
         eprintln!("skipping: bwrap is not installed");

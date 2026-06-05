@@ -24,7 +24,7 @@ The command sees these guest paths:
 
 | Path | Visibility |
 |---|---|
-| `/work` | The prepared action working tree. Writable except for declared inputs, which are overmounted read-only. `PWD` points here or to a subdirectory under it. |
+| `/work` | The prepared action working tree. Writable except for ordinary declared inputs, which are overmounted read-only. Inputs explicitly declared as writable are private copies and may be mutated without changing the CAS blob. `PWD` points here or to a subdirectory under it. |
 | `/home/anneal` | Private writable `HOME`. |
 | `/tmp` | Private writable `TMPDIR`. |
 | `/dev/shm` | Private writable tmpfs. |
@@ -79,8 +79,9 @@ Not guaranteed:
   metadata, and the Darwin runtime allowlist exposes system paths such as `/System`,
   `/Library`, `/usr/lib`, locale/zoneinfo data, and standard device files.
 - read-only enforcement for declared input paths via Seatbelt. Store-corruption safety
-  on macOS comes from APFS clone/copy materialization plus file permissions, not from
-  read-only bind mounts.
+  on macOS comes from APFS clone/copy materialization plus file permissions for
+  ordinary inputs, and private copies for writable inputs, not from read-only bind
+  mounts.
 
 Hard filesystem hermeticity still requires running on Linux.
 
@@ -172,6 +173,7 @@ deterministic.
 | `/dev/shm` is private and writable | `sealed_action_gets_private_writable_dev_shm` |
 | `/dev/pts` is private inside the device tree | `sealed_action_gets_a_private_dev_pts_mount` |
 | Declared inputs are read-only and cannot corrupt the CAS | `declared_inputs_are_read_only_and_do_not_corrupt_the_cas` |
+| Writable inputs are private copies and cannot corrupt the CAS | `writable_inputs_are_private_copies_and_do_not_corrupt_the_cas` |
 | Declared toolchain roots are visible but read-only | `declared_toolchain_roots_are_visible_but_read_only` |
 | No implicit standard host mounts are provided | `declared_toolchain_actions_do_not_get_standard_host_mounts` |
 | Known non-hermetic kernel/device/time surfaces remain visible | `documented_non_hermetic_kernel_and_device_surfaces_are_visible` |

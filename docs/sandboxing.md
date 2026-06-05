@@ -26,14 +26,19 @@ Inputs are placed with the cheapest store-safe mechanism for the platform:
 
 | Platform | Mechanism | Store-corruption safety |
 |----------|-----------|-------------------------|
-| **Linux** | hardlink from the CAS (shared inode) | sealed actions overmount declared inputs read-only inside `bubblewrap`; the CAS does not chmod the shared inode |
-| **macOS / APFS** | `clonefile` (copy-on-write, **distinct inode**) + `chmod 0444` | a write COWs — the store blob is never mutated; read-only is safe to set because it's a separate inode; per-inode hardlink limit sidestepped |
+| **Linux** | ordinary inputs: hardlink from the CAS (shared inode); writable inputs: private copy | sealed actions overmount ordinary declared inputs read-only inside `bubblewrap`; writable inputs are distinct files, so tool mutations cannot affect the CAS |
+| **macOS / APFS** | ordinary inputs: `clonefile` (copy-on-write, **distinct inode**) + `chmod 0444`; writable inputs: private copy | a write COWs for ordinary inputs, and writable inputs are already private copies — the store blob is never mutated; per-inode hardlink limit sidestepped |
 | any, cross-volume | copy + `0444` | (fallback) |
 
 The macOS choice is deliberate: a hardlink shares the inode, so a misbehaving action
 that wrote to a materialized input would mutate the immutable store. A CoW clone makes
 that impossible (proven by a test that clears the read-only bit, overwrites the input,
 and confirms the store blob is intact).
+
+Writable inputs are an explicit action contract for tools that rewrite an input manifest
+as private scratch while still being deterministic with respect to the original digest.
+They remain part of the action key. Warm snapshot owners refresh writable inputs before
+every reuse because a previous run may have edited the on-disk copy.
 
 Output handling: parent directories for declared output paths are pre-created, so an
 action can write a nested output (`gen/config.json`) without `mkdir`-ing itself.
@@ -43,12 +48,13 @@ action can write a nested output (`gen/config.json`) without `mkdir`-ing itself.
 - **Linux — strict, kernel-enforced for filesystem visibility.** Sealed actions run
   under `bubblewrap`. The namespace exposes the prepared `/work` tree, private
   `HOME`/`TMPDIR`, private `/dev/shm`, `/proc`, `/dev`, and declared toolchain roots
-  only. Declared inputs are overmounted read-only, so writes to inputs fail instead of
-  corrupting the CAS. Undeclared host files are **absent** from the namespace, so a read
-  of one fails with `ENOENT`. The wrapper also drops effective capabilities, starts a
-  new session, requires a user namespace, and sets UID/GID/supplementary groups to
-  `1000`. Cgroup namespace isolation remains best-effort for host compatibility. Known
-  non-hermetic surfaces such as kernel version, CPU count, `/proc/self/mountinfo`,
+  only. Ordinary declared inputs are overmounted read-only, so writes to inputs fail
+  instead of corrupting the CAS; explicitly writable inputs are private copies.
+  Undeclared host files are **absent** from the namespace, so a read of one fails with
+  `ENOENT`. The wrapper also drops effective capabilities, starts a new session,
+  requires a user namespace, and sets UID/GID/supplementary groups to `1000`. Cgroup
+  namespace isolation remains best-effort for host compatibility. Known non-hermetic
+  surfaces such as kernel version, CPU count, `/proc/self/mountinfo`,
   `/proc/self/cgroup`, devices, and wall-clock time remain visible and are
   tested/documented as outside the filesystem visibility guarantee.
 - **macOS — Seatbelt policy, not Linux namespaces.** Sealed actions run under a

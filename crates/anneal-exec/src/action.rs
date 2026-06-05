@@ -32,6 +32,12 @@ pub enum InputSource {
 pub struct Input {
     pub path: PathBuf,
     pub source: InputSource,
+    /// Whether the action may mutate this materialized input as private scratch.
+    ///
+    /// The original digest still enters the action key; this only changes placement:
+    /// the materializer uses a distinct writable copy rather than a CAS hardlink/clone,
+    /// and the Linux sandbox does not overmount this path read-only.
+    pub writable: bool,
 }
 
 /// A host toolchain made visible to an action.
@@ -452,6 +458,30 @@ impl ActionBuilder {
             Input {
                 path: path.into(),
                 source: InputSource::Blob(digest),
+                writable: false,
+            },
+        );
+        self
+    }
+
+    /// Declare an input from a concrete CAS blob that the action may mutate privately.
+    ///
+    /// Use this for tools that rewrite input manifests in-place as part of otherwise
+    /// deterministic operation (for example pnpm's atomic lockfile refresh). The input
+    /// digest remains part of the action key; mutations are not captured unless the path
+    /// is separately declared as an output.
+    pub fn writable_input(
+        mut self,
+        name: impl Into<String>,
+        path: impl Into<PathBuf>,
+        digest: Digest,
+    ) -> Self {
+        self.action.inputs.insert(
+            name.into(),
+            Input {
+                path: path.into(),
+                source: InputSource::Blob(digest),
+                writable: true,
             },
         );
         self
@@ -475,6 +505,29 @@ impl ActionBuilder {
                     action: action_id.into(),
                     name: output_name.into(),
                 },
+                writable: false,
+            },
+        );
+        self
+    }
+
+    /// Declare an input from another action's output that the action may mutate privately.
+    pub fn writable_input_from_output(
+        mut self,
+        name: impl Into<String>,
+        path: impl Into<PathBuf>,
+        action_id: impl Into<String>,
+        output_name: impl Into<String>,
+    ) -> Self {
+        self.action.inputs.insert(
+            name.into(),
+            Input {
+                path: path.into(),
+                source: InputSource::Output {
+                    action: action_id.into(),
+                    name: output_name.into(),
+                },
+                writable: true,
             },
         );
         self

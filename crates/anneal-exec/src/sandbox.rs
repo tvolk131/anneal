@@ -389,7 +389,7 @@ fn wrap(action: &Action, spec: &SandboxSpec) -> Result<Command, SandboxError> {
                 .arg(synthetic_etc.join("group"))
                 .arg("/etc/group");
 
-            for input in action.inputs.values() {
+            for input in action.inputs.values().filter(|input| !input.writable) {
                 cmd.arg("--ro-bind")
                     .arg(spec.cwd.join(&input.path))
                     .arg(guest_cwd(spec).join(&input.path));

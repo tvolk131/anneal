@@ -50,6 +50,7 @@ pub fn action_digest(action: &Action) -> Digest {
     for (name, input) in &action.inputs {
         write_str(&mut buf, name);
         write_str(&mut buf, &input.path.to_string_lossy());
+        buf.push(u8::from(input.writable));
         match &input.source {
             InputSource::Blob(digest) => {
                 buf.push(0);
@@ -256,6 +257,18 @@ mod tests {
         let diff_env = Action::builder("a", ["./echo", "x"]).env("K", "V").build();
         assert_ne!(action_digest(&base), action_digest(&diff_cmd));
         assert_ne!(action_digest(&base), action_digest(&diff_env));
+    }
+
+    #[test]
+    fn writable_inputs_change_the_key() {
+        let d = Digest::of(b"manifest");
+        let readonly = Action::builder("a", ["./tool"])
+            .input("manifest", "manifest.txt", d)
+            .build();
+        let writable = Action::builder("a", ["./tool"])
+            .writable_input("manifest", "manifest.txt", d)
+            .build();
+        assert_ne!(action_digest(&readonly), action_digest(&writable));
     }
 
     #[test]

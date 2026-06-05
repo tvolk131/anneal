@@ -5,7 +5,7 @@
 //! outputs → record the cache entry.** A caller never touches the materializer,
 //! sandbox, or cache directly.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -651,6 +651,12 @@ impl LocalExecutor {
                 InputSource::Output { .. } => None,
             })
             .collect();
+        let writable_inputs: BTreeSet<PathBuf> = action
+            .inputs
+            .values()
+            .filter(|i| i.writable)
+            .map(|i| i.path.clone())
+            .collect();
 
         // Reuse iff a committed manifest exists AND the working tree is present.
         let baseline = match InputManifest::load(&manifest_path)? {
@@ -670,7 +676,7 @@ impl LocalExecutor {
             let _ = fs::remove_dir_all(warm_dir.join(".home"));
             let _ = fs::remove_dir_all(warm_dir.join(".tmp"));
             let prepared = materializer::layout(action, warm_dir.clone())?;
-            warm::sync(&self.cas, &prepared.cwd, &old, &desired)?;
+            warm::sync(&self.cas, &prepared.cwd, &old, &desired, &writable_inputs)?;
             t_materialize = m.elapsed();
             prepared
         } else {
