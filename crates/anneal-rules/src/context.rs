@@ -6,6 +6,8 @@
 //! arbitrary files or inspect global state — which keeps the system/rule boundary
 //! sharp.
 
+use std::cell::{Ref, RefCell};
+use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
 use anneal_cas::Cas;
@@ -23,6 +25,26 @@ pub struct ResolvedDep {
     pub providers: ProviderSet,
 }
 
+/// Source paths a rule asked the system to read while analysis was running.
+#[derive(Debug, Default)]
+pub struct SourcePathRecorder {
+    paths: RefCell<BTreeSet<PathBuf>>,
+}
+
+impl SourcePathRecorder {
+    pub fn paths(&self) -> Ref<'_, BTreeSet<PathBuf>> {
+        self.paths.borrow()
+    }
+
+    pub fn record_workspace_path(&self, path: impl Into<PathBuf>) {
+        self.record(path.into());
+    }
+
+    fn record(&self, path: PathBuf) {
+        self.paths.borrow_mut().insert(path);
+    }
+}
+
 /// Everything a rule may see while analyzing one configured target.
 pub struct RuleContext<'a> {
     label: Label,
@@ -31,6 +53,7 @@ pub struct RuleContext<'a> {
     package_dir: &'a Path,
     cas: &'a Cas,
     deps: &'a [ResolvedDep],
+    source_paths: Option<&'a SourcePathRecorder>,
 }
 
 impl<'a> RuleContext<'a> {
@@ -42,6 +65,38 @@ impl<'a> RuleContext<'a> {
         cas: &'a Cas,
         deps: &'a [ResolvedDep],
     ) -> Self {
+        Self::new_inner(label, attrs, config, package_dir, cas, deps, None)
+    }
+
+    pub fn new_recording_sources(
+        label: Label,
+        attrs: &'a Attrs,
+        config: &'a Configuration,
+        package_dir: &'a Path,
+        cas: &'a Cas,
+        deps: &'a [ResolvedDep],
+        source_paths: &'a SourcePathRecorder,
+    ) -> Self {
+        Self::new_inner(
+            label,
+            attrs,
+            config,
+            package_dir,
+            cas,
+            deps,
+            Some(source_paths),
+        )
+    }
+
+    fn new_inner(
+        label: Label,
+        attrs: &'a Attrs,
+        config: &'a Configuration,
+        package_dir: &'a Path,
+        cas: &'a Cas,
+        deps: &'a [ResolvedDep],
+        source_paths: Option<&'a SourcePathRecorder>,
+    ) -> Self {
         RuleContext {
             label,
             attrs,
@@ -49,6 +104,7 @@ impl<'a> RuleContext<'a> {
             package_dir,
             cas,
             deps,
+            source_paths,
         }
     }
 
@@ -81,6 +137,7 @@ impl<'a> RuleContext<'a> {
                 path: rel.clone(),
                 error,
             })?;
+        self.record_source_path(&rel);
         Ok(Artifact {
             path: rel,
             source: ArtifactSource::Source(digest),
@@ -95,8 +152,14 @@ impl<'a> RuleContext<'a> {
     /// [`source_artifact`]: RuleContext::source_artifact
     pub fn read_package_file(&self, rel: &Path) -> Result<String, RuleError> {
         let rel = package_relative_path(rel, "package file path", false)?;
-        std::fs::read_to_string(self.package_dir.join(&rel))
-            .map_err(|error| RuleError::Source { path: rel, error })
+        let contents = std::fs::read_to_string(self.package_dir.join(&rel)).map_err(|error| {
+            RuleError::Source {
+                path: rel.clone(),
+                error,
+            }
+        })?;
+        self.record_source_path(&rel);
+        Ok(contents)
     }
 
     /// Whether a file exists within the package (introspection helper).
@@ -104,7 +167,11 @@ impl<'a> RuleContext<'a> {
         let Ok(rel) = package_relative_path(rel, "package file path", true) else {
             return false;
         };
-        self.package_dir.join(rel).exists()
+        let exists = self.package_dir.join(&rel).exists();
+        if exists {
+            self.record_source_path(&rel);
+        }
+        exists
     }
 
     /// List the immediate entries under `rel` (relative to the package), returned as
@@ -118,13 +185,16 @@ impl<'a> RuleContext<'a> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(RuleError::Source { path: rel, error }),
         };
+        self.record_source_path(&rel);
         let mut out = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|error| RuleError::Source {
                 path: rel.clone(),
                 error,
             })?;
-            out.push(rel.join(entry.file_name()));
+            let entry_path = rel.join(entry.file_name());
+            self.record_source_path(&entry_path);
+            out.push(entry_path);
         }
         out.sort();
         Ok(out)
@@ -182,6 +252,7 @@ impl<'a> RuleContext<'a> {
                     .cas
                     .ingest_file(&path)
                     .map_err(|e| source_err(&rel, e))?;
+                self.record_source_path(&rel);
                 out.push(Artifact {
                     path: rel,
                     source: ArtifactSource::Source(digest),
@@ -191,6 +262,24 @@ impl<'a> RuleContext<'a> {
         }
         Ok(())
     }
+
+    fn record_source_path(&self, rel: &Path) {
+        let Some(source_paths) = self.source_paths else {
+            return;
+        };
+        source_paths.record(workspace_relative_path(self.label.package(), rel));
+    }
+}
+
+fn workspace_relative_path(package: &str, rel: &Path) -> PathBuf {
+    let mut path = PathBuf::new();
+    if !package.is_empty() {
+        path.push(package);
+    }
+    if rel != Path::new(".") {
+        path.push(rel);
+    }
+    path
 }
 
 fn package_relative_path(rel: &Path, kind: &str, allow_dot: bool) -> Result<PathBuf, RuleError> {

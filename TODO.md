@@ -30,7 +30,7 @@
       `nickel`. `anneal-rules` parses it once per process, validates `/nix/store/...` tool paths and
       closure roots, derives identity from resolved paths + roots, and fails closed if the env var is
       missing. Ambient `PATH` discovery and analysis-time `nix-store -qR` are gone.
-- [ ] **Generated-path collision enforcement.** Build a `path → producer` map during analysis; error if
+- [x] **Generated-path collision enforcement.** Build a `path → producer` map during analysis; error if
       two actions declare the same output path, or if a generated output **shadows** a source file. Promotes
       §14.4's runtime check to an analysis-time one. Cheap (BTreeMap + overlap scan). Needed once multiple
       generators interact / multi-package loading lands.

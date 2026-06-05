@@ -10,7 +10,7 @@
 //! * Per `(crate, test_type)` (§12.2), for the types a crate has:
 //!   * **unit** (`--lib`): a **compile/run split** (§12.3). The compile action runs
 //!     `cargo test --no-run --message-format=json`, extracts the test binary, and
-//!     copies it to a stable `test-bin` output. The run action consumes that binary
+//!     copies it to a stable logical `test-bin` output. The run action consumes that binary
 //!     (an action-graph edge) and executes it. Because the run action's cache key is
 //!     the *content* of the binary, an unrelated edit busts the compile cache but the
 //!     run still **hits** — tests don't re-run when the binary is unchanged.
@@ -217,6 +217,8 @@ impl Rule for CargoWorkspace {
                             format!("cargo_workspace test-compile {label} {} unit", c.name);
                         let run_id = format!("cargo_workspace test-run {label} {} unit", c.name);
 
+                        let test_bin_path =
+                            PathBuf::from(format!("target/anneal-tests/{}/test-bin", c.name));
                         let compile = with_crates(
                             with_data(
                                 with_sources(
@@ -224,7 +226,11 @@ impl Rule for CargoWorkspace {
                                         compile_id.clone(),
                                         shell_cmd(
                                             prelude.as_deref(),
-                                            &unit_compile_body(&c.name, release_flag),
+                                            &unit_compile_body(
+                                                &c.name,
+                                                release_flag,
+                                                &test_bin_path,
+                                            ),
                                         ),
                                         &path_env,
                                         &rustflags,
@@ -237,7 +243,7 @@ impl Rule for CargoWorkspace {
                             ),
                             crate_deps,
                         )
-                        .output("test-bin", "test-bin")
+                        .output("test-bin", test_bin_path)
                         .configured(ctx.config().clone(), consumed.clone())
                         .snapshot_private(snapshot_key, snapshot_paths.clone());
                         actions.push(compile.try_build()?);
@@ -249,16 +255,22 @@ impl Rule for CargoWorkspace {
                         // form by anneal-test), not a lost action error.
                         // `test-bin` is a declared input and Linux sealed mode mounts inputs
                         // read-only, so copy it before restoring the executable bit.
-                        let run_script = "cp test-bin test-bin.run\n\
+                        let results_path =
+                            PathBuf::from(format!("target/anneal-tests/{}/results.txt", c.name));
+                        let run_script = format!(
+                            "cp test-bin test-bin.run\n\
                      chmod u+x test-bin.run\n\
-                     ./test-bin.run > results.txt 2>&1; code=$?\n\
-                     printf 'ANNEAL_TEST_EXIT=%s\\n' \"$code\" >> results.txt\n";
+                     ./test-bin.run > {} 2>&1; code=$?\n\
+                     printf 'ANNEAL_TEST_EXIT=%s\\n' \"$code\" >> {}\n",
+                            results_path.display(),
+                            results_path.display()
+                        );
                         let run = Action::builder(
                             run_id,
-                            vec!["sh".to_owned(), "-c".to_owned(), run_script.to_owned()],
+                            vec!["sh".to_owned(), "-c".to_owned(), run_script],
                         )
                         .input_from_output("test-bin", "test-bin", compile_id, "test-bin")
-                        .output("results.txt", "results.txt")
+                        .output("results.txt", results_path)
                         .toolchain(toolchain.clone())
                         .toolchain(runtime.clone())
                         .env("PATH", &path_env)
@@ -488,14 +500,15 @@ fn cargo_args(
 }
 
 /// The shell **body** for a unit-test **compile** action: compile the test binary
-/// without running it, then copy it to the stable output path `test-bin`. The `set -eu`
+/// without running it, then copy it to the stable declared output path. The `set -eu`
 /// and any fetch-mode vendor prelude are added by [`shell_cmd`].
-fn unit_compile_body(pkg: &str, release_flag: &str) -> String {
+fn unit_compile_body(pkg: &str, release_flag: &str, output_path: &Path) -> String {
     format!(
         "cargo test --package {pkg} --lib --no-run --offline --locked{release_flag} --message-format=json > artifacts.json\n\
          bin=$(grep -o '\"executable\":\"[^\"]*\"' artifacts.json | head -1 | sed 's/^\"executable\":\"//; s/\"$//')\n\
          test -n \"$bin\"\n\
-         cp \"$bin\" test-bin\n"
+         cp \"$bin\" {}\n",
+        output_path.display()
     )
 }
 
@@ -608,7 +621,11 @@ fn fetch_action(dep: &LockDep, runtime: &Toolchain) -> Result<Action, RuleError>
     })?;
     let base = dep.base();
     let url = format!("https://static.crates.io/crates/{}/{base}.crate", dep.name);
-    let script = format!("curl -sSL --fail --retry 3 -o crate.out '{url}'");
+    let output_path = PathBuf::from(format!(".anneal/fetch/{base}.crate"));
+    let script = format!(
+        "curl -sSL --fail --retry 3 -o {} '{url}'",
+        output_path.display()
+    );
     let path_env = toolchain_path_env(&[runtime]);
     Ok(Action::builder(
         format!("cargo_workspace fetch {base}"),
@@ -616,7 +633,7 @@ fn fetch_action(dep: &LockDep, runtime: &Toolchain) -> Result<Action, RuleError>
     )
     .toolchain(runtime.clone())
     .env("PATH", path_env)
-    .output("crate", "crate.out")
+    .output("crate", output_path)
     .platform_independent()
     .fixed_output(expected)
     .try_build()?)
