@@ -1,14 +1,14 @@
 //! The analyzer: dependency-ordered rule analysis with provider threading and
 //! memoization, producing an [`ActionGraph`].
 
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use anneal_cas::Cas;
 use anneal_core::{Configuration, Label};
 use anneal_exec::Action;
 use anneal_loader::TargetGraph;
-use anneal_rules::{ProviderSet, ResolvedDep, RuleContext, RuleRegistry};
+use anneal_rules::{ProviderSet, ResolvedDep, RuleContext, RuleRegistry, SourcePathRecorder};
 
 use crate::error::AnalysisError;
 
@@ -94,8 +94,17 @@ impl<'a> Analyzer<'a> {
         let mut targets = HashMap::new();
         let mut order = Vec::new();
         let mut in_progress = HashSet::new();
-        self.visit(root, &mut targets, &mut order, &mut in_progress)?;
-        Ok(ActionGraph { targets, order })
+        let source_paths = SourcePathRecorder::default();
+        self.visit(
+            root,
+            &mut targets,
+            &mut order,
+            &mut in_progress,
+            &source_paths,
+        )?;
+        let graph = ActionGraph { targets, order };
+        graph.validate_generated_paths(&source_paths.paths())?;
+        Ok(graph)
     }
 
     fn visit(
@@ -104,6 +113,7 @@ impl<'a> Analyzer<'a> {
         targets: &mut HashMap<Label, AnalyzedTarget>,
         order: &mut Vec<Label>,
         in_progress: &mut HashSet<Label>,
+        source_paths: &SourcePathRecorder,
     ) -> Result<(), AnalysisError> {
         if targets.contains_key(label) {
             return Ok(()); // memoized — diamond dependencies analyzed once
@@ -119,7 +129,7 @@ impl<'a> Analyzer<'a> {
 
         // Analyze dependencies first so their providers are available.
         for dep in &decl.deps {
-            self.visit(dep, targets, order, in_progress)?;
+            self.visit(dep, targets, order, in_progress, source_paths)?;
         }
 
         // Thread each dependency's providers into this target's context.
@@ -141,13 +151,18 @@ impl<'a> Analyzer<'a> {
             })?;
 
         let package_dir = self.workspace_root.join(decl.label.package());
-        let ctx = RuleContext::new(
+        source_paths.record_workspace_path(workspace_relative_path(
+            decl.label.package(),
+            Path::new("BUILD"),
+        ));
+        let ctx = RuleContext::new_recording_sources(
             decl.label.clone(),
             &decl.attrs,
             self.config,
             &package_dir,
             self.cas,
             &resolved_deps,
+            source_paths,
         );
         let analysis = rule.analyze(&ctx).map_err(|error| AnalysisError::Rule {
             label: label.clone(),
@@ -166,4 +181,72 @@ impl<'a> Analyzer<'a> {
         );
         Ok(())
     }
+}
+
+#[derive(Debug, Clone)]
+struct OutputOwner {
+    label: Label,
+    action: String,
+    output: String,
+}
+
+impl ActionGraph {
+    fn validate_generated_paths(
+        &self,
+        source_paths: &BTreeSet<PathBuf>,
+    ) -> Result<(), AnalysisError> {
+        let mut generated: BTreeMap<PathBuf, OutputOwner> = BTreeMap::new();
+        for label in &self.order {
+            let target = &self.targets[label];
+            for action in &target.actions {
+                for (output, path) in action.outputs() {
+                    let workspace_path =
+                        action_workspace_path(&target.label, action, path.as_path());
+                    if source_paths.contains(&workspace_path) {
+                        return Err(AnalysisError::GeneratedOutputShadowsSource {
+                            path: workspace_path,
+                            label: target.label.clone(),
+                            action: action.name().to_owned(),
+                            output: output.clone(),
+                        });
+                    }
+
+                    let owner = OutputOwner {
+                        label: target.label.clone(),
+                        action: action.name().to_owned(),
+                        output: output.clone(),
+                    };
+                    if let Some(first) = generated.insert(workspace_path.clone(), owner.clone()) {
+                        return Err(AnalysisError::GeneratedOutputCollision {
+                            path: workspace_path,
+                            first_label: first.label,
+                            first_action: first.action,
+                            first_output: first.output,
+                            second_label: owner.label,
+                            second_action: owner.action,
+                            second_output: owner.output,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn action_workspace_path(label: &Label, action: &Action, path: &Path) -> PathBuf {
+    let mut workspace_path = workspace_relative_path(label.package(), action.working_directory());
+    workspace_path.push(path);
+    workspace_path
+}
+
+fn workspace_relative_path(package: &str, rel: &Path) -> PathBuf {
+    let mut path = PathBuf::new();
+    if !package.is_empty() {
+        path.push(package);
+    }
+    if rel != Path::new(".") {
+        path.push(rel);
+    }
+    path
 }

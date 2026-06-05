@@ -140,7 +140,7 @@ impl Rule for PnpmWorkspace {
             // consuming scripts** at its per-edge destination — not routed through install.
             let routed = resolve_data(ctx)?;
 
-            for (name, spec) in scripts {
+            for (script_index, (name, spec)) in scripts.into_iter().enumerate() {
                 let spec = spec.as_dict().ok_or_else(|| {
                     RuleError::Message(format!("pnpm_workspace: scripts[{name:?}] must be a table"))
                 })?;
@@ -152,12 +152,14 @@ impl Rule for PnpmWorkspace {
 
                 match kind {
                     "test" => {
+                        let results_path =
+                            PathBuf::from(format!(".anneal/pnpm-tests/{script_index}/results.txt"));
                         let action = with_routed(
                             with_sources(
                                 with_env(
                                     Action::builder(
                                         format!("pnpm_workspace test {label} {name}"),
-                                        test_command(name),
+                                        test_command(name, &results_path),
                                     ),
                                     &path_env,
                                     &toolchain,
@@ -167,7 +169,7 @@ impl Rule for PnpmWorkspace {
                             ),
                             &routed,
                         )
-                        .output("results.txt", "results.txt")
+                        .output("results.txt", results_path)
                         .configured(ctx.config().clone(), Vec::new())
                         .snapshot_restore(snapshot_key, snapshot_paths.clone())
                         .try_build()?;
@@ -236,10 +238,12 @@ impl Rule for PnpmWorkspace {
 /// The shell command for a `test`-kind script: run it, capture stdout+stderr to
 /// `results.txt`, record the inner exit code, and **always exit 0** so a test failure is
 /// recorded data (parsed by `anneal-test`), not a lost action error.
-fn test_command(script: &str) -> Vec<String> {
+fn test_command(script: &str, results_path: &Path) -> Vec<String> {
     let body = format!(
-        "pnpm run {script} > results.txt 2>&1; code=$?\n\
-         printf 'ANNEAL_TEST_EXIT=%s\\n' \"$code\" >> results.txt\n"
+        "pnpm run {script} > {} 2>&1; code=$?\n\
+         printf 'ANNEAL_TEST_EXIT=%s\\n' \"$code\" >> {}\n",
+        results_path.display(),
+        results_path.display()
     );
     vec!["sh".to_owned(), "-c".to_owned(), body]
 }

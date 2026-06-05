@@ -6,7 +6,10 @@
 use anneal_core::{AxisValues, Configuration, Platform};
 use anneal_exec::{Executor, LocalExecutor};
 use anneal_rules::{Alias, FileGroup};
-use anneal_rules::{Attrs, GenRule, ProviderSet, ResolvedDep, Rule, RuleContext};
+use anneal_rules::{
+    Attrs, GenRule, ProviderSet, ResolvedDep, Rule, RuleContext, SourcePathRecorder,
+};
+use std::path::{Path, PathBuf};
 
 fn host_config() -> Configuration {
     Configuration::new(Platform::new("host", "host"), AxisValues::default())
@@ -33,8 +36,76 @@ impl Fixture {
     }
 
     fn write_source(&self, name: &str, contents: &str) {
-        std::fs::write(self.package_dir.join(name), contents).unwrap();
+        let path = self.package_dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, contents).unwrap();
     }
+}
+
+#[test]
+fn package_file_exists_records_existing_source_paths() {
+    let fx = Fixture::new();
+    fx.write_source("observed.txt", "observed");
+
+    let config = host_config();
+    let attrs = Attrs::default();
+    let label = anneal_core::Label::parse("//pkg:probe").unwrap();
+    let recorder = SourcePathRecorder::default();
+    let ctx = RuleContext::new_recording_sources(
+        label,
+        &attrs,
+        &config,
+        &fx.package_dir,
+        fx.exec.cas(),
+        &[],
+        &recorder,
+    );
+
+    assert!(ctx.package_file_exists(Path::new("observed.txt")));
+    assert!(!ctx.package_file_exists(Path::new("missing.txt")));
+
+    let paths = recorder.paths();
+    assert!(paths.contains(&PathBuf::from("pkg/observed.txt")));
+    assert!(!paths.contains(&PathBuf::from("pkg/missing.txt")));
+}
+
+#[test]
+fn list_dir_records_the_directory_and_returned_entries() {
+    let fx = Fixture::new();
+    fx.write_source("members/alpha.txt", "alpha");
+    fx.write_source("members/beta.txt", "beta");
+
+    let config = host_config();
+    let attrs = Attrs::default();
+    let label = anneal_core::Label::parse("//pkg:probe").unwrap();
+    let recorder = SourcePathRecorder::default();
+    let ctx = RuleContext::new_recording_sources(
+        label,
+        &attrs,
+        &config,
+        &fx.package_dir,
+        fx.exec.cas(),
+        &[],
+        &recorder,
+    );
+
+    let entries = ctx.list_dir(Path::new("members")).unwrap();
+    assert_eq!(
+        entries,
+        vec![
+            PathBuf::from("members/alpha.txt"),
+            PathBuf::from("members/beta.txt")
+        ]
+    );
+    assert!(ctx.list_dir(Path::new("missing")).unwrap().is_empty());
+
+    let paths = recorder.paths();
+    assert!(paths.contains(&PathBuf::from("pkg/members")));
+    assert!(paths.contains(&PathBuf::from("pkg/members/alpha.txt")));
+    assert!(paths.contains(&PathBuf::from("pkg/members/beta.txt")));
+    assert!(!paths.contains(&PathBuf::from("pkg/missing")));
 }
 
 #[test]

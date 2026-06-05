@@ -18,7 +18,11 @@ fn workspace(build: &str, sources: &[(&str, &str)]) -> tempfile::TempDir {
     std::fs::create_dir_all(&pkg).unwrap();
     std::fs::write(pkg.join("BUILD"), build).unwrap();
     for (name, contents) in sources {
-        std::fs::write(pkg.join(name), contents).unwrap();
+        let path = pkg.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, contents).unwrap();
     }
     tmp
 }
@@ -200,6 +204,123 @@ fn missing_dependency_is_reported() {
         .analyze(&Label::parse("//pkg:g").unwrap())
         .unwrap_err();
     assert!(matches!(err, AnalysisError::MissingTarget(l) if l.target() == "nope"));
+}
+
+#[test]
+fn duplicate_generated_output_paths_are_rejected() {
+    let tmp = workspace(
+        r#"
+genrule(name = "left", outs = ["shared.txt"], cmd = "printf left > $(OUTS)")
+genrule(name = "right", outs = ["shared.txt"], cmd = "printf right > $(OUTS)")
+genrule(
+    name = "root",
+    deps = ["//pkg:left", "//pkg:right"],
+    outs = ["root.txt"],
+    cmd = "cat $(SRCS) > $(OUTS)",
+)
+"#,
+        &[],
+    );
+    let root = tmp.path();
+    let registry = builtin_rules();
+    let graph = load_package(root, "pkg", &registry).unwrap();
+    let config = host_config();
+    let cas = anneal_cas::Cas::open(root.join("cas")).unwrap();
+    let analyzer = Analyzer::new(&graph, &registry, &config, root, &cas);
+
+    let err = analyzer
+        .analyze(&Label::parse("//pkg:root").unwrap())
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            AnalysisError::GeneratedOutputCollision { ref path, .. }
+                if path == &std::path::PathBuf::from("pkg/shared.txt")
+        ),
+        "expected generated-output collision, got {err}"
+    );
+}
+
+#[test]
+fn generated_output_paths_must_not_shadow_source_artifacts() {
+    let tmp = workspace(
+        r#"
+filegroup(name = "source", srcs = ["existing.txt"])
+genrule(name = "generated", outs = ["existing.txt"], cmd = "printf generated > $(OUTS)")
+genrule(
+    name = "root",
+    deps = ["//pkg:source", "//pkg:generated"],
+    outs = ["root.txt"],
+    cmd = "cat $(SRCS) > $(OUTS)",
+)
+"#,
+        &[("existing.txt", "source\n")],
+    );
+    let root = tmp.path();
+    let registry = builtin_rules();
+    let graph = load_package(root, "pkg", &registry).unwrap();
+    let config = host_config();
+    let cas = anneal_cas::Cas::open(root.join("cas")).unwrap();
+    let analyzer = Analyzer::new(&graph, &registry, &config, root, &cas);
+
+    let err = analyzer
+        .analyze(&Label::parse("//pkg:root").unwrap())
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            AnalysisError::GeneratedOutputShadowsSource { ref path, .. }
+                if path == &std::path::PathBuf::from("pkg/existing.txt")
+        ),
+        "expected generated-output source shadow, got {err}"
+    );
+}
+
+#[test]
+fn generated_output_paths_must_not_shadow_existing_paths_observed_during_analysis() {
+    let tmp = workspace(
+        r#"
+cargo_workspace(name = "ws")
+genrule(name = "generated", outs = ["tests"], cmd = "printf generated > $(OUTS)")
+genrule(
+    name = "root",
+    deps = ["//pkg:ws", "//pkg:generated"],
+    outs = ["root.txt"],
+    cmd = "true",
+)
+"#,
+        &[
+            (
+                "Cargo.toml",
+                r#"
+[package]
+name = "pkg"
+version = "0.1.0"
+edition = "2021"
+"#,
+            ),
+            ("src/lib.rs", "pub fn value() -> u8 { 1 }\n"),
+            ("tests/.keep", ""),
+        ],
+    );
+    let root = tmp.path();
+    let registry = builtin_rules();
+    let graph = load_package(root, "pkg", &registry).unwrap();
+    let config = host_config();
+    let cas = anneal_cas::Cas::open(root.join("cas")).unwrap();
+    let analyzer = Analyzer::new(&graph, &registry, &config, root, &cas);
+
+    let err = analyzer
+        .analyze(&Label::parse("//pkg:root").unwrap())
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            AnalysisError::GeneratedOutputShadowsSource { ref path, .. }
+                if path == &std::path::PathBuf::from("pkg/tests")
+        ),
+        "expected generated-output source shadow from an existence probe, got {err}"
+    );
 }
 
 #[test]

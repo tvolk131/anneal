@@ -281,6 +281,16 @@ impl Action {
         &self.name
     }
 
+    /// Declared outputs, keyed by logical output name.
+    pub fn outputs(&self) -> &BTreeMap<String, PathBuf> {
+        &self.outputs
+    }
+
+    /// The action working directory relative to the sandbox root.
+    pub fn working_directory(&self) -> &Path {
+        &self.working_directory
+    }
+
     /// Whether the action is permitted network access (see the `network` field). The
     /// sandbox/executor consults this; enforcement of the `false` default is later
     /// hardening.
