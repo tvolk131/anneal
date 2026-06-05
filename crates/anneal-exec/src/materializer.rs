@@ -12,6 +12,8 @@
 //! [`Cas::link_into`]: anneal_cas::Cas::link_into
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use anneal_cas::Cas;
@@ -94,9 +96,39 @@ fn materialize_inputs(cas: &Cas, action: &Action, cwd: &Path) -> Result<(), Exec
                 })
             }
         };
-        cas.link_into(digest, &cwd.join(&input.path))
-            .map_err(ExecError::Io)?;
+        let dest = cwd.join(&input.path);
+        if input.writable {
+            copy_writable_input(cas, digest, &dest).map_err(ExecError::Io)?;
+        } else {
+            cas.link_into(digest, &dest).map_err(ExecError::Io)?;
+        }
     }
+    Ok(())
+}
+
+/// Materialize a mutable input as a private writable copy instead of a CAS hardlink.
+fn copy_writable_input(cas: &Cas, digest: &Digest, dest: &Path) -> io::Result<()> {
+    let bytes = cas.get(digest)?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("CAS blob {digest} not present"),
+        )
+    })?;
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(dest, &bytes)?;
+    set_writable(dest)
+}
+
+#[cfg(unix)]
+fn set_writable(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o644))
+}
+
+#[cfg(not(unix))]
+fn set_writable(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 

@@ -25,16 +25,19 @@
 mod attrs;
 mod cargo_workspace;
 mod context;
+mod diagnostics;
 mod nickel_eval;
 mod pnpm_workspace;
 mod providers;
 mod rule;
 mod rules;
 mod schema;
+mod toolchain;
 
 pub use attrs::{AttrError, AttrValue, Attrs};
 pub use cargo_workspace::CargoWorkspace;
 pub use context::{ResolvedDep, RuleContext};
+pub use diagnostics::{start_rule_timings, take_rule_timings, RuleTiming};
 pub use nickel_eval::NickelEval;
 pub use pnpm_workspace::PnpmWorkspace;
 pub use providers::{Artifact, ArtifactSource, FileSet, ProviderSet};

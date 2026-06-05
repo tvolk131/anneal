@@ -68,6 +68,8 @@ impl TestResult {
         // Target outcome: any failed case fails the target; otherwise it passed.
         let outcome = if report.failed > 0 {
             TestOutcome::Failed
+        } else if report.runner_exit.is_some_and(|code| code != 0) {
+            TestOutcome::Errored
         } else {
             TestOutcome::Passed
         };
@@ -89,5 +91,28 @@ impl TestResult {
     /// Count of cases with a given outcome.
     pub fn count(&self, outcome: TestOutcome) -> usize {
         self.cases.iter().filter(|c| c.outcome == outcome).count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use anneal_core::{AxisValues, Configuration, Label, Platform};
+
+    use super::{TestOutcome, TestResult};
+
+    fn config() -> Configuration {
+        Configuration::new(Platform::new("host", "host"), AxisValues::default())
+    }
+
+    #[test]
+    fn nonzero_runner_exit_without_libtest_failures_is_errored() {
+        let result = TestResult::from_libtest(
+            Label::parse("//pkg:test").unwrap(),
+            config(),
+            "./test-bin.run: Permission denied\nANNEAL_TEST_EXIT=126\n",
+        );
+
+        assert_eq!(result.outcome, TestOutcome::Errored);
+        assert!(result.cases.is_empty());
     }
 }

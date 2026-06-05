@@ -44,15 +44,18 @@
 //! git/`path`-registry deps and non-crates.io registries (vendor those), and a generated
 //! lockfile (needs the staged-graph pass).
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anneal_core::{AxisValues, Coverage, DebugInfo, Digest, Lto, OptLevel, Sanitizer, ALL_AXES};
-use anneal_exec::{Action, ActionBuilder};
+use anneal_exec::{Action, ActionBuilder, Toolchain};
 
 use crate::context::RuleContext;
+use crate::diagnostics;
 use crate::providers::{Artifact, ArtifactSource, ProviderSet};
 use crate::rule::{Analysis, Rule, RuleError};
 use crate::schema::{AttrSchema, AttrType};
+use crate::toolchain::{nix_base_runtime, nix_store_toolchain, toolchain_path_env};
 
 /// Directories never treated as build inputs.
 const IGNORED_DIRS: &[&str] = &["target", ".git", ".anneal"];
@@ -85,18 +88,21 @@ impl Rule for CargoWorkspace {
     }
 
     fn analyze(&self, ctx: &RuleContext) -> Result<Analysis, RuleError> {
-        let toolchain_dirs = toolchain_bin_dirs()?;
+        let toolchain = diagnostics::time("cargo_workspace.toolchain.rust", rust_toolchain)?;
+        let runtime = diagnostics::time("cargo_workspace.toolchain.runtime", nix_base_runtime)?;
 
         // Fetch mode (§FOD): no committed vendor/, but a lockfile with crates.io deps →
         // hash-pin-fetch each crate and assemble a vendor tree in-sandbox. Decided first
         // because it changes which directories count as build inputs.
-        let fetch_deps = fetch_plan(ctx)?;
+        let fetch_deps = diagnostics::time("cargo_workspace.fetch_plan", || fetch_plan(ctx))?;
         let ignored = if fetch_deps.is_some() {
             FETCH_IGNORED_DIRS
         } else {
             IGNORED_DIRS
         };
-        let sources = ctx.source_tree(Path::new("."), ignored)?;
+        let sources = diagnostics::time("cargo_workspace.source_tree", || {
+            ctx.source_tree(Path::new("."), ignored)
+        })?;
         if sources.is_empty() {
             return Err(RuleError::Message(
                 "cargo_workspace: no source files found in the package".to_owned(),
@@ -115,21 +121,20 @@ impl Rule for CargoWorkspace {
         };
         let release_flag = if release { " --release" } else { "" };
 
-        let mut path: Vec<String> = toolchain_dirs
-            .iter()
-            .map(|d| d.to_string_lossy().into_owned())
-            .collect();
-        path.push("/usr/bin".to_owned());
-        path.push("/bin".to_owned());
-        let path_env = path.join(":");
+        let path_env = diagnostics::time("cargo_workspace.path_env", || {
+            toolchain_path_env(&[&toolchain, &runtime])
+        });
 
         // cargo_workspace interprets all five axes (§13.6), so it consumes all five —
         // each enters the cache key, and the snapshot key, at its current value.
         let rustflags = rustflags_for(ctx.config().axes());
         let consumed = ALL_AXES.to_vec();
 
-        let crates = workspace_crates(ctx)?;
-        let snapshot_key = snapshot_key(&toolchain_dirs, &sources, ctx);
+        let crates =
+            diagnostics::time("cargo_workspace.workspace_crates", || workspace_crates(ctx))?;
+        let snapshot_key = diagnostics::time("cargo_workspace.snapshot_key", || {
+            snapshot_key(&toolchain, &runtime, &sources, ctx)
+        });
         let snapshot_paths = vec![PathBuf::from("target")];
         let label = ctx.label().clone();
 
@@ -137,162 +142,215 @@ impl Rule for CargoWorkspace {
         // provides — generated output or plain source — is materialized into the build
         // tree at its path, as a content-addressed input. Added to every *compiling*
         // action (the test-run action only executes a binary, so it needs nothing here).
-        let data: Vec<Artifact> = ctx
-            .deps()
-            .iter()
-            .filter_map(|dep| dep.providers.files.as_ref())
-            .flat_map(|file_set| file_set.files.iter().cloned())
-            .collect();
+        let data: Vec<Artifact> = diagnostics::time("cargo_workspace.data_deps", || {
+            ctx.deps()
+                .iter()
+                .filter_map(|dep| dep.providers.files.as_ref())
+                .flat_map(|file_set| file_set.files.iter().cloned())
+                .collect()
+        });
 
         let mut actions = Vec::new();
 
         // --- fixed-output fetch actions (fetch mode): one per crates.io dependency,
         // pinned to its lockfile checksum (§FOD). The compiling actions depend on these. ---
-        if let Some(deps) = &fetch_deps {
-            for dep in deps {
-                actions.push(fetch_action(dep)?);
-            }
-        }
+        diagnostics::time(
+            "cargo_workspace.fetch_actions",
+            || -> Result<(), RuleError> {
+                if let Some(deps) = &fetch_deps {
+                    for dep in deps {
+                        actions.push(fetch_action(dep, &runtime)?);
+                    }
+                }
+                Ok(())
+            },
+        )?;
 
         // --- coarse build action ---
-        let build_cmd = cargo_command(
-            prelude.as_deref(),
-            cargo_args("build", None, None, release_flag),
-        );
-        let mut build = with_crates(
-            with_data(
-                with_sources(
-                    cargo_builder(
-                        format!("cargo_workspace build {label}"),
-                        build_cmd,
-                        &path_env,
-                        &rustflags,
+        diagnostics::time(
+            "cargo_workspace.build_action",
+            || -> Result<(), RuleError> {
+                let build_cmd = cargo_command(
+                    prelude.as_deref(),
+                    cargo_args("build", None, None, release_flag),
+                );
+                let mut build = with_crates(
+                    with_data(
+                        with_sources(
+                            cargo_builder(
+                                format!("cargo_workspace build {label}"),
+                                build_cmd,
+                                &path_env,
+                                &rustflags,
+                                &toolchain,
+                                &runtime,
+                            ),
+                            &sources,
+                        ),
+                        &data,
                     ),
-                    &sources,
-                ),
-                &data,
-            ),
-            crate_deps,
-        );
-        for c in crates.iter().filter(|c| c.is_normal_lib()) {
-            let lib = format!("lib{}.rlib", c.name.replace('-', "_"));
-            let out = PathBuf::from(format!("target/{profile_dir}/{lib}"));
-            build = build.output(out.to_string_lossy().into_owned(), out);
-        }
-        actions.push(
-            build
-                .configured(ctx.config().clone(), consumed.clone())
-                .snapshot_private(snapshot_key, snapshot_paths.clone())
-                .build(),
-        );
+                    crate_deps,
+                );
+                for c in crates.iter().filter(|c| c.is_normal_lib()) {
+                    let lib = format!("lib{}.rlib", c.name.replace('-', "_"));
+                    let out = PathBuf::from(format!("target/{profile_dir}/{lib}"));
+                    build = build.output(out.to_string_lossy().into_owned(), out);
+                }
+                actions.push(
+                    build
+                        .configured(ctx.config().clone(), consumed.clone())
+                        .snapshot_private(snapshot_key, snapshot_paths.clone())
+                        .try_build()?,
+                );
+                Ok(())
+            },
+        )?;
 
         // --- per-(crate, test_type) actions ---
-        for c in &crates {
-            if c.is_normal_lib() {
-                // unit: compile/run split.
-                let compile_id = format!("cargo_workspace test-compile {label} {} unit", c.name);
-                let run_id = format!("cargo_workspace test-run {label} {} unit", c.name);
+        diagnostics::time(
+            "cargo_workspace.test_actions",
+            || -> Result<(), RuleError> {
+                for c in &crates {
+                    if c.is_normal_lib() {
+                        // unit: compile/run split.
+                        let compile_id =
+                            format!("cargo_workspace test-compile {label} {} unit", c.name);
+                        let run_id = format!("cargo_workspace test-run {label} {} unit", c.name);
 
-                let compile = with_crates(
-                    with_data(
-                        with_sources(
-                            cargo_builder(
-                                compile_id.clone(),
-                                shell_cmd(
-                                    prelude.as_deref(),
-                                    &unit_compile_body(&c.name, release_flag),
-                                ),
-                                &path_env,
-                                &rustflags,
-                            ),
-                            &sources,
-                        ),
-                        &data,
-                    ),
-                    crate_deps,
-                )
-                .output("test-bin", "test-bin")
-                .configured(ctx.config().clone(), consumed.clone())
-                .snapshot_private(snapshot_key, snapshot_paths.clone());
-                actions.push(compile.build());
-
-                // run depends on the compiled binary (an action-graph edge); its cache
-                // key is the binary's content, so it hits when the binary is unchanged.
-                // It captures the framework output to `results.txt` and always exits 0
-                // so a *test failure* is a recorded result (parsed into structured
-                // form by anneal-test), not a lost action error.
-                let run_script = "chmod u+x test-bin\n\
-                     ./test-bin > results.txt 2>&1; code=$?\n\
-                     printf 'ANNEAL_TEST_EXIT=%s\\n' \"$code\" >> results.txt\n";
-                let run = Action::builder(
-                    run_id,
-                    vec!["/bin/sh".to_owned(), "-c".to_owned(), run_script.to_owned()],
-                )
-                .input_from_output("test-bin", "test-bin", compile_id, "test-bin")
-                .output("results.txt", "results.txt")
-                .env("PATH", "/usr/bin:/bin")
-                .configured(ctx.config().clone(), Vec::new());
-                actions.push(run.build());
-
-                // doc: single action (no reusable binary, §12.3).
-                let doc = with_crates(
-                    with_data(
-                        with_sources(
-                            cargo_builder(
-                                format!("cargo_workspace test {label} {} doc", c.name),
-                                cargo_command(
-                                    prelude.as_deref(),
-                                    cargo_args("test", Some(&c.name), Some("--doc"), release_flag),
-                                ),
-                                &path_env,
-                                &rustflags,
-                            ),
-                            &sources,
-                        ),
-                        &data,
-                    ),
-                    crate_deps,
-                )
-                .configured(ctx.config().clone(), consumed.clone())
-                .snapshot_private(snapshot_key, snapshot_paths.clone());
-                actions.push(doc.build());
-            }
-
-            if c.has_tests {
-                // integration: single action for now (multi-binary split deferred).
-                let integ = with_crates(
-                    with_data(
-                        with_sources(
-                            cargo_builder(
-                                format!("cargo_workspace test {label} {} integration", c.name),
-                                cargo_command(
-                                    prelude.as_deref(),
-                                    cargo_args(
-                                        "test",
-                                        Some(&c.name),
-                                        Some("--tests"),
-                                        release_flag,
+                        let compile = with_crates(
+                            with_data(
+                                with_sources(
+                                    cargo_builder(
+                                        compile_id.clone(),
+                                        shell_cmd(
+                                            prelude.as_deref(),
+                                            &unit_compile_body(&c.name, release_flag),
+                                        ),
+                                        &path_env,
+                                        &rustflags,
+                                        &toolchain,
+                                        &runtime,
                                     ),
+                                    &sources,
                                 ),
-                                &path_env,
-                                &rustflags,
+                                &data,
                             ),
-                            &sources,
-                        ),
-                        &data,
-                    ),
-                    crate_deps,
-                )
-                .configured(ctx.config().clone(), consumed.clone())
-                .snapshot_private(snapshot_key, snapshot_paths.clone());
-                actions.push(integ.build());
-            }
-        }
+                            crate_deps,
+                        )
+                        .output("test-bin", "test-bin")
+                        .configured(ctx.config().clone(), consumed.clone())
+                        .snapshot_private(snapshot_key, snapshot_paths.clone());
+                        actions.push(compile.try_build()?);
+
+                        // run depends on the compiled binary (an action-graph edge); its cache
+                        // key is the binary's content, so it hits when the binary is unchanged.
+                        // It captures the framework output to `results.txt` and always exits 0
+                        // so a *test failure* is a recorded result (parsed into structured
+                        // form by anneal-test), not a lost action error.
+                        // `test-bin` is a declared input and Linux sealed mode mounts inputs
+                        // read-only, so copy it before restoring the executable bit.
+                        let run_script = "cp test-bin test-bin.run\n\
+                     chmod u+x test-bin.run\n\
+                     ./test-bin.run > results.txt 2>&1; code=$?\n\
+                     printf 'ANNEAL_TEST_EXIT=%s\\n' \"$code\" >> results.txt\n";
+                        let run = Action::builder(
+                            run_id,
+                            vec!["sh".to_owned(), "-c".to_owned(), run_script.to_owned()],
+                        )
+                        .input_from_output("test-bin", "test-bin", compile_id, "test-bin")
+                        .output("results.txt", "results.txt")
+                        .toolchain(toolchain.clone())
+                        .toolchain(runtime.clone())
+                        .env("PATH", &path_env)
+                        .configured(ctx.config().clone(), Vec::new());
+                        actions.push(run.try_build()?);
+
+                        // doc: single action (no reusable binary, §12.3).
+                        let doc = with_crates(
+                            with_data(
+                                with_sources(
+                                    cargo_builder(
+                                        format!("cargo_workspace test {label} {} doc", c.name),
+                                        cargo_command(
+                                            prelude.as_deref(),
+                                            cargo_args(
+                                                "test",
+                                                Some(&c.name),
+                                                Some("--doc"),
+                                                release_flag,
+                                            ),
+                                        ),
+                                        &path_env,
+                                        &rustflags,
+                                        &toolchain,
+                                        &runtime,
+                                    ),
+                                    &sources,
+                                ),
+                                &data,
+                            ),
+                            crate_deps,
+                        )
+                        .configured(ctx.config().clone(), consumed.clone())
+                        .snapshot_private(snapshot_key, snapshot_paths.clone());
+                        actions.push(doc.try_build()?);
+                    }
+
+                    if c.has_tests {
+                        // integration: single action for now (multi-binary split deferred).
+                        let integ = with_crates(
+                            with_data(
+                                with_sources(
+                                    cargo_builder(
+                                        format!(
+                                            "cargo_workspace test {label} {} integration",
+                                            c.name
+                                        ),
+                                        cargo_command(
+                                            prelude.as_deref(),
+                                            cargo_args(
+                                                "test",
+                                                Some(&c.name),
+                                                Some("--tests"),
+                                                release_flag,
+                                            ),
+                                        ),
+                                        &path_env,
+                                        &rustflags,
+                                        &toolchain,
+                                        &runtime,
+                                    ),
+                                    &sources,
+                                ),
+                                &data,
+                            ),
+                            crate_deps,
+                        )
+                        .configured(ctx.config().clone(), consumed.clone())
+                        .snapshot_private(snapshot_key, snapshot_paths.clone());
+                        actions.push(integ.try_build()?);
+                    }
+                }
+                Ok(())
+            },
+        )?;
 
         Ok(Analysis {
             actions,
             providers: ProviderSet::default(),
         })
+    }
+}
+
+fn rust_toolchain() -> Result<Toolchain, RuleError> {
+    #[cfg(target_os = "macos")]
+    {
+        nix_store_toolchain("rust", &["cargo", "rustc", "cc", "xcrun"])
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        nix_store_toolchain("rust", &["cargo", "rustc", "cc"])
     }
 }
 
@@ -324,8 +382,12 @@ fn cargo_builder(
     command: Vec<String>,
     path_env: &str,
     rustflags: &str,
+    toolchain: &Toolchain,
+    runtime: &Toolchain,
 ) -> ActionBuilder {
     let mut builder = Action::builder(name, command)
+        .toolchain(toolchain.clone())
+        .toolchain(runtime.clone())
         .env("PATH", path_env)
         .env("CARGO_TERM_COLOR", "never")
         .env("CARGO_INCREMENTAL", "0");
@@ -445,7 +507,7 @@ fn shell_cmd(prelude: Option<&str>, body: &str) -> Vec<String> {
         script.push_str(p);
     }
     script.push_str(body);
-    vec!["/bin/sh".to_owned(), "-c".to_owned(), script]
+    vec!["sh".to_owned(), "-c".to_owned(), script]
 }
 
 /// Choose a compiling action's command: in pre-vendored / dependency-free builds, run
@@ -537,7 +599,7 @@ fn fetch_plan(ctx: &RuleContext) -> Result<Option<Vec<LockDep>>, RuleError> {
 /// into the single declared output `crate`, pinned to the lockfile checksum. Cached by
 /// output (a present blob skips the download), verified against the pin (a mismatch fails
 /// closed). The graph-unique name lets the compiling actions reference it.
-fn fetch_action(dep: &LockDep) -> Result<Action, RuleError> {
+fn fetch_action(dep: &LockDep, runtime: &Toolchain) -> Result<Action, RuleError> {
     let expected = Digest::from_hex(&dep.checksum).map_err(|e| {
         RuleError::Message(format!(
             "{} {}: invalid checksum hex in Cargo.lock: {e}",
@@ -547,15 +609,17 @@ fn fetch_action(dep: &LockDep) -> Result<Action, RuleError> {
     let base = dep.base();
     let url = format!("https://static.crates.io/crates/{}/{base}.crate", dep.name);
     let script = format!("curl -sSL --fail --retry 3 -o crate.out '{url}'");
+    let path_env = toolchain_path_env(&[runtime]);
     Ok(Action::builder(
         format!("cargo_workspace fetch {base}"),
-        vec!["/bin/sh".to_owned(), "-c".to_owned(), script],
+        vec!["sh".to_owned(), "-c".to_owned(), script],
     )
-    .env("PATH", "/usr/bin:/bin")
+    .toolchain(runtime.clone())
+    .env("PATH", path_env)
     .output("crate", "crate.out")
     .platform_independent()
     .fixed_output(expected)
-    .build())
+    .try_build()?)
 }
 
 /// Add each fetched `.crate` as an input at `.anneal-crates/<base>.crate` (an action-graph
@@ -613,15 +677,19 @@ fn assembly_prelude(deps: &[LockDep]) -> String {
     s
 }
 
-/// Coarse snapshot key: `(toolchain, lockfile, target_triple, all axis values)`
+/// Coarse snapshot key: `(toolchain, runtime, lockfile, target_triple, all axis values)`
 /// (§8.2). Including the axis values gives each configuration its own `target/`
 /// snapshot, so a debug, a release, and a coverage build don't thrash one another's.
-fn snapshot_key(toolchain_dirs: &[PathBuf], sources: &[Artifact], ctx: &RuleContext) -> Digest {
+fn snapshot_key(
+    toolchain: &Toolchain,
+    runtime: &Toolchain,
+    sources: &[Artifact],
+    ctx: &RuleContext,
+) -> Digest {
     let mut buf = Vec::new();
-    for dir in toolchain_dirs {
-        buf.extend_from_slice(dir.to_string_lossy().as_bytes());
-        buf.push(b':');
-    }
+    buf.extend_from_slice(toolchain.identity().as_bytes());
+    buf.push(0);
+    buf.extend_from_slice(runtime.identity().as_bytes());
     buf.push(0);
     if let Some(ArtifactSource::Source(lock)) = sources
         .iter()
@@ -633,7 +701,8 @@ fn snapshot_key(toolchain_dirs: &[PathBuf], sources: &[Artifact], ctx: &RuleCont
     buf.push(0);
     buf.extend_from_slice(ctx.config().platform().target_triple().as_bytes());
     buf.push(0);
-    for (name, value) in ctx.config().axes().consumed(&ALL_AXES) {
+    let all_axes = BTreeSet::from(ALL_AXES);
+    for (name, value) in ctx.config().axes().consumed(&all_axes) {
         buf.extend_from_slice(name.as_bytes());
         buf.push(b'=');
         buf.extend_from_slice(value.as_bytes());
@@ -729,27 +798,6 @@ fn workspace_crates(ctx: &RuleContext) -> Result<Vec<CrateInfo>, RuleError> {
         }
     }
     Ok(crates)
-}
-
-/// The bin directories containing `cargo` and `rustc`, discovered on `PATH`.
-fn toolchain_bin_dirs() -> Result<Vec<PathBuf>, RuleError> {
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    for tool in ["cargo", "rustc"] {
-        let dir = which_dir(tool).ok_or_else(|| {
-            RuleError::Message(format!(
-                "`{tool}` not found on PATH; cargo_workspace requires a Rust toolchain"
-            ))
-        })?;
-        if !dirs.contains(&dir) {
-            dirs.push(dir);
-        }
-    }
-    Ok(dirs)
-}
-
-fn which_dir(tool: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).find(|dir| dir.join(tool).is_file())
 }
 
 #[cfg(test)]

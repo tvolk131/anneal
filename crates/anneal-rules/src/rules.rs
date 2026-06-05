@@ -9,6 +9,7 @@ use crate::context::RuleContext;
 use crate::providers::{Artifact, ArtifactSource, FileSet, ProviderSet};
 use crate::rule::{Analysis, Rule, RuleError};
 use crate::schema::{AttrSchema, AttrType};
+use crate::toolchain::{nix_base_runtime, toolchain_path_env};
 
 const FILEGROUP_SCHEMA: &[AttrSchema] = &[AttrSchema::required("srcs", AttrType::StringList)];
 const ALIAS_SCHEMA: &[AttrSchema] = &[AttrSchema::required("actual", AttrType::Label)];
@@ -72,7 +73,7 @@ impl Rule for Alias {
 }
 
 /// `genrule(name, srcs, outs, cmd)` — the generic "run a command, produce outputs"
-/// escape hatch. Emits one [`Action`]: `/bin/sh -c <cmd>` with `srcs` materialized as
+/// escape hatch. Emits one [`Action`]: `sh -c <cmd>` with `srcs` materialized as
 /// inputs and `outs` captured as outputs. `cmd` may use `$(SRCS)` and `$(OUTS)`,
 /// which expand to the space-joined input and output paths.
 pub struct GenRule;
@@ -121,11 +122,16 @@ impl Rule for GenRule {
             .replace("$(SRCS)", &srcs_joined)
             .replace("$(OUTS)", &outs.join(" "));
 
+        let runtime = nix_base_runtime()?;
+        let path_env = toolchain_path_env(&[&runtime]);
+
         // The action's name doubles as its graph id; outputs are referenced as
         // `(action_id, output_name)` by any consumer.
         let action_id = format!("genrule {}", ctx.label());
-        let command = vec!["/bin/sh".to_owned(), "-c".to_owned(), expanded];
-        let mut builder = Action::builder(action_id.clone(), command);
+        let command = vec!["sh".to_owned(), "-c".to_owned(), expanded];
+        let mut builder = Action::builder(action_id.clone(), command)
+            .toolchain(runtime)
+            .env("PATH", path_env);
         for artifact in &inputs {
             let name = artifact.path.to_string_lossy().into_owned();
             match &artifact.source {
@@ -162,7 +168,7 @@ impl Rule for GenRule {
             .collect();
 
         Ok(Analysis {
-            actions: vec![builder.build()],
+            actions: vec![builder.try_build()?],
             providers: ProviderSet {
                 files: Some(FileSet {
                     files: provided_outputs,

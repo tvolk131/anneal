@@ -26,6 +26,7 @@ use crate::context::RuleContext;
 use crate::providers::{Artifact, ArtifactSource, FileSet, ProviderSet};
 use crate::rule::{Analysis, Rule, RuleError};
 use crate::schema::{AttrSchema, AttrType};
+use crate::toolchain::{nix_base_runtime, nix_store_toolchain, toolchain_path_env};
 
 const SCHEMA: &[AttrSchema] = &[
     AttrSchema::required("src", AttrType::String),
@@ -69,9 +70,8 @@ impl Rule for NickelEval {
             .map(str::to_owned)
             .unwrap_or_else(|| format!("output.{}", default_extension(&format)));
 
-        let nickel_dir = which_dir("nickel").ok_or_else(|| {
-            RuleError::Message("`nickel` not found on PATH; nickel_eval requires Nickel".to_owned())
-        })?;
+        let toolchain = nix_store_toolchain("nickel", &["nickel"])?;
+        let runtime = nix_base_runtime()?;
 
         let src_artifact = ctx.source_artifact(Path::new(&src))?;
         let ArtifactSource::Source(src_digest) = &src_artifact.source else {
@@ -80,14 +80,16 @@ impl Rule for NickelEval {
 
         let action_id = format!("nickel_eval {}", ctx.label());
         let script = format!("nickel export {src} --format {format} > {out}");
-        let path_env = format!("{}:/usr/bin:/bin", nickel_dir.to_string_lossy());
+        let path_env = toolchain_path_env(&[&toolchain, &runtime]);
 
         let action = Action::builder(
             action_id.clone(),
-            vec!["/bin/sh".to_owned(), "-c".to_owned(), script],
+            vec!["sh".to_owned(), "-c".to_owned(), script],
         )
         .input(src.clone(), PathBuf::from(&src), *src_digest)
         .output(out.clone(), PathBuf::from(&out))
+        .toolchain(toolchain)
+        .toolchain(runtime)
         .env("PATH", path_env)
         // Pure data evaluation: no axes, no platform dependence ⇒ configuration-
         // invariant cache key (§6.3).
@@ -108,15 +110,10 @@ impl Rule for NickelEval {
         };
 
         Ok(Analysis {
-            actions: vec![action.build()],
+            actions: vec![action.try_build()?],
             providers,
         })
     }
-}
-
-fn which_dir(tool: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).find(|dir| dir.join(tool).is_file())
 }
 
 /// Conventional file extension for the default `out` name of a given format.

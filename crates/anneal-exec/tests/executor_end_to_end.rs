@@ -7,16 +7,14 @@ use std::collections::BTreeMap;
 use anneal_core::Digest;
 use anneal_exec::{Action, CachePolicy, Executor, LocalExecutor};
 
+mod support;
+
 /// An action that reads a declared input and writes a transformed declared output.
 fn copy_upper_action(input_digest: Digest) -> Action {
-    Action::builder(
+    support::shell_action(
         "upcase",
-        [
-            "/bin/sh",
-            "-c",
-            // Read the materialized input, uppercase it, write the declared output.
-            "tr a-z A-Z < in.txt > out.txt",
-        ],
+        // Read the materialized input, uppercase it, write the declared output.
+        "tr a-z A-Z < in.txt > out.txt",
     )
     .input("src", "in.txt", input_digest)
     .output("result", "out.txt")
@@ -76,7 +74,7 @@ fn non_cacheable_action_always_reruns() {
     let exec = LocalExecutor::new(dir.path()).unwrap();
 
     let input = exec.cas().put(b"data").unwrap();
-    let action = Action::builder("echo", ["/bin/sh", "-c", "cat in.txt > out.txt"])
+    let action = support::shell_action("echo", "cat in.txt > out.txt")
         .input("src", "in.txt", input)
         .output("result", "out.txt")
         .cache_policy(CachePolicy::NonCacheable)
@@ -100,14 +98,10 @@ fn environment_is_scrubbed_but_declared_vars_pass_through() {
     // A variable present in THIS process must not leak into the sandbox.
     std::env::set_var("ANNEAL_TEST_LEAK", "leaked");
 
-    let action = Action::builder(
+    let action = support::shell_action(
         "env-probe",
-        [
-            "/bin/sh",
-            "-c",
-            // Leaked var should be empty (-> CLEAN); declared var should pass through.
-            r#"printf '%s|%s' "${ANNEAL_TEST_LEAK:-CLEAN}" "${DECLARED:-MISSING}" > out.txt"#,
-        ],
+        // Leaked var should be empty (-> CLEAN); declared var should pass through.
+        r#"printf '%s|%s' "${ANNEAL_TEST_LEAK:-CLEAN}" "${DECLARED:-MISSING}" > out.txt"#,
     )
     .env("DECLARED", "present")
     .output("result", "out.txt")
@@ -128,7 +122,7 @@ fn missing_declared_output_is_an_error() {
     let exec = LocalExecutor::new(dir.path()).unwrap();
 
     // Command succeeds but never writes the declared output.
-    let action = Action::builder("noop", ["/bin/sh", "-c", "true"])
+    let action = support::shell_action("noop", "true")
         .output("result", "out.txt")
         .build();
 
@@ -146,23 +140,16 @@ fn execute_graph_threads_outputs_between_actions() {
     let seed = exec.cas().put(b"seed\n").unwrap();
 
     // Producer uppercases its source into the output "produced.txt".
-    let producer = Action::builder(
-        "producer",
-        ["/bin/sh", "-c", "tr a-z A-Z < in.txt > produced.txt"],
-    )
-    .input("src", "in.txt", seed)
-    .output("produced.txt", "produced.txt")
-    .build();
+    let producer = support::shell_action("producer", "tr a-z A-Z < in.txt > produced.txt")
+        .input("src", "in.txt", seed)
+        .output("produced.txt", "produced.txt")
+        .build();
 
     // Consumer reads the producer's output (materialized at from_producer.txt) and
     // appends a line — it references the producer by name + output name.
-    let consumer = Action::builder(
+    let consumer = support::shell_action(
         "consumer",
-        [
-            "/bin/sh",
-            "-c",
-            "cat from_producer.txt > final.txt; echo done >> final.txt",
-        ],
+        "cat from_producer.txt > final.txt; echo done >> final.txt",
     )
     .input_from_output("p", "from_producer.txt", "producer", "produced.txt")
     .output("final.txt", "final.txt")
@@ -183,7 +170,7 @@ fn execute_graph_threads_outputs_between_actions() {
 fn executing_an_unresolved_action_directly_errors() {
     let dir = tempfile::tempdir().unwrap();
     let exec = LocalExecutor::new(dir.path()).unwrap();
-    let action = Action::builder("c", ["/bin/sh", "-c", "true"])
+    let action = support::shell_action("c", "true")
         .input_from_output("p", "x.txt", "no_such_producer", "out")
         .output("o", "o.txt")
         .build();
@@ -199,7 +186,7 @@ fn failed_action_reports_exit_code_and_is_not_cached() {
     let dir = tempfile::tempdir().unwrap();
     let exec = LocalExecutor::new(dir.path()).unwrap();
 
-    let action = Action::builder("fail", ["/bin/sh", "-c", "exit 3"]).build();
+    let action = support::shell_action("fail", "exit 3").build();
 
     let result = exec.execute(&action).unwrap();
     assert_eq!(result.exit_code, 3);

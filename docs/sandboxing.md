@@ -5,6 +5,8 @@
 > materialized, how isolation is enforced on each platform, what correctness
 > guarantee each platform actually provides, and how read-tracking is used
 > **defensively** to catch under-declared inputs.
+>
+> For the concise rule-author contract, see `docs/sandbox-contract.md`.
 
 ## 1. Two layers: materialization vs. isolation
 
@@ -24,8 +26,8 @@ Inputs are placed with the cheapest store-safe mechanism for the platform:
 
 | Platform | Mechanism | Store-corruption safety |
 |----------|-----------|-------------------------|
-| **Linux** | hardlink from the CAS (shared inode) | read-only enforced by the sandbox's read-only bind mounts |
-| **macOS / APFS** | `clonefile` (copy-on-write, **distinct inode**) + `chmod 0444` | a write COWs — the store blob is never mutated; read-only is safe to set because it's a separate inode; per-inode hardlink limit sidestepped |
+| **Linux** | ordinary inputs: hardlink from the CAS (shared inode); writable inputs: private copy | sealed actions overmount ordinary declared inputs read-only inside `bubblewrap`; writable inputs are distinct files, so tool mutations cannot affect the CAS |
+| **macOS / APFS** | ordinary inputs: `clonefile` (copy-on-write, **distinct inode**) + `chmod 0444`; writable inputs: private copy | a write COWs for ordinary inputs, and writable inputs are already private copies — the store blob is never mutated; per-inode hardlink limit sidestepped |
 | any, cross-volume | copy + `0444` | (fallback) |
 
 The macOS choice is deliberate: a hardlink shares the inode, so a misbehaving action
@@ -33,23 +35,46 @@ that wrote to a materialized input would mutate the immutable store. A CoW clone
 that impossible (proven by a test that clears the read-only bit, overwrites the input,
 and confirms the store blob is intact).
 
+Writable inputs are an explicit action contract for tools that rewrite an input manifest
+as private scratch while still being deterministic with respect to the original digest.
+They remain part of the action key. Warm snapshot owners refresh writable inputs before
+every reuse because a previous run may have edited the on-disk copy.
+
 Output handling: parent directories for declared output paths are pre-created, so an
 action can write a nested output (`gen/config.json`) without `mkdir`-ing itself.
 
 ## 3. Isolation per platform, and the actual guarantee
 
-- **Linux — strict, kernel-enforced.** Mount namespaces with read-only bind mounts of
-  *only* the declared inputs. Undeclared files are **absent** from the namespace, so a
-  read of one fails with `ENOENT`. Hermeticity is guaranteed *by construction*.
-- **macOS — best-effort (~95%).** `sandbox-exec` profiles. Our sealed profile denies
-  network; environment is cleared and reset to canonical values (§7.4). But the
-  filesystem is **not** strictly isolated — an action can read undeclared host files
-  and succeed. `sandbox-exec` is deprecated (still functional) with no public
-  successor. For a hard guarantee, the **Linux-VM mode** is the escape hatch.
+- **Linux — strict, kernel-enforced for filesystem visibility.** Sealed actions run
+  under `bubblewrap`. The namespace exposes the prepared `/work` tree, private
+  `HOME`/`TMPDIR`, private `/dev/shm`, `/proc`, `/dev`, and declared toolchain roots
+  only. Ordinary declared inputs are overmounted read-only, so writes to inputs fail
+  instead of corrupting the CAS; explicitly writable inputs are private copies.
+  Undeclared host files are **absent** from the namespace, so a read of one fails with
+  `ENOENT`. The wrapper also drops effective capabilities, starts a new session,
+  requires a user namespace, and sets UID/GID/supplementary groups to `1000`. Cgroup
+  namespace isolation remains best-effort for host compatibility. Known non-hermetic
+  surfaces such as kernel version, CPU count, `/proc/self/mountinfo`,
+  `/proc/self/cgroup`, devices, and wall-clock time remain visible and are
+  tested/documented as outside the filesystem visibility guarantee.
+- **macOS — Seatbelt policy, not Linux namespaces.** Sealed actions run under a
+  generated `sandbox-exec` profile. The profile denies network by default, clears and
+  rebuilds the environment (§7.4), allows the prepared sandbox root plus private
+  `HOME`/`TMPDIR`, allows declared toolchain roots read-only, and denies ordinary
+  undeclared host file reads/writes. This is materially stronger than the old
+  network-only profile, but it is still not Linux-style mount namespace isolation:
+  denied paths may remain visible as metadata, a small Darwin runtime/system allowlist
+  is visible, and read-only input enforcement comes from APFS clone/copy materialization
+  plus permissions rather than read-only bind mounts. `sandbox-exec` is deprecated
+  (still functional) with no public successor. For a hard guarantee, the **Linux-VM
+  mode** remains the escape hatch.
 - **No Windows in v1.**
 
 Environment hermeticity *is* enforced on all platforms (the env is scrubbed to
 canonical values; there is no host passthrough), independent of filesystem isolation.
+For sealed/permeable actions, parent stdio is disconnected and inherited file
+descriptors above stderr are marked close-on-exec before the sandbox backend starts;
+native actions intentionally keep the host process environment and stdio behavior.
 
 ## 4. Input hermeticity via read-tracking — defensive, never permissive
 

@@ -114,6 +114,7 @@ dependencies = [
  "anneal-cas",
  "anneal-core",
  "anneal-snapshot",
+ "libc",
  "tempfile",
 ]
 
@@ -147,6 +148,8 @@ dependencies = [
  "anneal-cas",
  "anneal-core",
  "anneal-exec",
+ "serde",
+ "serde_json",
  "tempfile",
  "toml",
 ]

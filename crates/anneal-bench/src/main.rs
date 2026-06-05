@@ -19,6 +19,7 @@
 //!
 //! Run with `cargo run -p anneal-bench --release [-- N]` (default N=8).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -27,7 +28,29 @@ use anneal_analysis::Analyzer;
 use anneal_core::{AxisValues, Configuration, Label, OptLevel, Platform};
 use anneal_exec::{Action, LocalExecutor, PhaseTimings};
 use anneal_loader::load_package;
-use anneal_rules::builtin_rules;
+use anneal_rules::{builtin_rules, start_rule_timings, take_rule_timings, RuleTiming};
+
+#[derive(Debug, Clone)]
+struct FrontendTimings {
+    registry: Duration,
+    load_package: Duration,
+    configure_target: Duration,
+    analyze: Duration,
+    select_action: Duration,
+    execute_graph: Duration,
+    total: Duration,
+    rule_timings: Vec<RuleTiming>,
+}
+
+impl FrontendTimings {
+    fn before_execute_graph(&self) -> Duration {
+        self.registry
+            + self.load_package
+            + self.configure_target
+            + self.analyze
+            + self.select_action
+    }
+}
 
 fn main() {
     // Three workloads:
@@ -150,12 +173,17 @@ fn main() {
         .expect("open profile store")
         .warm_reuse(false) // the breakdown contrasts the fresh-per-build path
         .record_timings();
-    run_anneal_build(&profile, root, &pkg); // cold (from scratch)
+    let cold_frontend = run_anneal_build_timed(&profile, root, &pkg); // cold (from scratch)
     let cold_phases = profile.take_timings();
+    let noop_frontend = run_anneal_build_timed(&profile, root, &pkg); // cache hit
+    let _noop_phases = profile.take_timings();
     edit_source(&ws, edit_rel, 99); // warm snapshot now exists; this rebuild is incremental
-    run_anneal_build(&profile, root, &pkg);
+    let incremental_frontend = run_anneal_build_timed(&profile, root, &pkg);
     let incremental_phases = profile.take_timings();
+    report_frontend("Cold build", cold_frontend);
     report_phases("Cold build", &cold_phases);
+    report_frontend("No-op cache hit", noop_frontend);
+    report_frontend("Single-package change (incremental)", incremental_frontend);
     report_phases("Single-package change (incremental)", &incremental_phases);
 }
 
@@ -235,8 +263,24 @@ fn run(cmd: &mut Command, what: &str) {
 /// Run the full Anneal build pipeline for `//pkg:pkg`, executing just the coarse
 /// `cargo_workspace build` action so the comparison mirrors `cargo build`.
 fn run_anneal_build(exec: &LocalExecutor, root: &Path, pkg: &str) {
+    let _ = run_anneal_build_timed(exec, root, pkg);
+}
+
+/// Same as [`run_anneal_build`], with front-end timing for the work before and around
+/// the executor. `execute_graph` includes cache lookup and any action execution; the
+/// other rows are the front-end work required to construct the action.
+fn run_anneal_build_timed(exec: &LocalExecutor, root: &Path, pkg: &str) -> FrontendTimings {
+    let total_start = Instant::now();
+
+    let start = Instant::now();
     let registry = builtin_rules();
+    let registry_time = start.elapsed();
+
+    let start = Instant::now();
     let graph = load_package(root, pkg, &registry).expect("load_package");
+    let load_package_time = start.elapsed();
+
+    let start = Instant::now();
     let cfg = Configuration::new(
         Platform::new("host", "host"),
         AxisValues {
@@ -245,20 +289,43 @@ fn run_anneal_build(exec: &LocalExecutor, root: &Path, pkg: &str) {
         },
     );
     let label = Label::parse(&format!("//{pkg}:{pkg}")).expect("label");
+    let configure_target_time = start.elapsed();
+
+    let start = Instant::now();
+    start_rule_timings();
     let analyzed = Analyzer::new(&graph, &registry, &cfg, root, exec.cas())
         .analyze(&label)
         .expect("analyze");
+    let rule_timings = take_rule_timings();
+    let analyze_time = start.elapsed();
+
+    let start = Instant::now();
     let build: Vec<Action> = analyzed
         .actions()
         .filter(|a| a.name().starts_with("cargo_workspace build"))
         .cloned()
         .collect();
     assert_eq!(build.len(), 1, "expected exactly one build action");
+    let select_action_time = start.elapsed();
+
+    let start = Instant::now();
     let results = exec.execute_graph(&build).expect("execute_graph");
+    let execute_graph_time = start.elapsed();
     assert!(
         results.iter().all(|r| r.success()),
         "anneal build action failed"
     );
+
+    FrontendTimings {
+        registry: registry_time,
+        load_package: load_package_time,
+        configure_target: configure_target_time,
+        analyze: analyze_time,
+        select_action: select_action_time,
+        execute_graph: execute_graph_time,
+        total: total_start.elapsed(),
+        rule_timings,
+    }
 }
 
 /// `cargo build` with the rule's flags/env, output suppressed.
@@ -418,5 +485,64 @@ fn report_phases(title: &str, timings: &[PhaseTimings]) {
          The hypothesis: `save target/ snapshot` dominates it._",
         ms(wrap),
         pct(wrap),
+    );
+}
+
+/// Print the library front-end cost needed to construct and submit the build action.
+/// This is the missing context for cache hits, where executor phase timings are empty.
+fn report_frontend(title: &str, timings: FrontendTimings) {
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    let pct = |d: Duration| d.as_secs_f64() / timings.total.as_secs_f64() * 100.0;
+    let frontend = timings.before_execute_graph();
+
+    println!("\n## {title} — front-end breakdown (single run)\n");
+    println!("| Phase | Time | % of total |");
+    println!("|---|---:|---:|");
+    for (name, d) in [
+        ("build rule registry", timings.registry),
+        ("load package", timings.load_package),
+        ("configure target", timings.configure_target),
+        ("analyze target", timings.analyze),
+        ("select build action", timings.select_action),
+        ("execute_graph", timings.execute_graph),
+    ] {
+        println!("| {name} | {:.1} ms | {:.0}% |", ms(d), pct(d));
+    }
+    println!("| **total** | **{:.1} ms** | 100% |", ms(timings.total));
+    println!(
+        "\n_Front-end before `execute_graph` = {:.1} ms ({:.0}% of total)._",
+        ms(frontend),
+        pct(frontend),
+    );
+    report_rule_timings(title, timings.analyze, &timings.rule_timings);
+}
+
+fn report_rule_timings(title: &str, analyze_total: Duration, timings: &[RuleTiming]) {
+    if timings.is_empty() {
+        return;
+    }
+
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    let pct = |d: Duration| d.as_secs_f64() / analyze_total.as_secs_f64() * 100.0;
+    let mut by_label: BTreeMap<&'static str, Duration> = BTreeMap::new();
+    for timing in timings {
+        *by_label.entry(timing.label).or_default() += timing.duration;
+    }
+    let measured: Duration = by_label.values().copied().sum();
+
+    println!("\n### {title} — analysis subspans\n");
+    println!("| Span | Time | % of analyze |");
+    println!("|---|---:|---:|");
+    for (label, duration) in by_label {
+        println!(
+            "| `{label}` | {:.1} ms | {:.0}% |",
+            ms(duration),
+            pct(duration)
+        );
+    }
+    println!(
+        "| **measured subspans** | **{:.1} ms** | {:.0}% |",
+        ms(measured),
+        pct(measured),
     );
 }

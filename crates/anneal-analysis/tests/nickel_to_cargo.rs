@@ -118,10 +118,15 @@ fn cargo_crate_embeds_nickel_generated_json() {
         TestOutcome::Passed,
         "unit test output:\n{output}"
     );
-    assert!(result
+    assert!(
+        result
         .cases
         .iter()
-        .any(|c| c.name == "tests::embeds_generated_config" && c.outcome == TestOutcome::Passed));
+            .any(|c| c.name == "tests::embeds_generated_config"
+                && c.outcome == TestOutcome::Passed),
+        "expected generated-config unit case to pass; parsed cases: {:?}\noutput:\n{output}",
+        result.cases
+    );
 }
 
 #[test]

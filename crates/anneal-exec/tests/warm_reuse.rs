@@ -12,22 +12,17 @@ use std::path::PathBuf;
 use anneal_core::Digest;
 use anneal_exec::{Action, Executor, LocalExecutor};
 
+mod support;
+
 /// `cat a.txt b.txt > out.txt` as a snapshot owner sharing one stable snapshot key, so
 /// every build maps to the same warm working tree.
 fn concat_action(a: Digest, b: Digest, snapshot_key: Digest) -> Action {
-    Action::builder(
-        "concat",
-        [
-            "/bin/sh",
-            "-c",
-            "mkdir -p cache && cat a.txt b.txt > out.txt",
-        ],
-    )
-    .input("a", "a.txt", a)
-    .input("b", "b.txt", b)
-    .output("out", "out.txt")
-    .snapshot(snapshot_key, vec![PathBuf::from("cache")])
-    .build()
+    support::shell_action("concat", "mkdir -p cache && cat a.txt b.txt > out.txt")
+        .input("a", "a.txt", a)
+        .input("b", "b.txt", b)
+        .output("out", "out.txt")
+        .snapshot(snapshot_key, vec![PathBuf::from("cache")])
+        .build()
 }
 
 #[test]
@@ -83,19 +78,17 @@ fn private_snapshot_skips_cas_save_under_warm_reuse_but_shared_saves() {
     let store = tmp.path().join(".anneal");
     let exec = LocalExecutor::new(&store).unwrap(); // warm reuse on by default
     let index = |k: &Digest| store.join("snapshots").join("index").join(k.to_hex());
-    let cmd = [
-        "/bin/sh",
-        "-c",
-        "mkdir -p cache && echo m > cache/m && cp in.txt out.txt",
-    ];
     // Distinct input content per action so they have distinct action digests — otherwise
     // the cache key (which excludes snapshot_key/shared/name) would collide and the second
     // would cache-hit the first instead of running.
     let make = |tag_name: &str, content: &[u8], key: Digest, private: bool| -> Action {
         let blob = exec.cas().put(content).unwrap();
-        let b = Action::builder(tag_name, cmd)
-            .input("in", "in.txt", blob)
-            .output("out", "out.txt");
+        let b = support::shell_action(
+            tag_name,
+            "mkdir -p cache && echo m > cache/m && cp in.txt out.txt",
+        )
+        .input("in", "in.txt", blob)
+        .output("out", "out.txt");
         if private {
             b.snapshot_private(key, vec![PathBuf::from("cache")])
                 .build()

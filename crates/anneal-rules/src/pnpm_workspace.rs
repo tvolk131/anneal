@@ -38,13 +38,14 @@
 use std::path::{Path, PathBuf};
 
 use anneal_core::Digest;
-use anneal_exec::{Action, ActionBuilder};
+use anneal_exec::{Action, ActionBuilder, Toolchain};
 
 use crate::attrs::AttrValue;
 use crate::context::RuleContext;
 use crate::providers::{Artifact, ArtifactSource, FileSet, ProviderSet};
 use crate::rule::{Analysis, Rule, RuleError};
 use crate::schema::{AttrSchema, AttrType};
+use crate::toolchain::{nix_base_runtime, nix_store_toolchain, toolchain_path_env};
 
 /// `scripts` is an optional table; the rule validates its structure. `data` routes other
 /// targets' file outputs into the workspace — plain-path (§4 of `docs/pnpm-workspace.md`):
@@ -74,8 +75,9 @@ impl Rule for PnpmWorkspace {
     }
 
     fn analyze(&self, ctx: &RuleContext) -> Result<Analysis, RuleError> {
-        let toolchain_dirs = toolchain_bin_dirs()?;
-        let path_env = path_env(&toolchain_dirs);
+        let toolchain = nix_store_toolchain("node", &["pnpm", "node"])?;
+        let runtime = nix_base_runtime()?;
+        let path_env = toolchain_path_env(&[&toolchain, &runtime]);
 
         // --- install inputs: manifests + lockfile only (not the source tree) ---
         if !ctx.package_file_exists(Path::new("package.json")) {
@@ -98,7 +100,7 @@ impl Rule for PnpmWorkspace {
         // The same snapshot key is shared by install (which saves) and every script
         // (which restores) — the concrete form of "the edge carries the install-snapshot
         // identity" (§6 of the pnpm doc).
-        let snapshot_key = snapshot_key(&toolchain_dirs, source_digest(&lockfile), ctx);
+        let snapshot_key = snapshot_key(&toolchain, &runtime, source_digest(&lockfile), ctx);
         let snapshot_paths = vec![PathBuf::from("node_modules"), PathBuf::from(STORE_DIR)];
 
         let mut actions = Vec::new();
@@ -117,11 +119,16 @@ impl Rule for PnpmWorkspace {
                 ],
             ),
             &path_env,
+            &toolchain,
+            &runtime,
         );
-        let install = add_source(add_source(install, &package_json), &lockfile)
+        // pnpm may atomically refresh the lockfile even under `--frozen-lockfile`
+        // (tempfile + rename with identical content). Give it a private writable copy
+        // while keeping the lockfile digest in the action key.
+        let install = add_writable_source(add_source(install, &package_json), &lockfile)
             .configured(ctx.config().clone(), Vec::new())
             .snapshot(snapshot_key, snapshot_paths.clone())
-            .build();
+            .try_build()?;
         actions.push(install);
 
         // --- per-script actions: SnapshotConsuming (restore node_modules read-only) ---
@@ -153,6 +160,8 @@ impl Rule for PnpmWorkspace {
                                         test_command(name),
                                     ),
                                     &path_env,
+                                    &toolchain,
+                                    &runtime,
                                 ),
                                 &sources,
                             ),
@@ -161,7 +170,7 @@ impl Rule for PnpmWorkspace {
                         .output("results.txt", "results.txt")
                         .configured(ctx.config().clone(), Vec::new())
                         .snapshot_restore(snapshot_key, snapshot_paths.clone())
-                        .build();
+                        .try_build()?;
                         actions.push(action);
                     }
                     "build" => {
@@ -179,6 +188,8 @@ impl Rule for PnpmWorkspace {
                                         vec!["pnpm".to_owned(), "run".to_owned(), name.clone()],
                                     ),
                                     &path_env,
+                                    &toolchain,
+                                    &runtime,
                                 ),
                                 &sources,
                             ),
@@ -197,7 +208,7 @@ impl Rule for PnpmWorkspace {
                         let action = builder
                             .configured(ctx.config().clone(), Vec::new())
                             .snapshot_restore(snapshot_key, snapshot_paths.clone())
-                            .build();
+                            .try_build()?;
                         actions.push(action);
                     }
                     other => {
@@ -230,33 +241,33 @@ fn test_command(script: &str) -> Vec<String> {
         "pnpm run {script} > results.txt 2>&1; code=$?\n\
          printf 'ANNEAL_TEST_EXIT=%s\\n' \"$code\" >> results.txt\n"
     );
-    vec!["/bin/sh".to_owned(), "-c".to_owned(), body]
+    vec!["sh".to_owned(), "-c".to_owned(), body]
 }
 
 /// Apply the shared environment: toolchain on PATH, an in-sandbox pnpm store, and the
 /// update notifier disabled (no network reach).
-fn with_env(builder: ActionBuilder, path_env: &str) -> ActionBuilder {
+fn with_env(
+    builder: ActionBuilder,
+    path_env: &str,
+    toolchain: &Toolchain,
+    runtime: &Toolchain,
+) -> ActionBuilder {
     builder
+        .toolchain(toolchain.clone())
+        .toolchain(runtime.clone())
         .env("PATH", path_env)
         .env("npm_config_store_dir", STORE_DIR)
         .env("npm_config_update_notifier", "false")
 }
 
-/// PATH = toolchain bin dirs, then the system locations.
-fn path_env(toolchain_dirs: &[PathBuf]) -> String {
-    let mut path: Vec<String> = toolchain_dirs
-        .iter()
-        .map(|d| d.to_string_lossy().into_owned())
-        .collect();
-    path.push("/usr/bin".to_owned());
-    path.push("/bin".to_owned());
-    path.join(":")
-}
-
 /// Add every resolved source artifact as a content-addressed input at its own path.
 fn with_sources(mut builder: ActionBuilder, sources: &[Artifact]) -> ActionBuilder {
     for artifact in sources {
-        builder = add_source(builder, artifact);
+        builder = if is_pnpm_lockfile(&artifact.path) {
+            add_writable_source(builder, artifact)
+        } else {
+            add_source(builder, artifact)
+        };
     }
     builder
 }
@@ -331,6 +342,16 @@ fn add_source(builder: ActionBuilder, artifact: &Artifact) -> ActionBuilder {
     builder.input(name, artifact.path.clone(), source_digest(artifact))
 }
 
+/// Add a source artifact as a private writable input while preserving its digest identity.
+fn add_writable_source(builder: ActionBuilder, artifact: &Artifact) -> ActionBuilder {
+    let name = artifact.path.to_string_lossy().into_owned();
+    builder.writable_input(name, artifact.path.clone(), source_digest(artifact))
+}
+
+fn is_pnpm_lockfile(path: &Path) -> bool {
+    path == Path::new("pnpm-lock.yaml")
+}
+
 /// Extract the CAS digest of a resolved source artifact. `source_artifact`/`source_tree`
 /// always yield [`ArtifactSource::Source`], so the `Output` arm is unreachable.
 fn source_digest(artifact: &Artifact) -> Digest {
@@ -343,40 +364,22 @@ fn source_digest(artifact: &Artifact) -> Digest {
 }
 
 /// Coarse snapshot key — `(platform, toolchain, pnpm-lock.yaml)` (§6 of the pnpm doc).
-/// The toolchain bin dirs stand in for the pnpm/node version (ad-hoc PATH discovery, as
-/// in `cargo_workspace`, until `register_toolchain`). **Node version is intentionally
-/// not a separate term**: with `--ignore-scripts` there is no install-time native
-/// compilation, so `node_modules` content does not depend on it.
-fn snapshot_key(toolchain_dirs: &[PathBuf], lockfile: Digest, ctx: &RuleContext) -> Digest {
+/// The toolchain term is the canonical `/nix/store/...` identity for pnpm/node. **Node
+/// version is intentionally not a separate term**: with `--ignore-scripts` there is no
+/// install-time native compilation, so `node_modules` content does not depend on it.
+fn snapshot_key(
+    toolchain: &Toolchain,
+    runtime: &Toolchain,
+    lockfile: Digest,
+    ctx: &RuleContext,
+) -> Digest {
     let mut buf = Vec::new();
-    for dir in toolchain_dirs {
-        buf.extend_from_slice(dir.to_string_lossy().as_bytes());
-        buf.push(b':');
-    }
+    buf.extend_from_slice(toolchain.identity().as_bytes());
+    buf.push(0);
+    buf.extend_from_slice(runtime.identity().as_bytes());
     buf.push(0);
     buf.extend_from_slice(lockfile.as_bytes());
     buf.push(0);
     buf.extend_from_slice(ctx.config().platform().target_triple().as_bytes());
     Digest::of(&buf)
-}
-
-/// The bin directories containing `pnpm` and `node`, discovered on `PATH`.
-fn toolchain_bin_dirs() -> Result<Vec<PathBuf>, RuleError> {
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    for tool in ["pnpm", "node"] {
-        let dir = which_dir(tool).ok_or_else(|| {
-            RuleError::Message(format!(
-                "`{tool}` not found on PATH; pnpm_workspace requires pnpm (>= 10) and node"
-            ))
-        })?;
-        if !dirs.contains(&dir) {
-            dirs.push(dir);
-        }
-    }
-    Ok(dirs)
-}
-
-fn which_dir(tool: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).find(|dir| dir.join(tool).is_file())
 }

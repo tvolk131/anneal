@@ -5,7 +5,7 @@
 //! outputs → record the cache entry.** A caller never touches the materializer,
 //! sandbox, or cache directly.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -21,7 +21,7 @@ use anneal_cas::Cas;
 use anneal_core::Digest;
 use anneal_snapshot::SnapshotStore;
 
-use crate::action::{Action, CachePolicy, ExecutionMode, InputSource};
+use crate::action::{Action, ActionError, CachePolicy, ExecutionMode, InputSource};
 use crate::cache::{action_digest, ActionCache, StoredResult};
 use crate::materializer;
 use crate::sandbox::{self, SandboxSpec};
@@ -189,6 +189,9 @@ impl LocalExecutor {
     pub fn execute_graph(&self, actions: &[Action]) -> Result<Vec<ActionResult>, ExecError> {
         if actions.is_empty() {
             return Ok(Vec::new());
+        }
+        for action in actions {
+            guard_valid(action)?;
         }
         let edges = build_edges(actions)?;
         let workers = self.parallelism.min(actions.len()).max(1);
@@ -522,6 +525,7 @@ impl LocalExecutor {
 
         let spec = SandboxSpec {
             mode: action.execution_mode,
+            root: &prepared.root,
             cwd: &prepared.cwd,
             home: &prepared.home,
             tmp: &prepared.tmp,
@@ -529,6 +533,7 @@ impl LocalExecutor {
         };
         let run_start = Instant::now();
         let mut child = sandbox::build_command(action, &spec)
+            .map_err(ExecError::Sandbox)?
             .spawn()
             .map_err(ExecError::Spawn)?;
         let status = wait_with_timeout(&mut child, action.timeout_ms)?;
@@ -646,6 +651,12 @@ impl LocalExecutor {
                 InputSource::Output { .. } => None,
             })
             .collect();
+        let writable_inputs: BTreeSet<PathBuf> = action
+            .inputs
+            .values()
+            .filter(|i| i.writable)
+            .map(|i| i.path.clone())
+            .collect();
 
         // Reuse iff a committed manifest exists AND the working tree is present.
         let baseline = match InputManifest::load(&manifest_path)? {
@@ -665,7 +676,7 @@ impl LocalExecutor {
             let _ = fs::remove_dir_all(warm_dir.join(".home"));
             let _ = fs::remove_dir_all(warm_dir.join(".tmp"));
             let prepared = materializer::layout(action, warm_dir.clone())?;
-            warm::sync(&self.cas, &prepared.cwd, &old, &desired)?;
+            warm::sync(&self.cas, &prepared.cwd, &old, &desired, &writable_inputs)?;
             t_materialize = m.elapsed();
             prepared
         } else {
@@ -687,6 +698,7 @@ impl LocalExecutor {
 
         let spec = SandboxSpec {
             mode: action.execution_mode,
+            root: &prepared.root,
             cwd: &prepared.cwd,
             home: &prepared.home,
             tmp: &prepared.tmp,
@@ -694,6 +706,7 @@ impl LocalExecutor {
         };
         let run_start = Instant::now();
         let mut child = sandbox::build_command(action, &spec)
+            .map_err(ExecError::Sandbox)?
             .spawn()
             .map_err(ExecError::Spawn)?;
         let status = wait_with_timeout(&mut child, action.timeout_ms)?;
@@ -755,6 +768,7 @@ impl LocalExecutor {
         restore: bool,
         save: bool,
     ) -> Result<ActionResult, ExecError> {
+        guard_valid(action)?;
         guard_resolved(action)?;
         let root = self.sandboxes.join(sandbox_name);
         self.run_core(action, root, restore, save)
@@ -773,6 +787,7 @@ impl LocalExecutor {
         action: &Action,
         fresh: bool,
     ) -> Result<ActionResult, ExecError> {
+        guard_valid(action)?;
         guard_resolved(action)?;
         let skey = action
             .snapshot_key
@@ -787,6 +802,7 @@ impl LocalExecutor {
 
 impl Executor for LocalExecutor {
     fn execute(&self, action: &Action) -> Result<ActionResult, ExecError> {
+        guard_valid(action)?;
         guard_resolved(action)?;
 
         // Fixed-output (FOD) fetches are cached by their *output* hash, not their inputs,
@@ -856,6 +872,10 @@ impl Executor for LocalExecutor {
     }
 }
 
+fn guard_valid(action: &Action) -> Result<(), ExecError> {
+    action.validate().map_err(ExecError::InvalidAction)
+}
+
 /// A single action must be fully resolved (every input a concrete blob); Output
 /// references are resolved by `execute_graph` first.
 fn guard_resolved(action: &Action) -> Result<(), ExecError> {
@@ -892,6 +912,8 @@ fn wait_with_timeout(child: &mut Child, timeout_ms: u64) -> Result<ExitStatus, E
 pub enum ExecError {
     /// A filesystem/CAS error during materialization, capture, or caching.
     Io(io::Error),
+    /// The configured sandbox backend is missing or unusable.
+    Sandbox(SandboxError),
     /// The command could not be spawned.
     Spawn(io::Error),
     /// A declared output was not produced.
@@ -909,12 +931,15 @@ pub enum ExecError {
     /// A fixed-output (FOD) action produced content whose digest did not match its pin —
     /// a corrupt download, a compromised mirror, or a moved artifact. Fails closed.
     FixedOutputMismatch { expected: Digest, actual: Digest },
+    /// The action contract is malformed and was rejected before materialization.
+    InvalidAction(ActionError),
 }
 
 impl fmt::Display for ExecError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ExecError::Io(e) => write!(f, "I/O error: {e}"),
+            ExecError::Sandbox(e) => write!(f, "{e}"),
             ExecError::Spawn(e) => write!(f, "failed to spawn command: {e}"),
             ExecError::MissingOutput(name) => {
                 write!(f, "action did not produce declared output {name:?}")
@@ -939,6 +964,7 @@ impl fmt::Display for ExecError {
                 f,
                 "fixed-output hash mismatch: expected {expected}, fetched {actual}"
             ),
+            ExecError::InvalidAction(error) => write!(f, "invalid action: {error}"),
         }
     }
 }
@@ -953,7 +979,71 @@ impl std::error::Error for ExecError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             ExecError::Io(e) | ExecError::Spawn(e) => Some(e),
+            ExecError::Sandbox(e) => Some(e),
+            ExecError::InvalidAction(e) => Some(e),
             _ => None,
         }
     }
 }
+
+/// Failure setting up the OS sandbox backend before the action command starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SandboxError {
+    /// Linux sealed execution needs `bwrap` to be installed on the host.
+    BubblewrapNotFound,
+    /// `bwrap` was present, but a small namespace self-test failed.
+    BubblewrapProbeFailed {
+        program: PathBuf,
+        status: Option<i32>,
+        stderr: String,
+    },
+    /// Linux sealed execution could not prepare synthetic account files.
+    SyntheticEtcFailed { message: String },
+    /// The child process could not be prepared with sealed/permeable fd hardening.
+    ProcessHardeningFailed { message: String },
+}
+
+impl fmt::Display for SandboxError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SandboxError::BubblewrapNotFound => write!(
+                f,
+                "sealed Linux execution requires bubblewrap (`bwrap`) on PATH"
+            ),
+            SandboxError::BubblewrapProbeFailed {
+                program,
+                status,
+                stderr,
+            } => {
+                let status = status
+                    .map(|code| format!("exit status {code}"))
+                    .unwrap_or_else(|| "no exit status".to_owned());
+                if stderr.is_empty() {
+                    write!(
+                        f,
+                        "bubblewrap at `{}` failed the sandbox self-test ({status})",
+                        program.display()
+                    )
+                } else {
+                    write!(
+                        f,
+                        "bubblewrap at `{}` failed the sandbox self-test ({status}): {}",
+                        program.display(),
+                        stderr
+                    )
+                }
+            }
+            SandboxError::SyntheticEtcFailed { message } => {
+                write!(f, "failed to prepare synthetic sandbox /etc: {message}")
+            }
+            SandboxError::ProcessHardeningFailed { message } => {
+                write!(
+                    f,
+                    "failed to prepare sandboxed process file descriptors: {message}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for SandboxError {}

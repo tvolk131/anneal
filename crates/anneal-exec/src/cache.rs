@@ -50,6 +50,7 @@ pub fn action_digest(action: &Action) -> Digest {
     for (name, input) in &action.inputs {
         write_str(&mut buf, name);
         write_str(&mut buf, &input.path.to_string_lossy());
+        buf.push(u8::from(input.writable));
         match &input.source {
             InputSource::Blob(digest) => {
                 buf.push(0);
@@ -68,6 +69,23 @@ pub fn action_digest(action: &Action) -> Digest {
     for (key, value) in &action.env {
         write_str(&mut buf, key);
         write_str(&mut buf, value);
+    }
+
+    // toolchain identities (BTreeMap → sorted by name). The identity is the cache
+    // boundary; roots/bin dirs are included too so sandbox policy-relevant mount
+    // hints cannot drift without changing the key.
+    write_count(&mut buf, action.toolchains.len());
+    for (name, toolchain) in &action.toolchains {
+        write_str(&mut buf, name);
+        write_str(&mut buf, toolchain.identity());
+        write_count(&mut buf, toolchain.bin_dirs().len());
+        for dir in toolchain.bin_dirs() {
+            write_str(&mut buf, &dir.to_string_lossy());
+        }
+        write_count(&mut buf, toolchain.read_only_roots().len());
+        for root in toolchain.read_only_roots() {
+            write_str(&mut buf, &root.to_string_lossy());
+        }
     }
 
     write_str(&mut buf, &action.working_directory.to_string_lossy());
@@ -212,7 +230,7 @@ fn parse_entry(text: &str) -> io::Result<StoredResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::action::{Action, CachePolicy, ExecutionMode};
+    use crate::action::{Action, CachePolicy, ExecutionMode, Toolchain};
     use anneal_core::{Axis, AxisValues, Configuration, OptLevel, Platform};
 
     fn cfg(opt: OptLevel) -> Configuration {
@@ -227,27 +245,37 @@ mod tests {
 
     #[test]
     fn name_is_excluded_from_key() {
-        let a = Action::builder("name-a", ["/bin/true"]).build();
-        let b = Action::builder("name-b", ["/bin/true"]).build();
+        let a = Action::builder("name-a", ["./true"]).build();
+        let b = Action::builder("name-b", ["./true"]).build();
         assert_eq!(action_digest(&a), action_digest(&b));
     }
 
     #[test]
     fn command_and_env_change_the_key() {
-        let base = Action::builder("a", ["/bin/echo", "x"]).build();
-        let diff_cmd = Action::builder("a", ["/bin/echo", "y"]).build();
-        let diff_env = Action::builder("a", ["/bin/echo", "x"])
-            .env("K", "V")
-            .build();
+        let base = Action::builder("a", ["./echo", "x"]).build();
+        let diff_cmd = Action::builder("a", ["./echo", "y"]).build();
+        let diff_env = Action::builder("a", ["./echo", "x"]).env("K", "V").build();
         assert_ne!(action_digest(&base), action_digest(&diff_cmd));
         assert_ne!(action_digest(&base), action_digest(&diff_env));
+    }
+
+    #[test]
+    fn writable_inputs_change_the_key() {
+        let d = Digest::of(b"manifest");
+        let readonly = Action::builder("a", ["./tool"])
+            .input("manifest", "manifest.txt", d)
+            .build();
+        let writable = Action::builder("a", ["./tool"])
+            .writable_input("manifest", "manifest.txt", d)
+            .build();
+        assert_ne!(action_digest(&readonly), action_digest(&writable));
     }
 
     #[test]
     fn unconsumed_axis_does_not_change_key_but_consumed_one_does() {
         // Same action, configs differ only in opt_level.
         let make = |opt, consume: &[Axis]| {
-            Action::builder("a", ["/bin/true"])
+            Action::builder("a", ["./true"])
                 .configured(cfg(opt), consume.to_vec())
                 .build()
         };
@@ -261,6 +289,20 @@ mod tests {
             action_digest(&make(OptLevel::Debug, &[Axis::OptLevel])),
             action_digest(&make(OptLevel::Release, &[Axis::OptLevel])),
         );
+    }
+
+    #[test]
+    fn consumed_axis_order_and_duplicates_do_not_change_the_key() {
+        let a = Action::builder("a", ["./true"])
+            .configured(cfg(OptLevel::Release), [Axis::Coverage, Axis::OptLevel])
+            .build();
+        let b = Action::builder("a", ["./true"])
+            .configured(
+                cfg(OptLevel::Release),
+                [Axis::OptLevel, Axis::Coverage, Axis::Coverage],
+            )
+            .build();
+        assert_eq!(action_digest(&a), action_digest(&b));
     }
 
     #[test]
@@ -283,14 +325,35 @@ mod tests {
 
     #[test]
     fn mode_and_policy_change_the_key() {
-        let base = Action::builder("a", ["/bin/true"]).build();
+        let base = Action::builder("a", ["./true"]).build();
         let permeable = Action::builder("a", ["/bin/true"])
             .mode(ExecutionMode::Permeable)
             .build();
-        let noncache = Action::builder("a", ["/bin/true"])
+        let noncache = Action::builder("a", ["./true"])
             .cache_policy(CachePolicy::NonCacheable)
             .build();
         assert_ne!(action_digest(&base), action_digest(&permeable));
         assert_ne!(action_digest(&base), action_digest(&noncache));
+    }
+
+    #[test]
+    fn toolchain_identity_changes_the_key() {
+        let toolchain = |identity| {
+            Toolchain::new(
+                "rust",
+                identity,
+                vec![PathBuf::from("/nix/store/rust/bin")],
+                vec![PathBuf::from("/nix/store/rust")],
+            )
+            .unwrap()
+        };
+        let a = Action::builder("a", ["/nix/store/rust/bin/true"])
+            .toolchain(toolchain("/nix/store/rust-a/bin/cargo"))
+            .build();
+        let b = Action::builder("a", ["/nix/store/rust/bin/true"])
+            .toolchain(toolchain("/nix/store/rust-b/bin/cargo"))
+            .build();
+
+        assert_ne!(action_digest(&a), action_digest(&b));
     }
 }

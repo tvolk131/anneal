@@ -19,7 +19,7 @@
 //!
 //! Only declared input paths are touched — never `target/` (the warm snapshot).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -90,19 +90,21 @@ pub(crate) fn sync(
     cwd: &Path,
     old: &InputManifest,
     desired: &BTreeMap<PathBuf, Digest>,
+    writable: &BTreeSet<PathBuf>,
 ) -> io::Result<SyncStats> {
     let mut stats = SyncStats::default();
 
     // Added / changed / unchanged.
     for (rel, digest) in desired {
+        let is_writable = writable.contains(rel);
         match old.entries.get(rel) {
-            Some(prev) if prev == digest => stats.left += 1,
+            Some(prev) if prev == digest && !is_writable => stats.left += 1,
             Some(_) => {
-                place_fresh(cas, &cwd.join(rel), digest)?;
+                place_fresh(cas, &cwd.join(rel), digest, is_writable)?;
                 stats.replaced += 1;
             }
             None => {
-                place_fresh(cas, &cwd.join(rel), digest)?;
+                place_fresh(cas, &cwd.join(rel), digest, is_writable)?;
                 stats.added += 1;
             }
         }
@@ -125,7 +127,7 @@ pub(crate) fn sync(
 /// first — it may be read-only and/or a shared-inode clone, and a plain overwrite would
 /// either fail or carry a stale mtime. `fs::write` of a new file stamps mtime = now,
 /// which is the freshness cargo's mtime-based check requires (§5.5).
-fn place_fresh(cas: &Cas, dest: &Path, digest: &Digest) -> io::Result<()> {
+fn place_fresh(cas: &Cas, dest: &Path, digest: &Digest, writable: bool) -> io::Result<()> {
     let bytes = cas.get(digest)?.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
@@ -137,7 +139,7 @@ fn place_fresh(cas: &Cas, dest: &Path, digest: &Digest) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     fs::write(dest, &bytes)?;
-    set_read_only(dest)
+    set_mode(dest, writable)
 }
 
 /// Remove a file if present (idempotent). Works on a read-only file — removal needs write
@@ -151,13 +153,16 @@ fn remove(dest: &Path) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn set_read_only(path: &Path) -> io::Result<()> {
+fn set_mode(path: &Path, writable: bool) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o444))
+    fs::set_permissions(
+        path,
+        fs::Permissions::from_mode(if writable { 0o644 } else { 0o444 }),
+    )
 }
 
 #[cfg(not(unix))]
-fn set_read_only(_path: &Path) -> io::Result<()> {
+fn set_mode(_path: &Path, _writable: bool) -> io::Result<()> {
     Ok(())
 }
 
@@ -216,6 +221,9 @@ mod tests {
     fn desired(pairs: &[(&str, Digest)]) -> BTreeMap<PathBuf, Digest> {
         pairs.iter().map(|(p, d)| (PathBuf::from(p), *d)).collect()
     }
+    fn writable(paths: &[&str]) -> BTreeSet<PathBuf> {
+        paths.iter().map(PathBuf::from).collect()
+    }
     fn mtime(p: &Path) -> SystemTime {
         fs::metadata(p).unwrap().modified().unwrap()
     }
@@ -230,7 +238,7 @@ mod tests {
         // tool's fingerprint skips it.
         let (_t, cas, cwd) = setup();
         let d = cas.put(b"hello").unwrap();
-        place_fresh(&cas, &cwd.join("src/lib.rs"), &d).unwrap();
+        place_fresh(&cas, &cwd.join("src/lib.rs"), &d, false).unwrap();
         let before_ino = inode(&cwd.join("src/lib.rs"));
         let before_mtime = mtime(&cwd.join("src/lib.rs"));
 
@@ -239,6 +247,7 @@ mod tests {
             &cwd,
             &manifest(&[("src/lib.rs", d)]),
             &desired(&[("src/lib.rs", d)]),
+            &writable(&[]),
         )
         .unwrap();
 
@@ -292,6 +301,7 @@ mod tests {
             &cwd,
             &manifest(&[("src/lib.rs", old)]),
             &desired(&[("src/lib.rs", new)]),
+            &writable(&[]),
         )
         .unwrap();
 
@@ -324,14 +334,15 @@ mod tests {
         let keep = cas.put(b"keep").unwrap();
         let gone = cas.put(b"gone").unwrap();
         let fresh = cas.put(b"fresh").unwrap();
-        place_fresh(&cas, &cwd.join("keep.rs"), &keep).unwrap();
-        place_fresh(&cas, &cwd.join("gone.rs"), &gone).unwrap();
+        place_fresh(&cas, &cwd.join("keep.rs"), &keep, false).unwrap();
+        place_fresh(&cas, &cwd.join("gone.rs"), &gone, false).unwrap();
 
         let stats = sync(
             &cas,
             &cwd,
             &manifest(&[("keep.rs", keep), ("gone.rs", gone)]),
             &desired(&[("keep.rs", keep), ("new.rs", fresh)]),
+            &writable(&[]),
         )
         .unwrap();
 
@@ -358,7 +369,7 @@ mod tests {
         let (_t, cas, cwd) = setup();
         let a = cas.put(b"a").unwrap();
         let b = cas.put(b"b").unwrap();
-        place_fresh(&cas, &cwd.join("x.rs"), &a).unwrap();
+        place_fresh(&cas, &cwd.join("x.rs"), &a, false).unwrap();
         assert_eq!(
             fs::metadata(cwd.join("x.rs")).unwrap().permissions().mode() & 0o777,
             0o444
@@ -369,9 +380,43 @@ mod tests {
             &cwd,
             &manifest(&[("x.rs", a)]),
             &desired(&[("x.rs", b)]),
+            &writable(&[]),
         )
         .unwrap();
         assert_eq!(fs::read(cwd.join("x.rs")).unwrap(), b"b");
+    }
+
+    #[test]
+    fn writable_input_is_refreshed_even_when_digest_is_unchanged() {
+        // A mutable input may have been edited by the prior warm run, so the next reuse
+        // cannot trust the on-disk bytes just because the desired digest is unchanged.
+        let (_t, cas, cwd) = setup();
+        let lock = cas.put(b"lockfile").unwrap();
+        let p = cwd.join("pnpm-lock.yaml");
+        place_fresh(&cas, &p, &lock, true).unwrap();
+        fs::write(&p, b"mutated by tool").unwrap();
+
+        let stats = sync(
+            &cas,
+            &cwd,
+            &manifest(&[("pnpm-lock.yaml", lock)]),
+            &desired(&[("pnpm-lock.yaml", lock)]),
+            &writable(&["pnpm-lock.yaml"]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            stats,
+            SyncStats {
+                replaced: 1,
+                ..Default::default()
+            }
+        );
+        assert_eq!(fs::read(&p).unwrap(), b"lockfile");
+        assert_eq!(
+            fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Platforms, the five universal axes, and the [`Configuration`] keying unit (§6).
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 /// A target platform: a name plus a target triple (§6.1). Constraints beyond the
@@ -35,7 +36,7 @@ impl fmt::Display for Platform {
 
 /// The five universal axes (§6.2). Each rule declares which it consumes; axes a
 /// rule does not consume are excluded from its cache key ([`AxisValues::consumed`]).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Axis {
     OptLevel,
     Lto,
@@ -173,7 +174,7 @@ impl AxisValues {
     /// `anneal-exec` (the deep module that owns cache keys). A rule consuming no
     /// axes (e.g. `nickel_eval`) yields an empty vector, making its output shareable
     /// across all configurations.
-    pub fn consumed(&self, consumed: &[Axis]) -> Vec<(&'static str, &'static str)> {
+    pub fn consumed(&self, consumed: &BTreeSet<Axis>) -> Vec<(&'static str, &'static str)> {
         ALL_AXES
             .iter()
             .filter(|a| consumed.contains(a))
@@ -225,19 +226,19 @@ mod tests {
             ..Default::default()
         };
         // Declared out of order; result must be canonical (opt_level before coverage).
-        let consumed = a.consumed(&[Axis::Coverage, Axis::OptLevel]);
+        let consumed = a.consumed(&BTreeSet::from([Axis::Coverage, Axis::OptLevel]));
         assert_eq!(consumed, vec![("opt_level", "release"), ("coverage", "on")]);
     }
 
     #[test]
     fn no_consumed_axes_is_configuration_invariant() {
         // A rule like `nickel_eval` consumes nothing -> empty key contribution.
-        assert!(AxisValues::default().consumed(&[]).is_empty());
+        assert!(AxisValues::default().consumed(&BTreeSet::new()).is_empty());
         let a = AxisValues {
             opt_level: OptLevel::Release,
             ..Default::default()
         };
         let b = AxisValues::default();
-        assert_eq!(a.consumed(&[]), b.consumed(&[]));
+        assert_eq!(a.consumed(&BTreeSet::new()), b.consumed(&BTreeSet::new()));
     }
 }

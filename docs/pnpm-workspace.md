@@ -337,6 +337,10 @@ don't bust its cache key.
 
 - `install` action: resolve + install (pnpm ≥ 10, **no lifecycle scripts**), cached + snapshot
   (`node_modules`, store) keyed `(platform, pnpm major, lockfile digest)` — §6.
+- `pnpm-lock.yaml` is materialized as a private writable input for install and script
+  actions. pnpm may perform an atomic temp-file + rename refresh even under
+  `--frozen-lockfile` or before `pnpm run`; the original lockfile digest still keys the
+  action, and the private copy prevents CAS mutation.
 - Static introspection of `pnpm-workspace.yaml` + `package.json`(s) for members/scripts.
 - Script *discovery*; user declares `scripts = { name: { kind, outputs? } }` with explicit
   `kind`.

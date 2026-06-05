@@ -1,12 +1,35 @@
 # Anneal — open work / TODO
 
 > Running list of what's not yet built, beyond what's already in `build-system-design.md` §21.
-> Status as of: cargo_workspace, nickel_eval, pnpm_workspace (install + scripts + plain-path data routing) done;
-> Nickel→Rust and Nickel→TS (§14.3, plain-path) routing demos proven. Next: the `anneal` CLI, then Phase 5.
-> Section refs (§) point at `build-system-design.md`.
+> Status as of 2026-06-04: cargo_workspace, nickel_eval, pnpm_workspace M1, Nickel→Rust,
+> Nickel→TS, CLI build/test/affected/why, warm reuse, input-digest caching, Linux/macOS
+> sealed sandbox hardening, and mandatory Nix toolchain manifests are done. Section refs (§)
+> point at `build-system-design.md`.
+
+## Current priority queue
+
+1. **Clean correctness edges:** generated-path collision enforcement, one owning workspace per
+   package directory, and CI wiring for correctness-neutral verification.
+2. **Next performance lever:** treat `vendor/` / `.cargo/` as one lockfile-keyed unit instead
+   of enumerating/stat-ing thousands of vendored files every build.
+3. **Store lifecycle:** CAS/action-cache/snapshot GC and eviction, then snapshot-on-evict.
+4. **Rule completeness:** cargo metadata/staged graph, cargo test target split/selection, and
+   pnpm external-dependency/offline-store work.
+5. **CLI/product surface:** `materialize`, `run`/`check`, cache commands, `status`, and richer
+   structured test output.
 
 ## Correctness & enforcement (do alongside the relevant feature)
 
+- [x] **Sealed sandbox contract + regression tests.** Linux sealed actions use bubblewrap with strict
+      filesystem visibility, private network by default, private `/proc`/`/dev` surfaces as documented,
+      normalized UID/GID, no inherited stdio/fds, declared roots read-only, and Docker-backed Linux tests.
+      macOS sealed actions use `sandbox-exec` with scrubbed env, network denial/allowance by capability,
+      undeclared read/write denial, fd hardening, and explicit documentation of non-Linux hermeticity gaps.
+- [x] **First-party toolchain resolution is manifest-only.** `nix develop` exports
+      `ANNEAL_TOOLCHAIN_MANIFEST`, a Nix-built JSON manifest for `rust`, `posix-runtime`, `node`, and
+      `nickel`. `anneal-rules` parses it once per process, validates `/nix/store/...` tool paths and
+      closure roots, derives identity from resolved paths + roots, and fails closed if the env var is
+      missing. Ambient `PATH` discovery and analysis-time `nix-store -qR` are gone.
 - [ ] **Generated-path collision enforcement.** Build a `path → producer` map during analysis; error if
       two actions declare the same output path, or if a generated output **shadows** a source file. Promotes
       §14.4's runtime check to an analysis-time one. Cheap (BTreeMap + overlap scan). Needed once multiple
@@ -27,9 +50,9 @@
 - [ ] **Wire the correctness-neutral verification gate into CI per-PR** (§22). Harness exists
       (`verify_correctness_neutral`); it isn't run automatically yet.
 
-## Phase 4 — cross-language routing (in progress)
+## Phase 4 — cross-language routing (M1 done; deferred enhancements remain)
 
-- [ ] **`pnpm_workspace`** — the second native ecosystem and the §14.3 Nickel→TS consumer. Full scope +
+- [x] **`pnpm_workspace` M1** — the second native ecosystem and the §14.3 Nickel→TS consumer. Full scope +
       design in **`docs/pnpm-workspace.md`**. M1 build order: (1) `install` action (resolve+install, **pnpm ≥
       10, no lifecycle scripts**, cached + `node_modules`/store snapshot keyed `(platform, pnpm major, lockfile
       digest)` — Node version dropped); (2) static introspection of `pnpm-workspace.yaml`/`package.json`(s);
@@ -43,7 +66,7 @@
       differentiator needing to be visible; sealed+reproducibility-gated cache opt-in for scripts; external
       vendoring; structured JS test-result parsing (exit-based first); explicit native-build actions
       (`node-gyp`-at-install unsupported).
-- [ ] **The official §14.3 demo**: Nickel JSON → pnpm workspace, consumed by **relative path** (plain-path,
+- [x] **The official §14.3 demo**: Nickel JSON → pnpm workspace, consumed by **relative path** (plain-path,
       M1); composing caches (edit .ncl → consumer rebuilds; edit consumer → generator cached). (Nickel→Rust is
       proven; TS is the named demo.) Name-by-import (`@gen/config`) is the deferred name-resolution enhancement.
 - [ ] **Nickel `import`s** (multi-file Nickel) — declare imported files as inputs (currently single self-contained `src`).
@@ -95,6 +118,10 @@
         materialize+capture are ~2% each. Separately, load+analyze adds a roughly-fixed ~10 ms to a cold
         `anneal build`. Trivial crates *exaggerate* this (no compile time to amortize), but `save` scales with
         `target/` **byte** size, and real `target/` dirs are large — so this is the overhead-gate lever at scale.
+  - [x] **Instrument the analysis front-end.** `anneal-rules` emits analysis subspans used by
+        `anneal-bench`, which exposed first-party toolchain resolution as the no-op hot path. The Nix
+        manifest path removed that cost: `cargo_workspace.toolchain.rust` / `runtime` are now ~0.1-0.2 ms
+        each, and N=16 no-op rebuilds are ~3 ms.
   - [x] **Warm-sandbox reuse for snapshot owners — implemented, now ON BY DEFAULT** (`warm_reuse(false)` opts
         out), per the `docs/sandboxing.md` §5 design. Snapshot owners keep their `target/` working tree in place and sync only
         changed declared inputs (the §5.5 mtime-safe diff: distinct-inode copy + fresh mtime); skips restore +
@@ -225,8 +252,8 @@
       `test` summarizes via the rule-agnostic `ANNEAL_TEST_EXIT` marker), `--version`, clean exit codes
       (0 ok / 1 failed / 2 usage), and **config-selection flags** (§6.6): `--platform`, `--opt-level`,
       `--lto`, `--debug-info`, `--sanitizer`, `--coverage`.
-  - [ ] **`run` / `check`**; `query` / `aquery` / **`affected` / `why`** (Phase 5); `cache` push/info/clean;
-        `status`. (`affected`/`why` need multi-package loading.)
+  - [x] **`affected` / `why`** are wired through `anneal-cli`.
+  - [ ] **`run` / `check`**; `query` / `aquery`; `cache` push/info/clean; `status`.
   - [ ] **Structured per-test output** in `test` (libtest/JSON parse via `anneal-test`) — currently
         pass/fail per test action only.
   - [x] **Multi-package targets** — the CLI now loads the target's transitive package closure
@@ -273,9 +300,12 @@
 
 ## Toolchains & configuration
 
-- [ ] **WORKSPACE file + `register_toolchain` / `set_default_platform`** (§19.5). Toolchains are currently
-      discovered ad-hoc by scanning `PATH` (in `cargo_workspace`/`nickel_eval`); replace with explicit,
-      content-addressed registration so the toolchain is a declared input, not ambient.
+- [x] **Nix-provided first-party toolchain manifest.** `flake.nix` builds `.#toolchain-manifest` and the
+      dev shell exports `ANNEAL_TOOLCHAIN_MANIFEST`; `anneal-rules` requires it for first-party rules.
+      This closes the old ambient PATH/toolchain identity gap for the built-in rules.
+- [ ] **WORKSPACE file + `register_toolchain` / `set_default_platform`** (§19.5). Remaining scope is
+      user-facing/custom toolchain registration and default platform selection, not first-party Nix
+      toolchain discovery.
 
 ## Provider / variant model (designed §5.5–5.6, build when needed)
 
@@ -341,11 +371,10 @@ shape is shared across every package ecosystem.
       (`FixedOutputArity`). Trivially **§1.4 correctness-neutral** (the hash is the sole arbiter — a bad/compromised
       mirror fails *closed*, never corrupts); a FOD action has **no varying file inputs** (determinism is the hash,
       not inputs → cannot smuggle build state into a network call). Composes with the other policies. 5 tests
-      (`tests/fixed_output.rs`). **Deferred hardening (not done):** network-off is enforced only by *convention*
-      (the capability is recorded, not yet kernel-enforced) — Linux netns/`unshare`, macOS `sandbox-exec` for
-      non-FOD actions is separable, the hash already gives fetch-correctness; graph-level dedup of
-      identical-`expected` nodes is a later optimization (the `cas.has` short-circuit already makes the duplicate a
-      no-op).
+      (`tests/fixed_output.rs`). Network capability is now enforced by the sandbox backends: sealed actions deny
+      network by default, while fixed-output/network-capable actions get the allow-network profile/namespace.
+      Deferred optimization: graph-level dedup of identical-`expected` nodes (the `cas.has` short-circuit already
+      makes the duplicate a no-op).
 - [ ] **The per-ecosystem acquisition pattern (one shape everywhere).** Every modern ecosystem converged on the
       same two things — a lockfile with per-artifact hashes + an internal content-addressed store — which *is* the
       FOD shape: `lockfile {(coord, hash)} → one FOD fetch per artifact → assemble blobs into the tool's offline
@@ -424,8 +453,14 @@ shape is shared across every package ecosystem.
 
 ## Platform
 
-- [ ] **Linux sandbox path** — mount namespaces + read-only bind mounts. Currently a `cfg` stub; only macOS
-      (clonefile CoW + sandbox-exec) is exercised. Linux gives strict, kernel-enforced hermeticity.
+- [x] **Linux sandbox path** — implemented with bubblewrap: mount/user/pid/ipc/uts/net namespaces,
+      read-only declared inputs/toolchain roots, private home/tmp/dev/shm/proc surfaces, normalized uid/gid,
+      dropped capabilities, fd/stdio hardening, and hermeticity regression tests under Docker.
+- [x] **macOS sandbox hardening** — implemented with generated `sandbox-exec` profiles, scrubbed env,
+      network deny/allow by capability, fd/stdio hardening, declared toolchain read-only policy, and tests that
+      document both enforced guarantees and unavoidable metadata/runtime visibility gaps.
+- [ ] **Wire Linux sandbox Docker tests into CI** so the Linux hermeticity suite runs routinely even when
+      developers are on macOS.
 
 ## Diagnostics
 
