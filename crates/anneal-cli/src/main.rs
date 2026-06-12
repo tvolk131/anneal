@@ -138,6 +138,7 @@ fn run(cli: Cli) -> Result<i32, String> {
             &root,
             cli.config.jobs,
             cli.config.require_enforced,
+            cli.config.exec_mode.is_none(),
         ),
         Command::Test { target } => test(
             &target,
@@ -145,6 +146,7 @@ fn run(cli: Cli) -> Result<i32, String> {
             &root,
             cli.config.jobs,
             cli.config.require_enforced,
+            cli.config.exec_mode.is_none(),
         ),
         Command::Affected { since } => affected(&since, &root),
         Command::Why { from, to, since } => why(&from, to.as_deref(), since.as_deref(), &root),
@@ -252,6 +254,66 @@ fn affected(since: &str, root: &Path) -> Result<i32, String> {
     Ok(0)
 }
 
+/// The focus cone for the demanded graph: the labels whose packages own dirty
+/// files, plus their transitive dependents (`anneal_query::affected` is exactly
+/// this computation). `None` means "color everything Incremental": not a git
+/// repo, or dirty files outside any package (workspace-wide edits) — in every
+/// case mis-coloring is a performance question only (DESIGN.md §4.2).
+fn incremental_cone(
+    root: &Path,
+    graph: &anneal_loader::TargetGraph,
+) -> Option<std::collections::HashSet<Label>> {
+    let dirty = git_dirty_files(root).ok()?;
+    if dirty.is_empty() {
+        // Clean tree: nothing is being edited, so the whole graph is
+        // Hermetic-eligible — an empty cone is correct, not a fallback.
+        return Some(std::collections::HashSet::new());
+    }
+    let result = anneal_query::affected(root, graph, &dirty);
+    if result.workspace_wide {
+        return None;
+    }
+    Some(result.targets.into_iter().collect())
+}
+
+/// The dirty working tree (staged, unstaged, and untracked), as
+/// workspace-relative paths — the v1 edit horizon for the focus cone.
+fn git_dirty_files(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let out = ProcessCommand::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("running git: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git status --porcelain failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(parse_porcelain(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// Parse `git status --porcelain` output into paths. Rename lines
+/// (`R  old -> new`) contribute both sides — the old path's owner is affected
+/// by the removal, the new path's by the addition.
+fn parse_porcelain(text: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for line in text.lines() {
+        if line.len() < 4 {
+            continue;
+        }
+        let rest = &line[3..];
+        match rest.split_once(" -> ") {
+            Some((old, new)) => {
+                paths.push(PathBuf::from(old.trim()));
+                paths.push(PathBuf::from(new.trim()));
+            }
+            None => paths.push(PathBuf::from(rest.trim())),
+        }
+    }
+    paths
+}
+
 /// Files changed in the working tree relative to `since` (workspace-root == git-root).
 /// Untracked-but-unadded files are not reported by `git diff` — a known limitation.
 fn git_changed_files(root: &Path, since: &str) -> Result<Vec<PathBuf>, String> {
@@ -280,8 +342,10 @@ fn build(
     root: &Path,
     jobs: Option<usize>,
     require_enforced: bool,
+    auto_cone: bool,
 ) -> Result<i32, String> {
-    let (actions, results, exec) = analyze_and_run(target, config, root, jobs, require_enforced)?;
+    let (actions, results, exec) =
+        analyze_and_run(target, config, root, jobs, require_enforced, auto_cone)?;
     report_actions(&actions, &results);
 
     let failed = results.iter().filter(|r| !r.success()).count();
@@ -303,8 +367,10 @@ fn test(
     root: &Path,
     jobs: Option<usize>,
     require_enforced: bool,
+    auto_cone: bool,
 ) -> Result<i32, String> {
-    let (actions, results, exec) = analyze_and_run(target, config, root, jobs, require_enforced)?;
+    let (actions, results, exec) =
+        analyze_and_run(target, config, root, jobs, require_enforced, auto_cone)?;
     report_actions(&actions, &results);
 
     // Test actions are rule-agnostic: any action that captured `results.txt` and wrote
@@ -346,6 +412,7 @@ fn analyze_and_run(
     root: &Path,
     jobs: Option<usize>,
     require_enforced: bool,
+    auto_cone: bool,
 ) -> Result<(Vec<Action>, Vec<ActionResult>, LocalExecutor), String> {
     let label = Label::parse(target).map_err(|e| format!("invalid target {target:?}: {e}"))?;
     let registry = builtin_rules();
@@ -364,10 +431,30 @@ fn analyze_and_run(
         None => exec,
     };
     let exec = exec.require_enforced(require_enforced);
-    let analyzed = Analyzer::new(&graph, &registry, config, root, exec.cas())
-        .with_executor(&exec)
-        .analyze(&label)
-        .map_err(|e| e.to_string())?;
+    let analyzer = Analyzer::new(&graph, &registry, config, root, exec.cas()).with_executor(&exec);
+    // Default coloring (DESIGN.md §4.2): the focus cone. Edited targets (the
+    // dirty working tree) plus their transitive dependents build Incremental;
+    // everything upstream builds Hermetic, where unchanged inputs are pure
+    // cache hits. `--exec-mode` forces a uniform mode instead. Fallbacks are
+    // performance-conservative, never soundness-relevant: no git, or changes
+    // outside any package, color everything Incremental (today's behavior).
+    let analyzer = if auto_cone {
+        match incremental_cone(root, &graph) {
+            Some(cone) => {
+                let total = graph.len();
+                println!(
+                    "focus cone: {} incremental / {} hermetic target(s)",
+                    cone.len(),
+                    total.saturating_sub(cone.len())
+                );
+                analyzer.with_incremental_cone(cone)
+            }
+            None => analyzer,
+        }
+    } else {
+        analyzer
+    };
+    let analyzed = analyzer.analyze(&label).map_err(|e| e.to_string())?;
     let actions: Vec<Action> = analyzed.actions().cloned().collect();
     let results = exec.execute_graph(&actions).map_err(|e| e.to_string())?;
     Ok((actions, results, exec))
@@ -487,5 +574,26 @@ fn parse_coverage(s: &str) -> Result<Coverage, String> {
         "on" => Ok(Coverage::On),
         "off" => Ok(Coverage::Off),
         other => Err(format!("invalid --coverage {other:?}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_porcelain;
+    use std::path::PathBuf;
+
+    #[test]
+    fn porcelain_parsing_covers_modified_untracked_and_renames() {
+        let out = " M crates/a/src/lib.rs\n?? newfile.txt\nR  old/name.rs -> new/name.rs\nA  staged.rs\n";
+        assert_eq!(
+            parse_porcelain(out),
+            vec![
+                PathBuf::from("crates/a/src/lib.rs"),
+                PathBuf::from("newfile.txt"),
+                PathBuf::from("old/name.rs"),
+                PathBuf::from("new/name.rs"),
+                PathBuf::from("staged.rs"),
+            ]
+        );
     }
 }

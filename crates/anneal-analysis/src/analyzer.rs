@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anneal_cas::Cas;
-use anneal_core::{Configuration, Label};
+use anneal_core::{Configuration, ExecMode, Label};
 use anneal_exec::{Action, LocalExecutor};
 use anneal_loader::TargetGraph;
 use anneal_rules::{ProviderSet, ResolvedDep, RuleContext, RuleRegistry, SourcePathRecorder, StateRegistry};
@@ -16,6 +16,9 @@ use crate::error::AnalysisError;
 #[derive(Debug, Clone)]
 pub struct AnalyzedTarget {
     pub label: Label,
+    /// The configuration this target was analyzed under — its configured
+    /// identity. Differs across nodes when the focus cone colors the graph.
+    pub config: Configuration,
     /// Providers exposed to dependents.
     pub providers: ProviderSet,
     /// Actions contributed by this target (often empty for provider-only rules).
@@ -76,6 +79,12 @@ pub struct Analyzer<'a> {
     /// Executor for analysis-time tool queries (DESIGN.md §3.6). Optional:
     /// rules that never query analyze fine without one.
     executor: Option<&'a LocalExecutor>,
+    /// The focus cone (DESIGN.md §4.2): labels colored `Incremental` — the
+    /// edited targets plus their transitive dependents. `None` means uniform
+    /// coloring (every node gets the base configuration unchanged); `Some`
+    /// means per-node coloring: cone members build Incremental, everything
+    /// else Hermetic. One configuration per node per invocation, always.
+    cone: Option<HashSet<Label>>,
 }
 
 impl<'a> Analyzer<'a> {
@@ -94,7 +103,53 @@ impl<'a> Analyzer<'a> {
             cas,
             states: StateRegistry::new(),
             executor: None,
+            cone: None,
         }
+    }
+
+    /// Color the graph per node (DESIGN.md §4.2): labels in `cone` analyze
+    /// under `ExecMode::Incremental`, all others under `ExecMode::Hermetic`
+    /// (the base configuration's other axes are shared by every node). Without
+    /// this call, every node gets the base configuration unchanged — the
+    /// uniform coloring the `--exec-mode` flag forces.
+    pub fn with_incremental_cone(mut self, cone: HashSet<Label>) -> Self {
+        self.cone = Some(cone);
+        self
+    }
+
+    /// The configuration a node analyzes under.
+    fn node_config(&self, label: &Label) -> Configuration {
+        match &self.cone {
+            None => self.config.clone(),
+            Some(cone) => {
+                let mut axes = self.config.axes().clone();
+                axes.exec_mode = if cone.contains(label) {
+                    ExecMode::Incremental
+                } else {
+                    ExecMode::Hermetic
+                };
+                Configuration::new(self.config.platform().clone(), axes)
+            }
+        }
+    }
+
+    /// The §4.3 monotonicity assert, at edge-resolution time: no Hermetic node
+    /// may depend on an Incremental node. By construction of the cone (edited
+    /// targets plus transitive *dependents*) this cannot fire — which is
+    /// exactly why it is asserted rather than trusted: a future coloring-policy
+    /// tweak (or a pin flag that fails to take the monotone closure) would
+    /// otherwise silently poison the shared cache.
+    fn assert_monotone(&self, node: &Label, dep: &Label) -> Result<(), AnalysisError> {
+        let Some(cone) = &self.cone else {
+            return Ok(());
+        };
+        if !cone.contains(node) && cone.contains(dep) {
+            return Err(AnalysisError::ConeViolation {
+                hermetic: node.clone(),
+                incremental: dep.clone(),
+            });
+        }
+        Ok(())
     }
 
     /// Enable analysis-time tool queries by wiring the executor through to
@@ -145,6 +200,7 @@ impl<'a> Analyzer<'a> {
 
         // Analyze dependencies first so their providers are available.
         for dep in &decl.deps {
+            self.assert_monotone(label, dep)?;
             self.visit(dep, targets, order, in_progress, source_paths)?;
         }
 
@@ -171,10 +227,11 @@ impl<'a> Analyzer<'a> {
             decl.label.package(),
             Path::new("BUILD"),
         ));
+        let node_config = self.node_config(label);
         let ctx = RuleContext::new_recording_sources(
             decl.label.clone(),
             &decl.attrs,
-            self.config,
+            &node_config,
             &package_dir,
             self.cas,
             &resolved_deps,
@@ -197,6 +254,7 @@ impl<'a> Analyzer<'a> {
             label.clone(),
             AnalyzedTarget {
                 label: label.clone(),
+                config: node_config,
                 providers: analysis.providers,
                 actions: analysis.actions,
             },
