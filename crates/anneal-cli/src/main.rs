@@ -12,7 +12,7 @@
 //! commands are the next increment (§11.3). All logic lives in the libraries; this file
 //! only orchestrates and formats.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
@@ -22,7 +22,7 @@ use anneal_core::{
     Platform, Sanitizer,
 };
 use anneal_exec::materialize::{MaterializeStore, TreeState};
-use anneal_exec::{Action, ActionResult, LocalExecutor};
+use anneal_exec::{Action, ActionResult, InputSource, LocalExecutor};
 use anneal_loader::{load_closure, load_workspace};
 use anneal_rules::{builtin_rules, ArtifactSource};
 use clap::{Args, Parser, Subcommand};
@@ -57,13 +57,14 @@ enum Command {
         #[arg(long)]
         since: String,
     },
-    /// Build a target and write its provided files into the working tree, so
-    /// native tools (cargo run, rust-analyzer) can read generated inputs. Tree
-    /// copies are written read-only, tracked in `.anneal/materialized`, and
-    /// ignored by source discovery — the routed action edge remains the
-    /// build's real input. Inverse: `--clean`.
+    /// Make a target's tree view match its sandbox: build the generated files
+    /// its actions consume at tree-shaped paths (its routed `data`) and write
+    /// them into the working tree, so native tools (cargo run, rust-analyzer)
+    /// see what the build sees. Tree copies are written read-only, tracked in
+    /// `.anneal/materialized`, and ignored by source discovery — the routed
+    /// action edge remains the build's real input. Inverse: `--clean`.
     Materialize {
-        /// The producing target label, e.g. `//:config`. Optional with
+        /// The consuming target label, e.g. `//:ws`. Optional with
         /// `--clean` / `--list`.
         target: Option<String>,
         /// Report fresh/stale instead of writing; exit 1 if anything is stale.
@@ -395,21 +396,25 @@ fn build(
     require_enforced: bool,
     auto_cone: bool,
 ) -> Result<i32, String> {
-    let run = analyze_and_run(target, config, root, jobs, require_enforced, auto_cone)?;
-    report_actions(&run.actions, &run.results);
+    let pipeline = analyze_target(target, config, root, jobs, require_enforced, auto_cone)?;
+    let results = pipeline
+        .exec
+        .execute_graph(&pipeline.actions)
+        .map_err(|e| e.to_string())?;
+    report_actions(&pipeline.actions, &results);
 
-    let failed = run.results.iter().filter(|r| !r.success()).count();
-    let cached = run.results.iter().filter(|r| r.cache_hit).count();
+    let failed = results.iter().filter(|r| !r.success()).count();
+    let cached = results.iter().filter(|r| r.cache_hit).count();
     if failed > 0 {
         eprintln!(
             "build FAILED — {failed}/{} action(s) failed",
-            run.actions.len()
+            pipeline.actions.len()
         );
         Ok(1)
     } else {
         println!(
             "build ok — {} action(s) ({cached} cached)",
-            run.actions.len()
+            pipeline.actions.len()
         );
         Ok(0)
     }
@@ -424,8 +429,12 @@ fn test(
     require_enforced: bool,
     auto_cone: bool,
 ) -> Result<i32, String> {
-    let run = analyze_and_run(target, config, root, jobs, require_enforced, auto_cone)?;
-    report_actions(&run.actions, &run.results);
+    let pipeline = analyze_target(target, config, root, jobs, require_enforced, auto_cone)?;
+    let results = pipeline
+        .exec
+        .execute_graph(&pipeline.actions)
+        .map_err(|e| e.to_string())?;
+    report_actions(&pipeline.actions, &results);
 
     // Test actions are rule-agnostic: any action that captured `results.txt` and wrote
     // the `ANNEAL_TEST_EXIT` marker (cargo's test-run, pnpm's test kind). Structured
@@ -433,8 +442,8 @@ fn test(
     let mut passed = 0usize;
     let mut failed = 0usize;
     let mut saw_test = false;
-    for (action, result) in run.actions.iter().zip(&run.results) {
-        if let Some(ok) = test_outcome(&run.exec, result) {
+    for (action, result) in pipeline.actions.iter().zip(&results) {
+        if let Some(ok) = test_outcome(&pipeline.exec, result) {
             saw_test = true;
             if ok {
                 passed += 1;
@@ -446,7 +455,7 @@ fn test(
     }
 
     // A non-zero action exit (a build/compile failure) also fails the run.
-    let action_failures = run.results.iter().filter(|r| !r.success()).count();
+    let action_failures = results.iter().filter(|r| !r.success()).count();
     if !saw_test && action_failures == 0 {
         println!("no test targets found for {target}");
         return Ok(0);
@@ -459,26 +468,29 @@ fn test(
     }
 }
 
-/// The shared pipeline's result: everything a command needs after execution.
-/// Holds the workspace lock so a mutating command stays exclusive for its
-/// whole run — including post-execution tree writes (`materialize`).
-struct PipelineRun {
+/// The analyzed pipeline, ready to execute: the action graph, its actions in
+/// dependency order, the executor, and the held workspace lock — kept until
+/// the pipeline is dropped, so a mutating command stays exclusive for its
+/// whole run, post-execution tree writes (`materialize`) included.
+struct Pipeline {
     graph: ActionGraph,
     actions: Vec<Action>,
-    results: Vec<ActionResult>,
     exec: LocalExecutor,
     _lock: lock::WorkspaceLock,
 }
 
-/// The shared pipeline: parse the label, load its package, analyze, execute the graph.
-fn analyze_and_run(
+/// The shared pipeline up to (not including) execution: parse the label, take
+/// the lock, load the package closure, analyze. `build`/`test` execute the
+/// whole action list; `materialize` executes only the producing subgraph of
+/// the target's routed data.
+fn analyze_target(
     target: &str,
     config: &Configuration,
     root: &Path,
     jobs: Option<usize>,
     require_enforced: bool,
     auto_cone: bool,
-) -> Result<PipelineRun, String> {
+) -> Result<Pipeline, String> {
     let label = Label::parse(target).map_err(|e| format!("invalid target {target:?}: {e}"))?;
     let registry = builtin_rules();
     // A mutating command takes the coarse exclusive workspace lock for its whole run, so
@@ -530,18 +542,18 @@ fn analyze_and_run(
     };
     let analyzed = analyzer.analyze(&label).map_err(|e| e.to_string())?;
     let actions: Vec<Action> = analyzed.actions().cloned().collect();
-    let results = exec.execute_graph(&actions).map_err(|e| e.to_string())?;
-    Ok(PipelineRun {
+    Ok(Pipeline {
         graph: analyzed,
         actions,
-        results,
         exec,
         _lock: lock,
     })
 }
 
-/// `materialize <target>`: build it (cached), then park its provided files in
-/// the working tree so native tools see generated inputs. The build's real
+/// `materialize <target>`: make the target's tree view match its sandbox.
+/// Build (cached), then park the generated files the target's actions consume
+/// at tree-shaped paths — its routed `data` — in the working tree, so native
+/// tools (cargo run, rust-analyzer) see what the build sees. The build's real
 /// input stays the routed action edge — `analyze_and_run` excludes the tree
 /// copies from source discovery via the manifest.
 #[allow(clippy::too_many_arguments)]
@@ -556,21 +568,40 @@ fn materialize(
     auto_cone: bool,
 ) -> Result<i32, String> {
     let label = Label::parse(target).map_err(|e| format!("invalid target {target:?}: {e}"))?;
-    let run = analyze_and_run(target, config, root, jobs, require_enforced, auto_cone)?;
+    let pipeline = analyze_target(target, config, root, jobs, require_enforced, auto_cone)?;
 
-    let failed = run.results.iter().filter(|r| !r.success()).count();
+    let routed: Vec<anneal_rules::Artifact> = pipeline
+        .graph
+        .routed_data(&label)
+        .ok_or_else(|| format!("{label} was not analyzed"))?
+        .to_vec();
+    if routed.is_empty() {
+        println!("{label} routes no generated files — nothing to materialize");
+        return Ok(0);
+    }
+
+    // Execute only the producing subgraph: the routed files' producers plus
+    // their transitive action-graph inputs. The consumer's own actions never
+    // run here — parking its inputs must work exactly when the consumer's
+    // build is broken (the debug-natively case), and a no-op build is faster.
+    let producers = producer_subgraph(&pipeline.actions, &routed);
+    let results = pipeline
+        .exec
+        .execute_graph(&producers)
+        .map_err(|e| e.to_string())?;
+    let failed = results.iter().filter(|r| !r.success()).count();
     if failed > 0 {
-        report_actions(&run.actions, &run.results);
+        report_actions(&producers, &results);
         eprintln!(
-            "build FAILED — {failed}/{} action(s) failed; not materializing",
-            run.actions.len()
+            "materialize FAILED — {failed}/{} producing action(s) failed",
+            producers.len()
         );
         return Ok(1);
     }
 
-    let files = provided_files(&run, &label)?;
+    let files = routed_files(&routed, &producers, &results)?;
     if files.is_empty() {
-        println!("{label} provides no files to materialize");
+        println!("{label}'s routed data is all source-backed — already in the tree");
         return Ok(0);
     }
 
@@ -606,7 +637,7 @@ fn materialize(
     }
 
     let report = open_store()?
-        .apply(&label.to_string(), &files, run.exec.cas(), force)
+        .apply(&label.to_string(), &files, pipeline.exec.cas(), force)
         .map_err(|e| format!("materializing: {e}"))?;
     for path in &report.written {
         println!("   wrote      {}", path.display());
@@ -684,43 +715,68 @@ fn materialize_clean(target: Option<&str>, force: bool, root: &Path) -> Result<i
     Ok(if report.refused.is_empty() { 0 } else { 1 })
 }
 
-/// Resolve the target's provided files to `(workspace-relative destination,
-/// content digest)`. Source-backed artifacts are already tree files — skipped.
-fn provided_files(run: &PipelineRun, label: &Label) -> Result<Vec<(PathBuf, Digest)>, String> {
-    let providers = run
-        .graph
-        .providers(label)
-        .ok_or_else(|| format!("{label} was not analyzed"))?;
-    let Some(file_set) = &providers.files else {
-        return Ok(Vec::new());
-    };
-    let result_by_action: HashMap<&str, &ActionResult> = run
-        .actions
+/// The producing subgraph for a routed-data set: each Output-backed artifact's
+/// producing action plus the transitive closure of its action-graph input
+/// edges, kept in the original dependency order.
+fn producer_subgraph(actions: &[Action], routed: &[anneal_rules::Artifact]) -> Vec<Action> {
+    let by_name: HashMap<&str, &Action> = actions.iter().map(|a| (a.name(), a)).collect();
+    let mut needed: HashSet<String> = HashSet::new();
+    let mut stack: Vec<String> = routed
         .iter()
-        .map(|a| a.name())
-        .zip(&run.results)
+        .filter_map(|artifact| match &artifact.source {
+            ArtifactSource::Output { action, .. } => Some(action.clone()),
+            ArtifactSource::Source(_) => None,
+        })
         .collect();
+    while let Some(name) = stack.pop() {
+        if !needed.insert(name.clone()) {
+            continue;
+        }
+        if let Some(action) = by_name.get(name.as_str()) {
+            for input in action.inputs().values() {
+                if let InputSource::Output {
+                    action: producer, ..
+                } = &input.source
+                {
+                    stack.push(producer.clone());
+                }
+            }
+        }
+    }
+    actions
+        .iter()
+        .filter(|a| needed.contains(a.name()))
+        .cloned()
+        .collect()
+}
+
+/// Resolve routed data — the generated files a target's actions consume at
+/// tree-shaped paths — to `(workspace-relative destination, content digest)`
+/// against the executed producing subgraph. Source-backed artifacts are
+/// already tree files and are skipped.
+fn routed_files(
+    routed: &[anneal_rules::Artifact],
+    actions: &[Action],
+    results: &[ActionResult],
+) -> Result<Vec<(PathBuf, Digest)>, String> {
+    let result_by_action: HashMap<&str, &ActionResult> =
+        actions.iter().map(|a| a.name()).zip(results).collect();
     let mut files = Vec::new();
-    for artifact in &file_set.files {
+    for artifact in routed {
         match &artifact.source {
             ArtifactSource::Source(_) => continue,
             ArtifactSource::Output { action, name } => {
                 let result = result_by_action.get(action.as_str()).ok_or_else(|| {
-                    format!("provider references an action not in the graph: {action:?}")
+                    format!("routed data references an action not in the graph: {action:?}")
                 })?;
                 let digest = result
                     .outputs
                     .get(name)
                     .ok_or_else(|| format!("action {action:?} did not produce output {name:?}"))?;
-                // The provider path is package-relative (the path consumers
-                // materialize the file at), so the tree copy lands in the
-                // producing target's package directory.
-                let mut dest = PathBuf::new();
-                if !label.package().is_empty() {
-                    dest.push(label.package());
-                }
-                dest.push(&artifact.path);
-                files.push((dest, *digest));
+                // Destinations are already workspace-relative: the analyzer
+                // re-homes each rule's package-relative dest
+                // (`AnalyzedTarget::routed_data`).
+                files.push((artifact.path.clone(), *digest));
             }
         }
     }

@@ -9,7 +9,8 @@ use anneal_core::{Configuration, ExecMode, Label};
 use anneal_exec::{Action, LocalExecutor};
 use anneal_loader::TargetGraph;
 use anneal_rules::{
-    ProviderSet, ResolvedDep, RuleContext, RuleRegistry, SourcePathRecorder, StateRegistry,
+    Artifact, ProviderSet, ResolvedDep, RuleContext, RuleRegistry, SourcePathRecorder,
+    StateRegistry,
 };
 
 use crate::error::AnalysisError;
@@ -25,6 +26,10 @@ pub struct AnalyzedTarget {
     pub providers: ProviderSet,
     /// Actions contributed by this target (often empty for provider-only rules).
     pub actions: Vec<Action>,
+    /// The generated files this target's actions consume at tree-shaped paths
+    /// (the rule's `Analysis::routed_data`), with each `path` re-homed to a
+    /// **workspace-relative** destination — what `anneal materialize` parks.
+    pub routed_data: Vec<Artifact>,
 }
 
 /// The analyzed action graph: every reached target's result, plus a dependency
@@ -60,6 +65,13 @@ impl ActionGraph {
     /// The providers a target exposed.
     pub fn providers(&self, label: &Label) -> Option<&ProviderSet> {
         self.targets.get(label).map(|t| &t.providers)
+    }
+
+    /// The generated files a target's build routes into its package tree
+    /// (workspace-relative destinations) — the set `anneal materialize` parks
+    /// so native tools see what the sandbox sees.
+    pub fn routed_data(&self, label: &Label) -> Option<&[Artifact]> {
+        self.targets.get(label).map(|t| t.routed_data.as_slice())
     }
 
     /// The targets in dependency order.
@@ -271,6 +283,17 @@ impl<'a> Analyzer<'a> {
 
         in_progress.remove(label);
         order.push(label.clone());
+        // Rules declare routed destinations package-relative (all a rule can
+        // see); re-home them to workspace-relative here, where the package is
+        // known — so consumers of the graph never re-derive it.
+        let routed_data = analysis
+            .routed_data
+            .into_iter()
+            .map(|artifact| Artifact {
+                path: workspace_relative_path(decl.label.package(), &artifact.path),
+                source: artifact.source,
+            })
+            .collect();
         targets.insert(
             label.clone(),
             AnalyzedTarget {
@@ -278,6 +301,7 @@ impl<'a> Analyzer<'a> {
                 config: node_config,
                 providers: analysis.providers,
                 actions: analysis.actions,
+                routed_data,
             },
         );
         Ok(())

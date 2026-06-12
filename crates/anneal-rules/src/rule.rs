@@ -7,7 +7,7 @@ use anneal_exec::Action;
 
 use crate::attrs::AttrError;
 use crate::context::RuleContext;
-use crate::providers::ProviderSet;
+use crate::providers::{Artifact, ProviderSet};
 use crate::schema::AttrSchema;
 
 /// What a rule produces from one configured target: the actions to run and the
@@ -16,6 +16,15 @@ use crate::schema::AttrSchema;
 pub struct Analysis {
     pub actions: Vec<Action>,
     pub providers: ProviderSet,
+    /// The **generated** files this target's actions stage at tree-shaped
+    /// paths the inner tool reads as if they were sources — the consumed
+    /// `data` routing, with each artifact's `path` the package-relative
+    /// in-sandbox destination (only the consuming rule knows it; pnpm's
+    /// per-edge dict, cargo's provider-path convention). This is exactly the
+    /// set `anneal materialize` parks in the working tree so native tools see
+    /// what the sandbox sees. Excludes sources (already in the tree) and
+    /// sandbox plumbing (fetched `.crate` blobs, vendor assembly, …).
+    pub routed_data: Vec<Artifact>,
 }
 
 /// A first-party rule. The whole interface is [`Rule::analyze`]: attributes +

@@ -258,16 +258,20 @@
         pass/fail per test action only.
   - [x] **Multi-package targets** — the CLI now loads the target's transitive package closure
         (`load_closure`), so cross-package deps build.
-  - [x] **`materialize`** (§14.4) — write a target's provided files into the working tree for IDEs and
-        native tooling (`cargo run` over routed `data` inputs). Manifest-tracked (`.anneal/materialized`):
-        digest-compare skips identical rewrites (no mtime churn), orphans are pruned, edits are never
-        clobbered or deleted without `--force`; `--check` / `--list` / `--clean` round it out. Tree copies
-        are excluded from source discovery (`RuleContext::with_materialized`), so they can't shadow the
-        producer's declared output or perturb cache/snapshot keys (asserted byte-identical in
-        `materialize_exclusion.rs`).
-    - [ ] Consumer-side destinations: materializing *into a consumer's package* when the producer lives
-          elsewhere (today the copy lands producer-package-relative — the same-package layout). Also the
-          mechanism for the §14.6 **staged pass** (generated `Cargo.toml`, etc.).
+  - [x] **`materialize`** (§14.4) — make a consuming target's tree view match its sandbox: build the
+        generated files its actions consume at tree-shaped paths (the rule-declared
+        `Analysis::routed_data`, re-homed workspace-relative by the analyzer) and park them in the
+        working tree for IDEs and native tooling (`cargo run` over routed `data` inputs). Executes only
+        the **producing subgraph**, so it works precisely when the consumer's own build is broken (the
+        debug-natively case). Manifest-tracked (`.anneal/materialized`): digest-compare skips identical
+        rewrites (no mtime churn), orphans are pruned, edits are never clobbered or deleted without
+        `--force`; `--check` / `--list` / `--clean` round it out. Tree copies are excluded from source
+        discovery (`RuleContext::with_materialized`), so they can't shadow the producer's declared
+        output or perturb cache/snapshot keys (asserted byte-identical in `materialize_exclusion.rs`).
+    - [ ] `alias` does not forward routed data (a dest is package-relative to the consuming target;
+          forwarding would re-home it) — materialize the actual target. Output-export ("give me the
+          built artifact") is deliberately not this verb: it belongs with `run`/`outputs` and a stable
+          out-dir. The §14.6 **staged pass** (generated `Cargo.toml`, etc.) remains separate.
   - [ ] **`exec`** escape hatch (§7.6) — run an arbitrary command in a sandbox (permissive by default;
         `--hermetic`/`--no-network` opt-in).
   - [ ] **`init` / `init --detect`** (§15.2) — interactive setup / scaffold config without touching native files.

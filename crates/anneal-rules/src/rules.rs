@@ -44,6 +44,7 @@ impl Rule for FileGroup {
             providers: ProviderSet {
                 files: Some(FileSet { files }),
             },
+            routed_data: Vec::new(),
         })
     }
 }
@@ -65,9 +66,15 @@ impl Rule for Alias {
         let dep = ctx.deps().first().ok_or_else(|| {
             RuleError::Message("alias requires its `actual` target to be resolved".to_owned())
         })?;
+        // Providers forward; routed data does not. A routed destination is
+        // package-relative to the *consuming* target, and an alias may live in
+        // a different package — forwarding would re-home the dest into the
+        // alias's package, which is not where the actual target's sandbox
+        // stages it. `materialize` the actual target instead.
         Ok(Analysis {
             actions: Vec::new(),
             providers: dep.providers.clone(),
+            routed_data: Vec::new(),
         })
     }
 }
@@ -101,16 +108,19 @@ impl Rule for GenRule {
         // Inputs = direct source files + every file provided by `deps` targets. A
         // dependency artifact may be a resolved source (`filegroup`) or another
         // action's produced output (`genrule`); either flows straight through as the
-        // matching input source.
+        // matching input source. The dep-provided set is also this target's routed
+        // data: generated files staged at tree paths the command reads.
         let mut inputs: Vec<Artifact> = Vec::new();
         for src in direct_srcs {
             inputs.push(ctx.source_artifact(Path::new(src))?);
         }
+        let mut routed_data: Vec<Artifact> = Vec::new();
         for dep in ctx.deps() {
             if let Some(file_set) = &dep.providers.files {
-                inputs.extend(file_set.files.iter().cloned());
+                routed_data.extend(file_set.files.iter().cloned());
             }
         }
+        inputs.extend(routed_data.iter().cloned());
 
         // `$(SRCS)` expands to every input path; `$(OUTS)` to every output path.
         let srcs_joined = inputs
@@ -174,6 +184,7 @@ impl Rule for GenRule {
                     files: provided_outputs,
                 }),
             },
+            routed_data,
         })
     }
 }

@@ -29,7 +29,7 @@
 mod action;
 mod cache;
 mod executor;
-/// Materializing provided files into the working tree (`anneal materialize`):
+/// Materializing routed files into the working tree (`anneal materialize`):
 /// the manifest-tracked bridge from CAS outputs to what native tools (cargo
 /// run, rust-analyzer) can see. Not part of the [`Executor`] deep module — a
 /// user-facing surface of its own, so it stays a public module rather than

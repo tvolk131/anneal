@@ -139,6 +139,7 @@ impl Rule for PnpmWorkspace {
 
         // --- per-script actions: SnapshotConsuming (restore node_modules read-only) ---
         let mut provided: Vec<Artifact> = Vec::new();
+        let mut routed_data: Vec<Artifact> = Vec::new();
         if let Some(scripts) = ctx.attrs().dict_opt("scripts")? {
             // Scripts need the actual source to run; install does not.
             let sources = ctx.source_tree(Path::new("."), IGNORED_DIRS)?;
@@ -227,6 +228,9 @@ impl Rule for PnpmWorkspace {
                     }
                 }
             }
+            // Each routed artifact's path is its per-edge destination — the
+            // in-sandbox tree path `materialize` parks it at.
+            routed_data = routed;
         }
 
         let providers = if provided.is_empty() {
@@ -237,7 +241,11 @@ impl Rule for PnpmWorkspace {
             }
         };
 
-        Ok(Analysis { actions, providers })
+        Ok(Analysis {
+            actions,
+            providers,
+            routed_data,
+        })
     }
 }
 

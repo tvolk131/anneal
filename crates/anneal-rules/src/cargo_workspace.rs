@@ -380,6 +380,11 @@ impl Rule for CargoWorkspace {
         Ok(Analysis {
             actions,
             providers: ProviderSet::default(),
+            // The `data` artifacts are staged at their provider paths in the
+            // build tree — exactly the set `materialize` parks for native
+            // tools. Fetched `.crate` blobs enter via `with_crates`, not
+            // `data`, so sandbox plumbing is excluded by construction.
+            routed_data: data,
         })
     }
 }

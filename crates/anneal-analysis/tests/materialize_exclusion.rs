@@ -14,7 +14,7 @@ use anneal_analysis::{ActionGraph, AnalysisError, Analyzer};
 use anneal_core::{AxisValues, Configuration, Label, Platform};
 use anneal_exec::{action_digest, Action, LocalExecutor};
 use anneal_loader::load_package;
-use anneal_rules::builtin_rules;
+use anneal_rules::{builtin_rules, ArtifactSource};
 
 /// A dependency-free Cargo workspace under `<tmp>/ws` whose `cargo_workspace`
 /// target routes a genrule-generated `config.json` in via `data` — the exact
@@ -106,4 +106,36 @@ fn tree_copy_fails_analysis_without_exclusion_and_is_invisible_with_it() {
     let excluded: BTreeSet<PathBuf> = [PathBuf::from("ws/config.json")].into();
     let graph = analyze(root, &exec, excluded).unwrap();
     assert_eq!(action_digest(&build_action(&graph)), baseline_digest);
+}
+
+/// The consumer's routed data is what `anneal materialize` parks: the cargo
+/// target (not the genrule) declares it, and the analyzer re-homes the rule's
+/// package-relative destination to a workspace-relative one.
+#[test]
+fn consumer_exposes_routed_data_at_workspace_relative_dest() {
+    let tmp = fixture();
+    let root = tmp.path();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
+    let graph = analyze(root, &exec, BTreeSet::new()).unwrap();
+
+    let routed = graph
+        .routed_data(&Label::parse("//ws:ws").unwrap())
+        .expect("//ws:ws analyzed");
+    assert_eq!(routed.len(), 1);
+    assert_eq!(routed[0].path, PathBuf::from("ws/config.json"));
+    assert!(
+        matches!(
+            &routed[0].source,
+            ArtifactSource::Output { action, name }
+                if action == "genrule //ws:gen" && name == "config.json"
+        ),
+        "routed data should reference the producing genrule's output, got {:?}",
+        routed[0].source
+    );
+
+    // The producer routes nothing — materialize is consumer-oriented.
+    let gen_routed = graph
+        .routed_data(&Label::parse("//ws:gen").unwrap())
+        .expect("//ws:gen analyzed");
+    assert!(gen_routed.is_empty());
 }

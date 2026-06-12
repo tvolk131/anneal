@@ -281,6 +281,11 @@ impl Action {
         &self.name
     }
 
+    /// Declared inputs, keyed by logical input name.
+    pub fn inputs(&self) -> &BTreeMap<String, Input> {
+        &self.inputs
+    }
+
     /// Declared outputs, keyed by logical output name.
     pub fn outputs(&self) -> &BTreeMap<String, PathBuf> {
         &self.outputs

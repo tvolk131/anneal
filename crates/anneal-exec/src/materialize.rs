@@ -1,8 +1,9 @@
-//! Materializing provided files into the working tree (`anneal materialize`).
+//! Materializing routed files into the working tree (`anneal materialize`).
 //!
 //! Builds put their outputs in the CAS; native tools (`cargo run`,
 //! rust-analyzer) read the working tree. [`MaterializeStore`] bridges the two:
-//! it writes a target's provided files to their tree destinations and records
+//! it parks the generated files a target's build consumes at tree-shaped
+//! paths (its routed data) at those destinations and records
 //! every write in a manifest (`materialized`, under the store root next to the
 //! CAS), so the operation is idempotent, prunable, and reversible.
 //!
@@ -43,7 +44,7 @@ const MANIFEST_HEADER: &str = "anneal-materialized v1";
 pub struct MaterializedEntry {
     /// Destination, relative to the workspace root.
     pub path: PathBuf,
-    /// The providing target's canonical label.
+    /// The consuming target's canonical label (whose routed data this is).
     pub label: String,
     /// The content digest written (and expected back on removal).
     pub digest: Digest,
@@ -72,7 +73,7 @@ pub struct Refusal {
 pub struct ApplyReport {
     pub written: Vec<PathBuf>,
     pub unchanged: Vec<PathBuf>,
-    /// Previously materialized by this label, no longer provided — removed.
+    /// Previously materialized by this label, no longer routed — removed.
     pub pruned: Vec<PathBuf>,
     pub refused: Vec<Refusal>,
 }
@@ -89,7 +90,7 @@ pub struct CleanReport {
 pub struct CheckReport {
     /// Tree content already matches what the target provides.
     pub fresh: Vec<PathBuf>,
-    /// Missing, content-drifted, or orphaned (no longer provided).
+    /// Missing, content-drifted, or orphaned (no longer routed).
     pub stale: Vec<PathBuf>,
 }
 
@@ -98,7 +99,7 @@ pub struct CheckReport {
 pub struct MaterializeStore {
     workspace_root: PathBuf,
     manifest_path: PathBuf,
-    /// Workspace-relative destination → (providing label, written digest).
+    /// Workspace-relative destination → (consuming label, written digest).
     entries: BTreeMap<PathBuf, (String, Digest)>,
 }
 
@@ -149,11 +150,11 @@ impl MaterializeStore {
         })
     }
 
-    /// Write `label`'s provided files into the tree. Per destination: identical
+    /// Write `label`'s routed files into the tree. Per destination: identical
     /// content is left untouched; a file anneal wrote (tree content still
     /// matches the manifest) is rewritten in place; anything else is refused
     /// unless `force`. Entries this label previously materialized but no longer
-    /// provides are pruned under the digest guard.
+    /// routes are pruned under the digest guard.
     pub fn apply(
         &mut self,
         label: &str,
@@ -232,7 +233,7 @@ impl MaterializeStore {
                 Removal::Removed | Removal::AlreadyGone => report.pruned.push(path),
                 Removal::Edited => report.refused.push(Refusal {
                     path,
-                    reason: "no longer provided, but edited since materialized — left in place \
+                    reason: "no longer routed, but edited since materialized — left in place \
                              (use --force to remove)"
                         .to_owned(),
                 }),
@@ -243,7 +244,7 @@ impl MaterializeStore {
         Ok(report)
     }
 
-    /// Compare `label`'s provided files against the tree without writing.
+    /// Compare `label`'s routed files against the tree without writing.
     pub fn check(&self, label: &str, files: &[(PathBuf, Digest)]) -> io::Result<CheckReport> {
         let mut report = CheckReport::default();
         let desired: BTreeSet<&Path> = files.iter().map(|(p, _)| p.as_path()).collect();
