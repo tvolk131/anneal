@@ -202,6 +202,11 @@ fn macos_profile(action: &Action, spec: &SandboxSpec) -> String {
         "/usr/share",
         "/private/var/db",
         "/private/var/select",
+        // Apple's LibreSSL reads /private/etc/ssl/openssl.cnf at library init
+        // (and ignores OPENSSL_CONF), so anything linking system libcurl —
+        // rustup-distributed cargo, git — aborts without it. Same near-constant
+        // Darwin runtime class as /private/var/select above.
+        "/private/etc/ssl",
         "/Library/Apple/usr/libexec/oah",
         "/System/Library/Apple/usr/libexec/oah",
         "/System/Library/LaunchDaemons/com.apple.oahd.plist",

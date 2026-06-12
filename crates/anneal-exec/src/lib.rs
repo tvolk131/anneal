@@ -30,6 +30,10 @@ mod action;
 mod cache;
 mod executor;
 mod materializer;
+/// Tool queries (DESIGN.md §3.6, spiked): sealed, network-denied, stdout-captured
+/// actions whose output feeds analysis. See the module docs for the sandbox-root
+/// stability contract.
+mod query;
 mod sandbox;
 mod verify;
 /// The warm-sandbox sync engine (docs/sandboxing.md §5), wired into the executor's
@@ -41,10 +45,11 @@ pub use action::{
 };
 pub use cache::action_digest;
 pub use executor::{ActionResult, ExecError, Executor, LocalExecutor, PhaseTimings, SandboxError};
+pub use query::{QueryBuilder, QueryResult, QuerySpec};
 pub use verify::{
     prime_snapshot, verify_correctness_neutral, verify_warm_neutral, NeutralityReport,
 };
 
 /// Participates in every cache key (§8.1). Bump when sandbox semantics change so that
 /// a sandbox behavior change invalidates previously-cached results.
-pub(crate) const SANDBOX_VERSION: &str = "anneal-sandbox-6";
+pub(crate) const SANDBOX_VERSION: &str = "anneal-sandbox-7";

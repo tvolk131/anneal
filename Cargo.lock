@@ -115,6 +115,7 @@ dependencies = [
  "anneal-core",
  "anneal-snapshot",
  "libc",
+ "serde_json",
  "tempfile",
 ]
 

@@ -24,6 +24,7 @@ use anneal_snapshot::SnapshotStore;
 use crate::action::{Action, ActionError, CachePolicy, ExecutionMode, InputSource};
 use crate::cache::{action_digest, ActionCache, StoredResult};
 use crate::materializer;
+use crate::query::{query_identity, query_key, QueryResult, QuerySpec, QUERY_STDOUT};
 use crate::sandbox::{self, SandboxSpec};
 use crate::warm::{self, InputManifest};
 
@@ -103,6 +104,10 @@ pub struct LocalExecutor {
     /// Per-snapshot-key locks: same-key owners share one warm dir and serialize on it
     /// (§5.3.1), while different keys run concurrently.
     warm_locks: Mutex<HashMap<Digest, Arc<Mutex<()>>>>,
+    /// Stable per-identity sandbox roots for tool queries (`query.rs` module docs:
+    /// tools embed absolute paths in stdout, so query byte-determinism requires a
+    /// root that survives input edits).
+    queries: PathBuf,
 }
 
 impl LocalExecutor {
@@ -116,11 +121,14 @@ impl LocalExecutor {
         let snapshots = SnapshotStore::open(root.join("snapshots"))?;
         let sandboxes = root.join("sandboxes");
         fs::create_dir_all(&sandboxes)?;
+        let queries = root.join("queries");
+        fs::create_dir_all(&queries)?;
         Ok(LocalExecutor {
             cas,
             cache,
             snapshots,
             sandboxes,
+            queries,
             retain_sandboxes: false,
             parallelism: default_parallelism(),
             timings: None,
@@ -774,6 +782,99 @@ impl LocalExecutor {
         self.run_core(action, root, restore, save)
     }
 
+    /// Run (or cache-hit) a tool query: a sealed, network-denied, output-less action
+    /// whose **stdout is the result** (DESIGN.md §3.6, spiked here).
+    ///
+    /// Differences from [`Executor::execute`], each load-bearing:
+    /// - **stdout/stderr are piped, not nulled.** stdout is the query's output and is
+    ///   stored in the CAS under [`QUERY_STDOUT`]; stderr rides along into the error
+    ///   on failure. Both pipes are drained on threads while waiting, so a query
+    ///   emitting more than a pipe buffer (cargo metadata is megabytes) can't deadlock.
+    /// - **The sandbox root is stable per query *identity*** (command/env/toolchains/
+    ///   working dir — not inputs), because tools embed absolute paths in stdout and
+    ///   byte-stable output across input edits is the early-cutoff keystone. Same-
+    ///   identity runs serialize on a per-identity lock; the root is wiped and
+    ///   re-materialized each run (queries have no warm state by construction).
+    /// - **Cache entries are namespaced** (`anneal-query-v1`) and store the stdout
+    ///   blob digest; a hit reads the blob back from the CAS.
+    pub fn run_query(&self, spec: &QuerySpec) -> Result<QueryResult, ExecError> {
+        let action = spec.action();
+        guard_valid(action)?;
+        guard_resolved(action)?;
+
+        let key = query_key(action);
+        if let Some(stored) = self.cache.lookup(&key)? {
+            if let Some(digest) = stored.outputs.get(QUERY_STDOUT) {
+                if let Some(stdout) = self.cas.get(digest)? {
+                    return Ok(QueryResult {
+                        stdout,
+                        cache_hit: true,
+                    });
+                }
+                // Blob missing from the CAS (no GC exists yet, but fail open to a
+                // re-run rather than closed on a torn store).
+            }
+        }
+
+        let identity = query_identity(action);
+        let lock = self.warm_key_lock(&identity);
+        let _guard = lock.lock().unwrap();
+
+        let root = self.queries.join(&identity.to_hex()[..16]);
+        if root.exists() {
+            fs::remove_dir_all(&root)?;
+        }
+        let prepared = materializer::prepare_at(&self.cas, action, root)?;
+
+        let sandbox_spec = SandboxSpec {
+            mode: action.execution_mode,
+            root: &prepared.root,
+            cwd: &prepared.cwd,
+            home: &prepared.home,
+            tmp: &prepared.tmp,
+            env: &action.env,
+        };
+        let mut cmd = sandbox::build_command(action, &sandbox_spec).map_err(ExecError::Sandbox)?;
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn().map_err(ExecError::Spawn)?;
+
+        let stdout_pipe = child.stdout.take().expect("stdout was piped above");
+        let stderr_pipe = child.stderr.take().expect("stderr was piped above");
+        let stdout_thread = thread::spawn(move || drain(stdout_pipe));
+        let stderr_thread = thread::spawn(move || drain(stderr_pipe));
+
+        let status = wait_with_timeout(&mut child, action.timeout_ms)?;
+        let stdout = stdout_thread.join().unwrap_or_default();
+        let stderr = stderr_thread.join().unwrap_or_default();
+        let exit_code = status.code().unwrap_or(-1);
+
+        if !self.retain_sandboxes {
+            let _ = fs::remove_dir_all(&prepared.root);
+        }
+
+        if exit_code != 0 {
+            return Err(ExecError::QueryFailed {
+                name: action.name().to_owned(),
+                exit_code,
+                stderr_tail: tail(&stderr),
+            });
+        }
+
+        let digest = self.cas.put(&stdout)?;
+        self.cache.insert(
+            &key,
+            &StoredResult {
+                exit_code: 0,
+                outputs: BTreeMap::from([(QUERY_STDOUT.to_owned(), digest)]),
+            },
+        )?;
+        Ok(QueryResult {
+            stdout,
+            cache_hit: false,
+        })
+    }
+
     /// Run the **warm-reuse** path for `action` **outside the action cache**, for the
     /// correctness-neutral verifier. `fresh = true` forces a cold-populate (clears the
     /// committed manifest so the per-key warm dir is rebuilt from scratch); `fresh = false`
@@ -891,6 +992,22 @@ fn guard_resolved(action: &Action) -> Result<(), ExecError> {
 }
 
 /// Wait for `child`, killing it if it exceeds `timeout_ms`.
+/// Read a child pipe to EOF. Runs on its own thread so a query writing more
+/// than a pipe buffer can't deadlock against `wait_with_timeout`.
+fn drain(mut pipe: impl io::Read) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let _ = pipe.read_to_end(&mut buf);
+    buf
+}
+
+/// The last few lines of captured stderr, for the `QueryFailed` diagnostic.
+fn tail(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(10);
+    lines[start..].join("\n")
+}
+
 fn wait_with_timeout(child: &mut Child, timeout_ms: u64) -> Result<ExitStatus, ExecError> {
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     loop {
@@ -933,6 +1050,14 @@ pub enum ExecError {
     FixedOutputMismatch { expected: Digest, actual: Digest },
     /// The action contract is malformed and was rejected before materialization.
     InvalidAction(ActionError),
+    /// A tool query exited nonzero. Queries provide analysis facts, so a failed
+    /// query is a build error, never cached; the stderr tail is carried for the
+    /// diagnostic.
+    QueryFailed {
+        name: String,
+        exit_code: i32,
+        stderr_tail: String,
+    },
 }
 
 impl fmt::Display for ExecError {
@@ -965,6 +1090,14 @@ impl fmt::Display for ExecError {
                 "fixed-output hash mismatch: expected {expected}, fetched {actual}"
             ),
             ExecError::InvalidAction(error) => write!(f, "invalid action: {error}"),
+            ExecError::QueryFailed {
+                name,
+                exit_code,
+                stderr_tail,
+            } => write!(
+                f,
+                "query {name:?} exited with code {exit_code}: {stderr_tail}"
+            ),
         }
     }
 }

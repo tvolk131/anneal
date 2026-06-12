@@ -11,4 +11,5 @@ anneal-snapshot = { path = "../anneal-snapshot" }
 libc = "0.2"
 
 [dev-dependencies]
+serde_json = "1"
 tempfile = "3"
