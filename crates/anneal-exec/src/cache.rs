@@ -43,6 +43,15 @@ pub fn action_digest(action: &Action) -> Digest {
         write_str(&mut buf, arg);
     }
 
+    // native fetch URL. Written only when present, so the digests of ordinary
+    // (command) actions are unchanged by the field's introduction. (FixedOutput
+    // results are cached by output, not by this digest — included for the
+    // totality of action identity, not for cache correctness.)
+    if let Some(url) = &action.fetch_url {
+        write_str(&mut buf, "fetch-url");
+        write_str(&mut buf, url);
+    }
+
     // inputs (BTreeMap → sorted by name). The source is tagged so a Blob digest can
     // never collide with an Output reference. In normal execution every input is a
     // Blob by the time keying happens (the graph executor resolves Output refs to
@@ -365,7 +374,10 @@ mod tests {
     fn pre_provenance_entries_still_parse() {
         // Entries written before the `prov` line existed must remain readable;
         // they surface as `provenance: None`.
-        let parsed = parse_entry("exit 0\nout bin 2222222222222222222222222222222222222222222222222222222222222222\n").unwrap();
+        let parsed = parse_entry(
+            "exit 0\nout bin 2222222222222222222222222222222222222222222222222222222222222222\n",
+        )
+        .unwrap();
         assert_eq!(parsed.exit_code, 0);
         assert_eq!(parsed.provenance, None);
         assert_eq!(parsed.outputs.len(), 1);

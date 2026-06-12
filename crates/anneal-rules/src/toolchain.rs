@@ -34,7 +34,9 @@ pub(crate) fn nix_base_runtime() -> Result<Toolchain, RuleError> {
     nix_store_toolchain(
         "posix-runtime",
         &[
-            "sh", "cat", "chmod", "cp", "curl", "grep", "head", "mkdir", "sed", "tar",
+            // `gzip` is not invoked directly by any rule script, but GNU tar's
+            // `z` flag execs it from PATH (the §FOD vendor assembly).
+            "sh", "cat", "chmod", "cp", "curl", "grep", "gzip", "head", "mkdir", "sed", "tar",
         ],
     )
 }

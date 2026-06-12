@@ -387,6 +387,21 @@ shape is shared across every package ecosystem.
       network by default, while fixed-output/network-capable actions get the allow-network profile/namespace.
       Deferred optimization: graph-level dedup of identical-`expected` nodes (the `cas.has` short-circuit already
       makes the duplicate a no-op).
+  - [x] **Native fetch (no curl, no sandbox, no host trust).** A FOD action may carry a declarative
+        `fetch_url` (`ActionBuilder::fetch(url, expected)`: empty command, no inputs/toolchains, one output —
+        validated at build time); `run_fixed_output` downloads it **in the executor process** over ureq →
+        rustls/ring with Mozilla's roots compiled in (`webpki-roots`). Kills the curl CA failure class
+        outright (Nix curl → Nix OpenSSL whose baked OPENSSLDIR ships no CA bundle; the scrubbed sandbox env
+        has no `SSL_CERT_FILE` → exit 60 on every fetch) and the per-fetch sandbox spawn; proxies work again
+        (the executor keeps the user's env). The pin still carries integrity — embedded roots are
+        availability-only. This is the Buck2/Bazel shape: pinned downloads are kernel infrastructure, not an
+        inner tool. `cargo_workspace::fetch_action` flipped over; hermetic local-server tests
+        (`anneal-exec/tests/native_fetch.rs`: verify, CAS admit, output-keyed hit without network, 5xx retry,
+        4xx no-retry, contract validation). Found+fixed en route: `gzip` was missing from the posix-runtime
+        toolchain (GNU tar's `z` execs it — vendor assembly died in-sandbox), and
+        `fetch_mode_builds_a_registry_dep_offline` is now **gated on `ANNEAL_NETWORK_TESTS=1` instead of
+        `#[ignore]`d** so a networked CI lane actually exercises fetch mode (it rotted silently twice behind
+        the ignore). The sandboxed-command FOD form remains for user-authored fetch actions.
 - [ ] **The per-ecosystem acquisition pattern (one shape everywhere).** Every modern ecosystem converged on the
       same two things — a lockfile with per-artifact hashes + an internal content-addressed store — which *is* the
       FOD shape: `lockfile {(coord, hash)} → one FOD fetch per artifact → assemble blobs into the tool's offline

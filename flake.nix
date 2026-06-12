@@ -29,6 +29,9 @@
           gnugrep
           gnused
           gnutar
+          # GNU tar's `z` shells out to an external gzip — without it in the
+          # closure, `tar xzf` of a fetched .crate dies inside the sandbox.
+          gzip
         ];
         runtimeToolNames = [
           "sh"
@@ -37,6 +40,7 @@
           "cp"
           "curl"
           "grep"
+          "gzip"
           "head"
           "mkdir"
           "sed"

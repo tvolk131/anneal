@@ -23,6 +23,7 @@ use anneal_snapshot::SnapshotStore;
 
 use crate::action::{Action, ActionError, CachePolicy, ExecutionMode, InputSource};
 use crate::cache::{action_digest, ActionCache, StoredResult};
+use crate::fetch;
 use crate::materializer;
 use crate::query::{query_identity, query_key, QueryResult, QuerySpec, QUERY_STDOUT};
 use crate::sandbox::{self, SandboxSpec};
@@ -501,11 +502,14 @@ impl LocalExecutor {
     /// Cached by **output**, not inputs: if `expected` is already a CAS blob — from any
     /// prior build, any project on this machine, or a future remote-cache pull — the
     /// fetch is skipped entirely (content-addressed dedup; the fetch command never runs).
-    /// On a miss we fetch in a sandbox with the network capability, then verify the
-    /// produced bytes against the pin: a mismatch (corrupt download, compromised mirror,
-    /// moved artifact) fails *closed*. Verification makes the result trivially §1.4
-    /// correctness-neutral — the hash is the sole arbiter, so a bad network can fail the
-    /// build but never corrupt it.
+    /// On a miss we fetch — **natively in-process** when the action carries a
+    /// `fetch_url` (pure-Rust TLS, Mozilla roots compiled in: no curl, no sandbox,
+    /// no host trust configuration), otherwise by running the command in a sandbox
+    /// with the network capability — then verify the produced bytes against the
+    /// pin: a mismatch (corrupt download, compromised mirror, moved artifact)
+    /// fails *closed*. Verification makes the result trivially §1.4
+    /// correctness-neutral — the hash is the sole arbiter, so a bad network can
+    /// fail the build but never corrupt it.
     fn run_fixed_output(
         &self,
         action: &Action,
@@ -530,10 +534,31 @@ impl LocalExecutor {
             });
         }
 
-        // Miss: fetch in a sandbox (network permitted by the capability; no snapshot
-        // restore/save). `capture` already stored the produced bytes in the CAS under
-        // their *actual* digest — a wrong-hash blob there is harmless, it simply isn't
-        // `expected` — so we only need to check that digest against the pin.
+        // Miss, native fetch (§FOD): the executor downloads in-process — no
+        // sandbox, no toolchain, embedded Mozilla roots — and the pin is the
+        // sole arbiter of what enters the CAS. `put` returns the actual digest;
+        // a wrong-hash blob in the CAS is harmless (it simply isn't `expected`).
+        if let Some(url) = &action.fetch_url {
+            let bytes = fetch::download(url).map_err(|error| ExecError::Fetch {
+                action: action.name().to_owned(),
+                error,
+            })?;
+            let actual = self.cas.put(&bytes)?;
+            if actual != expected {
+                return Err(ExecError::FixedOutputMismatch { expected, actual });
+            }
+            return Ok(ActionResult {
+                exit_code: 0,
+                outputs: BTreeMap::from([(out_name, expected)]),
+                cache_hit: false,
+                provenance: Some(self.provenance_for(action)),
+            });
+        }
+
+        // Miss, command form: fetch in a sandbox (network permitted by the capability;
+        // no snapshot restore/save). `capture` already stored the produced bytes in the
+        // CAS under their *actual* digest — a wrong-hash blob there is harmless, it
+        // simply isn't `expected` — so we only need to check that digest against the pin.
         let result = self.run_core(action, self.sandbox_root(&expected), false, false)?;
         if result.exit_code != 0 {
             // The fetch command itself failed (e.g. the artifact is unreachable). Surface
@@ -1083,6 +1108,12 @@ fn wait_with_timeout(child: &mut Child, timeout_ms: u64) -> Result<ExitStatus, E
 pub enum ExecError {
     /// A filesystem/CAS error during materialization, capture, or caching.
     Io(io::Error),
+    /// A native fixed-output download definitively failed (transport, after
+    /// retries, or a 4xx). Hash mismatches are `FixedOutputMismatch`, not this.
+    Fetch {
+        action: String,
+        error: crate::fetch::FetchError,
+    },
     /// The configured sandbox backend is missing or unusable.
     Sandbox(SandboxError),
     /// The command could not be spawned.
@@ -1121,6 +1152,9 @@ impl fmt::Display for ExecError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ExecError::Io(e) => write!(f, "I/O error: {e}"),
+            ExecError::Fetch { action, error } => {
+                write!(f, "action {action:?}: {error}")
+            }
             ExecError::Sandbox(e) => write!(f, "{e}"),
             ExecError::Spawn(e) => write!(f, "failed to spawn command: {e}"),
             ExecError::MissingOutput(name) => {

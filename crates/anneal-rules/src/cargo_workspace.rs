@@ -189,7 +189,7 @@ impl Rule for CargoWorkspace {
             || -> Result<(), RuleError> {
                 if let Some(deps) = &fetch_deps {
                     for dep in deps {
-                        actions.push(fetch_action(dep, &runtime)?);
+                        actions.push(fetch_action(dep)?);
                     }
                 }
                 Ok(())
@@ -643,11 +643,14 @@ fn fetch_plan(ctx: &RuleContext) -> Result<Option<Vec<LockDep>>, RuleError> {
     Ok((!deps.is_empty()).then_some(deps))
 }
 
-/// A fixed-output fetch (§FOD) for one crate: download its `.crate` from static.crates.io
-/// into the single declared output `crate`, pinned to the lockfile checksum. Cached by
-/// output (a present blob skips the download), verified against the pin (a mismatch fails
-/// closed). The graph-unique name lets the compiling actions reference it.
-fn fetch_action(dep: &LockDep, runtime: &Toolchain) -> Result<Action, RuleError> {
+/// A fixed-output fetch (§FOD) for one crate, performed **natively by the
+/// executor** (in-process rustls with embedded Mozilla roots — no curl, no
+/// sandbox, no toolchain, no host trust configuration): download its `.crate`
+/// from static.crates.io into the single declared output `crate`, pinned to
+/// the lockfile checksum. Cached by output (a present blob skips the
+/// download), verified against the pin (a mismatch fails closed). The
+/// graph-unique name lets the compiling actions reference it.
+fn fetch_action(dep: &LockDep) -> Result<Action, RuleError> {
     let expected = Digest::from_hex(&dep.checksum).map_err(|e| {
         RuleError::Message(format!(
             "{} {}: invalid checksum hex in Cargo.lock: {e}",
@@ -657,20 +660,13 @@ fn fetch_action(dep: &LockDep, runtime: &Toolchain) -> Result<Action, RuleError>
     let base = dep.base();
     let url = format!("https://static.crates.io/crates/{}/{base}.crate", dep.name);
     let output_path = PathBuf::from(format!(".anneal/fetch/{base}.crate"));
-    let script = format!(
-        "curl -sSL --fail --retry 3 -o {} '{url}'",
-        output_path.display()
-    );
-    let path_env = toolchain_path_env(&[runtime]);
     Ok(Action::builder(
         format!("cargo_workspace fetch {base}"),
-        vec!["sh".to_owned(), "-c".to_owned(), script],
+        Vec::<String>::new(),
     )
-    .toolchain(runtime.clone())
-    .env("PATH", path_env)
     .output("crate", output_path)
     .platform_independent()
-    .fixed_output(expected)
+    .fetch(url, expected)
     .try_build()?)
 }
 

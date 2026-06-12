@@ -241,8 +241,17 @@ pub struct Action {
     /// hash fences the impurity) and the `exec` escape hatch. Kept orthogonal to
     /// [`CachePolicy`] so the capability is reusable; Linux sealed actions enforce the
     /// default with a private network namespace, and macOS sealed actions enforce it via
-    /// `sandbox-exec`.
+    /// `sandbox-exec`. (A **native** fetch — `fetch_url` set — does its I/O in the
+    /// executor process, so no sandbox enforcement applies; the flag stays set as the
+    /// honest capability declaration.)
     pub(crate) network: bool,
+    /// For a **native fixed-output fetch** (§FOD): the URL the executor
+    /// downloads in-process (pure-Rust TLS, Mozilla roots compiled in) instead
+    /// of spawning a sandboxed command. Set via [`ActionBuilder::fetch`];
+    /// always paired with [`CachePolicy::FixedOutput`] and an empty `command`
+    /// — there is no inner tool. The pin carries the integrity guarantee, so
+    /// the embedded root store is availability-only configuration.
+    pub(crate) fetch_url: Option<String>,
 }
 
 impl Action {
@@ -270,6 +279,7 @@ impl Action {
                 snapshot_shared: true,
                 platform_sensitive: true,
                 network: false,
+                fetch_url: None,
             },
         }
     }
@@ -308,11 +318,19 @@ impl Action {
         self.network
     }
 
+    /// The URL of a native fixed-output fetch, if this action is one.
+    pub fn fetch_url(&self) -> Option<&str> {
+        self.fetch_url.as_deref()
+    }
+
     /// Validate the action contract before materialization or keying. This is the
     /// central path-safety check: action paths are relative to the action working
     /// directory and must not contain absolute roots or parent components.
     pub fn validate(&self) -> Result<(), ActionError> {
         validate_action_name(&self.name)?;
+        if self.fetch_url.is_some() {
+            return self.validate_fetch_contract();
+        }
         if self.command.is_empty() {
             return Err(ActionError::new(format!(
                 "action {:?} has an empty command",
@@ -425,6 +443,34 @@ impl Action {
         }
 
         Ok(())
+    }
+
+    /// A native fetch runs no inner tool: nothing that only matters inside a
+    /// sandbox may be declared, and the §FOD single-pin shape is enforced at
+    /// build time rather than first execution.
+    fn validate_fetch_contract(&self) -> Result<(), ActionError> {
+        let problem = if !self.command.is_empty() {
+            Some("declares a command (a native fetch runs no inner tool)")
+        } else if !self.inputs.is_empty() {
+            Some("declares inputs (a native fetch has none)")
+        } else if !self.toolchains.is_empty() {
+            Some("declares toolchains (a native fetch consults none)")
+        } else if !self.snapshot_paths.is_empty() {
+            Some("declares snapshot paths (a native fetch has no tool state)")
+        } else if self.outputs.len() != 1 {
+            Some("must declare exactly one output (the pin is a single digest)")
+        } else if !matches!(self.cache_policy, CachePolicy::FixedOutput { .. }) {
+            Some("must be FixedOutput (use ActionBuilder::fetch)")
+        } else {
+            None
+        };
+        match problem {
+            Some(problem) => Err(ActionError::new(format!(
+                "native fetch action {:?} {problem}",
+                self.name
+            ))),
+            None => Ok(()),
+        }
     }
 
     fn validate_command_contract(&self) -> Result<(), ActionError> {
@@ -693,6 +739,23 @@ impl ActionBuilder {
     /// present `expected` blob skips the fetch — and any produced output is verified
     /// against `expected`, failing closed on a mismatch. Declare exactly one output.
     pub fn fixed_output(mut self, expected: Digest) -> Self {
+        self.action.cache_policy = CachePolicy::FixedOutput { expected };
+        self.action.network = true;
+        self
+    }
+
+    /// Declare a **native fixed-output fetch** (§FOD): the executor downloads
+    /// `url` in-process — pure-Rust TLS with Mozilla's root store compiled in
+    /// — and verifies the bytes against `expected` before admitting them to
+    /// the CAS. No sandbox is spawned and no toolchain is consulted, so the
+    /// action must carry an empty `command`, no inputs, no toolchains, and
+    /// exactly one output (validated by [`try_build`]). The `network`
+    /// capability is set for honesty: this action reaches the network, just
+    /// from the executor process rather than a sandbox.
+    ///
+    /// [`try_build`]: ActionBuilder::try_build
+    pub fn fetch(mut self, url: impl Into<String>, expected: Digest) -> Self {
+        self.action.fetch_url = Some(url.into());
         self.action.cache_policy = CachePolicy::FixedOutput { expected };
         self.action.network = true;
         self

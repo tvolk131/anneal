@@ -29,6 +29,10 @@
 mod action;
 mod cache;
 mod executor;
+/// Native fixed-output downloads (§FOD): the executor fetches pinned blobs
+/// in-process (rustls + embedded Mozilla roots) — no curl, no sandbox, no
+/// host trust configuration. See the module docs for the trust argument.
+mod fetch;
 /// Materializing routed files into the working tree (`anneal materialize`):
 /// the manifest-tracked bridge from CAS outputs to what native tools (cargo
 /// run, rust-analyzer) can see. Not part of the [`Executor`] deep module — a
@@ -55,6 +59,7 @@ pub use action::{
 };
 pub use cache::action_digest;
 pub use executor::{ActionResult, ExecError, Executor, LocalExecutor, PhaseTimings, SandboxError};
+pub use fetch::FetchError;
 pub use query::{QueryBuilder, QueryResult, QuerySpec};
 pub use trust::{compute_tier, CacheTier, EnforcementGrade, Provenance};
 pub use verify::{
