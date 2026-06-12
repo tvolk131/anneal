@@ -40,9 +40,6 @@ mod toolchain;
 pub use attrs::{AttrError, AttrValue, Attrs};
 pub use cargo_workspace::CargoWorkspace;
 pub use context::{ResolvedDep, RuleContext, SourcePathRecorder, StateRegistry};
-pub use state::{
-    Attestation, Concurrency, PersistentStateDecl, StateActionExt, StateHandle, StateKind,
-};
 pub use diagnostics::{start_rule_timings, take_rule_timings, RuleTiming};
 pub use nickel_eval::NickelEval;
 pub use pnpm_workspace::PnpmWorkspace;
@@ -50,3 +47,6 @@ pub use providers::{Artifact, ArtifactSource, FileSet, ProviderSet};
 pub use rule::{Analysis, Rule, RuleError};
 pub use rules::{builtin_rules, Alias, FileGroup, GenRule, RuleRegistry};
 pub use schema::{AttrSchema, AttrType};
+pub use state::{
+    Attestation, Concurrency, PersistentStateDecl, StateActionExt, StateHandle, StateKind,
+};

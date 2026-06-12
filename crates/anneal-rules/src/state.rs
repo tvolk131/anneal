@@ -149,15 +149,25 @@ pub trait StateActionExt: Sized {
     /// existence proves an attestation was written. Lowered to a *private*
     /// snapshot: the warm tree is the live copy, capped Local by the trust layer.
     fn mutate_state(self, state: &StateHandle) -> Result<Self, RuleError>;
+
+    /// `mutate_state` when a handle is present; pass-through otherwise. The
+    /// Hermetic-arm convenience (DESIGN.md §4.4): rules declare interleaved
+    /// state only under `ExecMode::Incremental` and thread the `Option` —
+    /// hermetic actions get no grant, and action validation enforces that no
+    /// mutator slips through regardless.
+    fn mutate_state_opt(self, state: Option<&StateHandle>) -> Result<Self, RuleError> {
+        match state {
+            Some(state) => self.mutate_state(state),
+            None => Ok(self),
+        }
+    }
 }
 
 impl StateActionExt for ActionBuilder {
     fn produce_state(self, state: &StateHandle) -> Result<Self, RuleError> {
         guard_single_state(&self)?;
         match state.kind {
-            StateKind::PhaseSeparated => {
-                Ok(self.snapshot(state.key, state.paths.clone()))
-            }
+            StateKind::PhaseSeparated => Ok(self.snapshot(state.key, state.paths.clone())),
             StateKind::Interleaved { .. } => Err(RuleError::Message(format!(
                 "state {:?}: interleaved state has no producer — every user is a \
                  mutator; use mutate_state",
@@ -169,9 +179,7 @@ impl StateActionExt for ActionBuilder {
     fn read_state(self, state: &StateHandle) -> Result<Self, RuleError> {
         guard_single_state(&self)?;
         match state.kind {
-            StateKind::PhaseSeparated => {
-                Ok(self.snapshot_restore(state.key, state.paths.clone()))
-            }
+            StateKind::PhaseSeparated => Ok(self.snapshot_restore(state.key, state.paths.clone())),
             // §2.5: a reader of interleaved state has an input that exists in
             // no key — silently stale-able, so the arm does not exist.
             StateKind::Interleaved { .. } => Err(RuleError::Message(format!(
@@ -254,7 +262,10 @@ mod tests {
         assert!(builder().mutate_state(&phase).is_err());
 
         assert!(builder().produce_state(&inter).is_err());
-        assert!(builder().read_state(&inter).is_err(), "§2.5: no Read of interleaved");
+        assert!(
+            builder().read_state(&inter).is_err(),
+            "§2.5: no Read of interleaved"
+        );
         assert!(builder().mutate_state(&inter).is_ok());
     }
 
@@ -278,7 +289,10 @@ mod tests {
         assert_ne!(e1, e2, "epoch bump revokes: every derived key changes");
 
         let other_rule = state_key("rule_b", &decl(interleaved(1)));
-        assert_ne!(e1, other_rule, "rule-kind scoping: same decl, different rule, different key");
+        assert_ne!(
+            e1, other_rule,
+            "rule-kind scoping: same decl, different rule, different key"
+        );
 
         let phase_a = state_key("rule_a", &decl(StateKind::PhaseSeparated));
         assert_ne!(e1, phase_a, "kind is part of identity");

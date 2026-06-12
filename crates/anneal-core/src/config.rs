@@ -1,4 +1,4 @@
-//! Platforms, the five universal axes, and the [`Configuration`] keying unit (§6).
+//! Platforms, the universal axes, and the [`Configuration`] keying unit (§6).
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -34,8 +34,9 @@ impl fmt::Display for Platform {
     }
 }
 
-/// The five universal axes (§6.2). Each rule declares which it consumes; axes a
-/// rule does not consume are excluded from its cache key ([`AxisValues::consumed`]).
+/// The universal axes (§6.2; `ExecMode` added per DESIGN.md §4.1 / Appendix A
+/// ruling 3). Each rule declares which it consumes; axes a rule does not consume
+/// are excluded from its cache key ([`AxisValues::consumed`]).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Axis {
     OptLevel,
@@ -43,6 +44,7 @@ pub enum Axis {
     DebugInfo,
     Sanitizer,
     Coverage,
+    ExecMode,
 }
 
 impl Axis {
@@ -54,18 +56,20 @@ impl Axis {
             Axis::DebugInfo => "debug_info",
             Axis::Sanitizer => "sanitizer",
             Axis::Coverage => "coverage",
+            Axis::ExecMode => "exec_mode",
         }
     }
 }
 
 /// Canonical axis ordering. [`AxisValues::consumed`] iterates this so a cache key is
 /// independent of the order a rule happens to declare its consumed axes in.
-pub const ALL_AXES: [Axis; 5] = [
+pub const ALL_AXES: [Axis; 6] = [
     Axis::OptLevel,
     Axis::Lto,
     Axis::DebugInfo,
     Axis::Sanitizer,
     Axis::Coverage,
+    Axis::ExecMode,
 ];
 
 macro_rules! axis_enum {
@@ -144,7 +148,21 @@ axis_enum!(
     default Off
 );
 
-/// The values of all five axes. A pure record with no cross-field invariant, so its
+axis_enum!(
+    /// Execution mode (DESIGN.md §4.1): the warm/trustworthy duality as a
+    /// configuration axis. `Incremental` actions may mutate interleaved tool
+    /// state (warm, fast, Local-tier); `Hermetic` actions may not — enforced at
+    /// action validation, not by convention (§4.4) — making their results
+    /// promotable when built under full sandbox enforcement. Host default:
+    /// `incremental` (the dev loop); CI builds pass `--exec-mode hermetic`.
+    ExecMode {
+        Incremental => "incremental",
+        Hermetic => "hermetic",
+    }
+    default Incremental
+);
+
+/// The values of all axes. A pure record with no cross-field invariant, so its
 /// fields are public; [`Default`] gives the host defaults (§6.6).
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub struct AxisValues {
@@ -153,6 +171,7 @@ pub struct AxisValues {
     pub debug_info: DebugInfo,
     pub sanitizer: Sanitizer,
     pub coverage: Coverage,
+    pub exec_mode: ExecMode,
 }
 
 impl AxisValues {
@@ -164,6 +183,7 @@ impl AxisValues {
             Axis::DebugInfo => self.debug_info.as_str(),
             Axis::Sanitizer => self.sanitizer.as_str(),
             Axis::Coverage => self.coverage.as_str(),
+            Axis::ExecMode => self.exec_mode.as_str(),
         }
     }
 
@@ -216,6 +236,20 @@ mod tests {
         assert_eq!(a.lto, Lto::Off);
         assert_eq!(a.sanitizer, Sanitizer::None);
         assert_eq!(a.coverage, Coverage::Off);
+        assert_eq!(a.exec_mode, ExecMode::Incremental, "the dev loop is the default");
+    }
+
+    #[test]
+    fn exec_mode_is_a_consumable_axis() {
+        let a = AxisValues {
+            exec_mode: ExecMode::Hermetic,
+            ..Default::default()
+        };
+        let consumed = a.consumed(&BTreeSet::from([Axis::ExecMode]));
+        assert_eq!(consumed, vec![("exec_mode", "hermetic")]);
+        // Rules that don't consume the axis (pnpm) get identical keys across
+        // modes — that's the point of trimming.
+        assert!(a.consumed(&BTreeSet::new()).is_empty());
     }
 
     #[test]
