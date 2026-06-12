@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 
 use anneal_cas::Cas;
 use anneal_core::{Configuration, Label};
-use anneal_exec::Action;
+use anneal_exec::{Action, LocalExecutor};
 use anneal_loader::TargetGraph;
-use anneal_rules::{ProviderSet, ResolvedDep, RuleContext, RuleRegistry, SourcePathRecorder};
+use anneal_rules::{ProviderSet, ResolvedDep, RuleContext, RuleRegistry, SourcePathRecorder, StateRegistry};
 
 use crate::error::AnalysisError;
 
@@ -70,6 +70,12 @@ pub struct Analyzer<'a> {
     config: &'a Configuration,
     workspace_root: &'a Path,
     cas: &'a Cas,
+    /// Cross-target persistent-state declarations for this run (idempotence +
+    /// mismatch checking; DESIGN.md §3.3).
+    states: StateRegistry,
+    /// Executor for analysis-time tool queries (DESIGN.md §3.6). Optional:
+    /// rules that never query analyze fine without one.
+    executor: Option<&'a LocalExecutor>,
 }
 
 impl<'a> Analyzer<'a> {
@@ -86,7 +92,17 @@ impl<'a> Analyzer<'a> {
             config,
             workspace_root,
             cas,
+            states: StateRegistry::new(),
+            executor: None,
         }
+    }
+
+    /// Enable analysis-time tool queries by wiring the executor through to
+    /// rule contexts. Queries are sealed, network-denied, stdout-captured
+    /// actions — this is the §5.1 by-design breach of strict phasing.
+    pub fn with_executor(mut self, executor: &'a LocalExecutor) -> Self {
+        self.executor = Some(executor);
+        self
     }
 
     /// Analyze `root` and its transitive dependencies into an [`ActionGraph`].
@@ -163,7 +179,13 @@ impl<'a> Analyzer<'a> {
             self.cas,
             &resolved_deps,
             source_paths,
-        );
+        )
+        .with_rule_kind(rule.kind())
+        .with_state_registry(&self.states);
+        let ctx = match self.executor {
+            Some(executor) => ctx.with_executor(executor),
+            None => ctx,
+        };
         let analysis = rule.analyze(&ctx).map_err(|error| AnalysisError::Rule {
             label: label.clone(),
             error,

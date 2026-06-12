@@ -7,15 +7,53 @@
 //! sharp.
 
 use std::cell::{Ref, RefCell};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
 
 use anneal_cas::Cas;
 use anneal_core::{Configuration, Label};
+use anneal_exec::{LocalExecutor, QuerySpec};
 
 use crate::attrs::Attrs;
 use crate::providers::{Artifact, ArtifactSource, ProviderSet};
 use crate::rule::RuleError;
+use crate::state::{state_key, PersistentStateDecl, StateHandle};
+
+/// Cross-target registry of persistent state declarations, owned by the
+/// analysis run (DESIGN.md §3.3 runtime checks): `declare_state` is idempotent
+/// across targets on **bit-identical** declarations and a hard error on any
+/// mismatch — same identity with a different kind, attestation, shard content,
+/// or paths is a fork of the trust contract, never silently resolved.
+#[derive(Debug, Default)]
+pub struct StateRegistry {
+    declared: Mutex<BTreeMap<(String, &'static str, Vec<String>), PersistentStateDecl>>,
+}
+
+impl StateRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn check(&self, rule_kind: &str, decl: &PersistentStateDecl) -> Result<(), RuleError> {
+        let mut declared = self.declared.lock().unwrap();
+        let id = (rule_kind.to_owned(), decl.namespace, decl.shard.clone());
+        match declared.get(&id) {
+            None => {
+                declared.insert(id, decl.clone());
+                Ok(())
+            }
+            Some(existing) if existing == decl => Ok(()),
+            Some(_) => Err(RuleError::Message(format!(
+                "conflicting declarations for state {:?} (rule {rule_kind:?}): \
+                 the same namespace+shard was declared with a different kind, \
+                 attestation, or paths — state identity must be declared \
+                 bit-identically by every target that uses it",
+                decl.namespace
+            ))),
+        }
+    }
+}
 
 /// A dependency that has already been analyzed: its label and the providers it
 /// exposed.
@@ -54,6 +92,14 @@ pub struct RuleContext<'a> {
     cas: &'a Cas,
     deps: &'a [ResolvedDep],
     source_paths: Option<&'a SourcePathRecorder>,
+    /// The declaring rule's kind, for state-key scoping (§2.6). Set by the
+    /// analyzer; `declare_state` is unavailable without it.
+    rule_kind: Option<&'a str>,
+    /// Cross-target state-declaration registry, owned by the analysis run.
+    state_registry: Option<&'a StateRegistry>,
+    /// The executor, for analysis-time tool queries (§3.6). Optional so
+    /// query-free contexts (most tests) need no executor.
+    executor: Option<&'a LocalExecutor>,
 }
 
 impl<'a> RuleContext<'a> {
@@ -105,7 +151,72 @@ impl<'a> RuleContext<'a> {
             cas,
             deps,
             source_paths,
+            rule_kind: None,
+            state_registry: None,
+            executor: None,
         }
+    }
+
+    /// Attach the declaring rule's kind (the analyzer does this) — required for
+    /// `declare_state`, whose keys are rule-scoped (§2.6).
+    pub fn with_rule_kind(mut self, kind: &'a str) -> Self {
+        self.rule_kind = Some(kind);
+        self
+    }
+
+    /// Attach the analysis run's state registry (cross-target idempotence and
+    /// mismatch checking for `declare_state`).
+    pub fn with_state_registry(mut self, registry: &'a StateRegistry) -> Self {
+        self.state_registry = Some(registry);
+        self
+    }
+
+    /// Attach an executor, enabling analysis-time tool queries.
+    pub fn with_executor(mut self, executor: &'a LocalExecutor) -> Self {
+        self.executor = Some(executor);
+        self
+    }
+
+    /// Declare a persistent state tree this rule's actions may use (§2.1).
+    /// Returns the only mintable [`StateHandle`]; an `Interleaved` declaration
+    /// cannot be constructed without an [`Attestation`](crate::Attestation), so
+    /// the mutate grant provably has one behind it. Idempotent across targets
+    /// on bit-identical declarations; any mismatch is a hard error.
+    pub fn declare_state(&self, decl: PersistentStateDecl) -> Result<StateHandle, RuleError> {
+        let rule_kind = self.rule_kind.ok_or_else(|| {
+            RuleError::Message(
+                "declare_state requires a rule-kind-scoped context (the analyzer \
+                 attaches it via with_rule_kind)"
+                    .to_owned(),
+            )
+        })?;
+        if let Some(registry) = self.state_registry {
+            registry.check(rule_kind, &decl)?;
+        }
+        Ok(StateHandle {
+            key: state_key(rule_kind, &decl),
+            kind: decl.kind,
+            namespace: decl.namespace,
+            paths: decl.paths,
+        })
+    }
+
+    /// Run (or cache-hit) an analysis-time tool query (§3.6): a sealed,
+    /// network-denied action whose captured stdout is the result. The honest
+    /// form of "ask the tool" — sandboxed, keyed, cached like any action —
+    /// where `read_package_file` is the pure in-process form.
+    pub fn query(&self, spec: &QuerySpec) -> Result<Vec<u8>, RuleError> {
+        let executor = self.executor.ok_or_else(|| {
+            RuleError::Message(
+                "analysis-time queries require an executor-wired context (the \
+                 analyzer attaches it via with_executor)"
+                    .to_owned(),
+            )
+        })?;
+        executor
+            .run_query(spec)
+            .map(|result| result.stdout)
+            .map_err(|e| RuleError::Message(format!("query failed: {e}")))
     }
 
     pub fn label(&self) -> &Label {

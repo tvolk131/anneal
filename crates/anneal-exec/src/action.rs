@@ -287,6 +287,11 @@ impl Action {
     }
 
     /// The action working directory relative to the sandbox root.
+    /// The snapshot key, if this action uses a persistent state tree.
+    pub fn snapshot_key(&self) -> Option<Digest> {
+        self.snapshot_key
+    }
+
     pub fn working_directory(&self) -> &Path {
         &self.working_directory
     }
@@ -455,6 +460,13 @@ pub struct ActionBuilder {
 }
 
 impl ActionBuilder {
+    /// Whether a snapshot (persistent state tree) is already attached. The
+    /// action model carries at most one; the typed state layer in
+    /// `anneal-rules` uses this to reject a second grant at analysis time.
+    pub fn snapshot_is_set(&self) -> bool {
+        self.action.snapshot_key.is_some()
+    }
+
     /// Declare an input from a concrete CAS blob: materialize `digest` at `path`
     /// (relative to the working directory) under the logical `name`.
     pub fn input(

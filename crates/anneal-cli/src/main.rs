@@ -358,6 +358,7 @@ fn analyze_and_run(
     };
     let exec = exec.require_enforced(require_enforced);
     let analyzed = Analyzer::new(&graph, &registry, config, root, exec.cas())
+        .with_executor(&exec)
         .analyze(&label)
         .map_err(|e| e.to_string())?;
     let actions: Vec<Action> = analyzed.actions().cloned().collect();

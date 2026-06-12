@@ -45,6 +45,7 @@ use crate::context::RuleContext;
 use crate::providers::{Artifact, ArtifactSource, FileSet, ProviderSet};
 use crate::rule::{Analysis, Rule, RuleError};
 use crate::schema::{AttrSchema, AttrType};
+use crate::state::{PersistentStateDecl, StateActionExt, StateKind};
 use crate::toolchain::{nix_base_runtime, nix_store_toolchain, toolchain_path_env};
 
 /// `scripts` is an optional table; the rule validates its structure. `data` routes other
@@ -97,11 +98,16 @@ impl Rule for PnpmWorkspace {
         let package_json = ctx.source_artifact(Path::new("package.json"))?;
 
         let label = ctx.label().clone();
-        // The same snapshot key is shared by install (which saves) and every script
-        // (which restores) — the concrete form of "the edge carries the install-snapshot
-        // identity" (§6 of the pnpm doc).
-        let snapshot_key = snapshot_key(&toolchain, &runtime, source_digest(&lockfile), ctx);
-        let snapshot_paths = vec![PathBuf::from("node_modules"), PathBuf::from(STORE_DIR)];
+        // node_modules + store is **phase-separated** state (DESIGN.md §2.1):
+        // produced by exactly one action (install), consumed read-only by every
+        // script. No trust delegated, so no attestation exists — the shape to
+        // prefer, and the typed proof that ceremony correlates with risk.
+        let modules_state = ctx.declare_state(PersistentStateDecl {
+            namespace: "pnpm-node-modules",
+            shard: modules_state_shard(&toolchain, &runtime, source_digest(&lockfile), ctx),
+            kind: StateKind::PhaseSeparated,
+            paths: vec![PathBuf::from("node_modules"), PathBuf::from(STORE_DIR)],
+        })?;
 
         let mut actions = Vec::new();
 
@@ -127,7 +133,7 @@ impl Rule for PnpmWorkspace {
         // while keeping the lockfile digest in the action key.
         let install = add_writable_source(add_source(install, &package_json), &lockfile)
             .configured(ctx.config().clone(), Vec::new())
-            .snapshot(snapshot_key, snapshot_paths.clone())
+            .produce_state(&modules_state)?
             .try_build()?;
         actions.push(install);
 
@@ -171,7 +177,7 @@ impl Rule for PnpmWorkspace {
                         )
                         .output("results.txt", results_path)
                         .configured(ctx.config().clone(), Vec::new())
-                        .snapshot_restore(snapshot_key, snapshot_paths.clone())
+                        .read_state(&modules_state)?
                         .try_build()?;
                         actions.push(action);
                     }
@@ -209,7 +215,7 @@ impl Rule for PnpmWorkspace {
                         }
                         let action = builder
                             .configured(ctx.config().clone(), Vec::new())
-                            .snapshot_restore(snapshot_key, snapshot_paths.clone())
+                            .read_state(&modules_state)?
                             .try_build()?;
                         actions.push(action);
                     }
@@ -367,23 +373,21 @@ fn source_digest(artifact: &Artifact) -> Digest {
     }
 }
 
-/// Coarse snapshot key — `(platform, toolchain, pnpm-lock.yaml)` (§6 of the pnpm doc).
-/// The toolchain term is the canonical `/nix/store/...` identity for pnpm/node. **Node
-/// version is intentionally not a separate term**: with `--ignore-scripts` there is no
-/// install-time native compilation, so `node_modules` content does not depend on it.
-fn snapshot_key(
+/// The `pnpm-node-modules` state shard — `(toolchain, runtime, pnpm-lock.yaml,
+/// platform)` (§6 of the pnpm doc). The toolchain term is the canonical
+/// `/nix/store/...` identity for pnpm/node. **Node version is intentionally not a
+/// separate term**: with `--ignore-scripts` there is no install-time native
+/// compilation, so `node_modules` content does not depend on it.
+fn modules_state_shard(
     toolchain: &Toolchain,
     runtime: &Toolchain,
     lockfile: Digest,
     ctx: &RuleContext,
-) -> Digest {
-    let mut buf = Vec::new();
-    buf.extend_from_slice(toolchain.identity().as_bytes());
-    buf.push(0);
-    buf.extend_from_slice(runtime.identity().as_bytes());
-    buf.push(0);
-    buf.extend_from_slice(lockfile.as_bytes());
-    buf.push(0);
-    buf.extend_from_slice(ctx.config().platform().target_triple().as_bytes());
-    Digest::of(&buf)
+) -> Vec<String> {
+    vec![
+        toolchain.identity().to_owned(),
+        runtime.identity().to_owned(),
+        lockfile.to_hex(),
+        ctx.config().platform().target_triple().to_owned(),
+    ]
 }

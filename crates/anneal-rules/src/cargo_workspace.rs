@@ -55,6 +55,7 @@ use crate::diagnostics;
 use crate::providers::{Artifact, ArtifactSource, ProviderSet};
 use crate::rule::{Analysis, Rule, RuleError};
 use crate::schema::{AttrSchema, AttrType};
+use crate::state::{Attestation, Concurrency, PersistentStateDecl, StateActionExt, StateKind};
 use crate::toolchain::{nix_base_runtime, nix_store_toolchain, toolchain_path_env};
 
 /// Directories never treated as build inputs.
@@ -132,10 +133,28 @@ impl Rule for CargoWorkspace {
 
         let crates =
             diagnostics::time("cargo_workspace.workspace_crates", || workspace_crates(ctx))?;
-        let snapshot_key = diagnostics::time("cargo_workspace.snapshot_key", || {
-            snapshot_key(&toolchain, &runtime, &sources, ctx)
-        });
-        let snapshot_paths = vec![PathBuf::from("target")];
+        // The typed form of the old coarse snapshot key (DESIGN.md §2.1 /
+        // Appendix A ruling 4): `target/` is **interleaved** state — mutated by
+        // the very actions that read it — so declaring it carries the
+        // attestation, and the epoch folds into the state key so a discovered
+        // cargo-soundness bug revokes every warm tree derived under it.
+        let target_state = ctx.declare_state(PersistentStateDecl {
+            namespace: "cargo-target",
+            shard: diagnostics::time("cargo_workspace.state_shard", || {
+                target_state_shard(&toolchain, &runtime, &sources, ctx)
+            }),
+            kind: StateKind::Interleaved {
+                concurrency: Concurrency::Exclusive,
+                attestation: Attestation {
+                    epoch: 1,
+                    rationale: "cargo fingerprint reuse is sound under --locked, a \
+                                pinned toolchain, CARGO_INCREMENTAL=0, and warm-reuse \
+                                content sync; epoch bumped on cargo soundness-class \
+                                advisories (cf. the 1.52.0 incremental emergency)",
+                },
+            },
+            paths: vec![PathBuf::from("target")],
+        })?;
         let label = ctx.label().clone();
 
         // Inputs from `data` deps (§14.6, inner-tool-only): every file a dependency
@@ -199,7 +218,7 @@ impl Rule for CargoWorkspace {
                 actions.push(
                     build
                         .configured(ctx.config().clone(), consumed.clone())
-                        .snapshot_private(snapshot_key, snapshot_paths.clone())
+                        .mutate_state(&target_state)?
                         .try_build()?,
                 );
                 Ok(())
@@ -245,7 +264,7 @@ impl Rule for CargoWorkspace {
                         )
                         .output("test-bin", test_bin_path)
                         .configured(ctx.config().clone(), consumed.clone())
-                        .snapshot_private(snapshot_key, snapshot_paths.clone());
+                        .mutate_state(&target_state)?;
                         actions.push(compile.try_build()?);
 
                         // run depends on the compiled binary (an action-graph edge); its cache
@@ -304,7 +323,7 @@ impl Rule for CargoWorkspace {
                             crate_deps,
                         )
                         .configured(ctx.config().clone(), consumed.clone())
-                        .snapshot_private(snapshot_key, snapshot_paths.clone());
+                        .mutate_state(&target_state)?;
                         actions.push(doc.try_build()?);
                     }
 
@@ -339,7 +358,7 @@ impl Rule for CargoWorkspace {
                             crate_deps,
                         )
                         .configured(ctx.config().clone(), consumed.clone())
-                        .snapshot_private(snapshot_key, snapshot_paths.clone());
+                        .mutate_state(&target_state)?;
                         actions.push(integ.try_build()?);
                     }
                 }
@@ -694,38 +713,37 @@ fn assembly_prelude(deps: &[LockDep]) -> String {
     s
 }
 
-/// Coarse snapshot key: `(toolchain, runtime, lockfile, target_triple, all axis values)`
-/// (§8.2). Including the axis values gives each configuration its own `target/`
-/// snapshot, so a debug, a release, and a coverage build don't thrash one another's.
-fn snapshot_key(
+/// The `cargo-target` state shard: `(toolchain, runtime, lockfile, target_triple,
+/// all axis values)` (§8.2). Including the axis values gives each configuration its
+/// own `target/` tree, so a debug, a release, and a coverage build don't thrash one
+/// another's. Formerly the hand-rolled snapshot-key digest; the typed state layer
+/// derives the key from this shard plus rule scope, kind, and attestation epoch.
+fn target_state_shard(
     toolchain: &Toolchain,
     runtime: &Toolchain,
     sources: &[Artifact],
     ctx: &RuleContext,
-) -> Digest {
-    let mut buf = Vec::new();
-    buf.extend_from_slice(toolchain.identity().as_bytes());
-    buf.push(0);
-    buf.extend_from_slice(runtime.identity().as_bytes());
-    buf.push(0);
-    if let Some(ArtifactSource::Source(lock)) = sources
-        .iter()
-        .find(|a| a.path == Path::new("Cargo.lock"))
-        .map(|a| &a.source)
-    {
-        buf.extend_from_slice(lock.as_bytes());
-    }
-    buf.push(0);
-    buf.extend_from_slice(ctx.config().platform().target_triple().as_bytes());
-    buf.push(0);
+) -> Vec<String> {
+    let mut shard = vec![
+        toolchain.identity().to_owned(),
+        runtime.identity().to_owned(),
+    ];
+    shard.push(
+        match sources
+            .iter()
+            .find(|a| a.path == Path::new("Cargo.lock"))
+            .map(|a| &a.source)
+        {
+            Some(ArtifactSource::Source(lock)) => lock.to_hex(),
+            _ => "no-lockfile".to_owned(),
+        },
+    );
+    shard.push(ctx.config().platform().target_triple().to_owned());
     let all_axes = BTreeSet::from(ALL_AXES);
     for (name, value) in ctx.config().axes().consumed(&all_axes) {
-        buf.extend_from_slice(name.as_bytes());
-        buf.push(b'=');
-        buf.extend_from_slice(value.as_bytes());
-        buf.push(b';');
+        shard.push(format!("{name}={value}"));
     }
-    Digest::of(&buf)
+    shard
 }
 
 /// Enumerate workspace member crates, noting whether each has a library target and an
