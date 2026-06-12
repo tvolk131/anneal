@@ -317,6 +317,24 @@ impl Action {
         self.validate_command_contract()?;
         validate_relative_path("working directory", &self.working_directory, true)?;
 
+        // DESIGN.md §4.4: Hermetic is enforced, not conventional. A private
+        // snapshot owner is a mutator of interleaved tool state (the typed
+        // `mutate_state` grant lowers to exactly this shape), and Hermetic
+        // means "no interleaved mutation." Shared snapshots (phase-separated
+        // producers) and restores (consumers) remain legal — CI must populate
+        // phase-separated state.
+        if self.config.axes().exec_mode == anneal_core::ExecMode::Hermetic
+            && matches!(self.cache_policy, CachePolicy::SnapshotBased)
+            && !self.snapshot_shared
+        {
+            return Err(ActionError::new(format!(
+                "action {:?} mutates interleaved state under ExecMode::Hermetic — \
+                 hermetic actions may not take mutate_state grants (DESIGN.md §4.4); \
+                 emit the warm variant only under Incremental",
+                self.name
+            )));
+        }
+
         for (key, value) in &self.env {
             if key.is_empty() || key.contains('=') || key.contains('\0') {
                 return Err(ActionError::new(format!(
@@ -869,6 +887,45 @@ mod tests {
             .try_build()
             .unwrap_err();
         assert!(bad_parent.to_string().contains("must not contain `..`"));
+    }
+
+    #[test]
+    fn hermetic_rejects_interleaved_mutation() {
+        use anneal_core::{AxisValues, Configuration, ExecMode, Platform};
+        let hermetic = Configuration::new(
+            Platform::new("host", "host"),
+            AxisValues {
+                exec_mode: ExecMode::Hermetic,
+                ..Default::default()
+            },
+        );
+
+        // A private snapshot owner is a mutate_state grant: rejected (§4.4).
+        let err = Action::builder("a", ["./tool"])
+            .configured(hermetic.clone(), vec![])
+            .snapshot_private(Digest::of(b"k"), vec!["target".into()])
+            .try_build()
+            .unwrap_err();
+        assert!(err.to_string().contains("Hermetic"));
+
+        // Shared snapshots (phase-separated producers) and restores
+        // (consumers) remain legal: Hermetic forbids mutation, not state.
+        assert!(Action::builder("a", ["./tool"])
+            .configured(hermetic.clone(), vec![])
+            .snapshot(Digest::of(b"k"), vec!["node_modules".into()])
+            .try_build()
+            .is_ok());
+        assert!(Action::builder("a", ["./tool"])
+            .configured(hermetic, vec![])
+            .snapshot_restore(Digest::of(b"k"), vec!["node_modules".into()])
+            .try_build()
+            .is_ok());
+
+        // And the same mutator is fine under the default (Incremental) config.
+        assert!(Action::builder("a", ["./tool"])
+            .snapshot_private(Digest::of(b"k"), vec!["target".into()])
+            .try_build()
+            .is_ok());
     }
 
     #[test]

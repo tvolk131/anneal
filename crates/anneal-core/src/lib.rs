@@ -23,8 +23,8 @@ mod digest;
 mod label;
 
 pub use config::{
-    Axis, AxisValues, Configuration, Coverage, DebugInfo, Lto, OptLevel, Platform, Sanitizer,
-    ALL_AXES,
+    Axis, AxisValues, Configuration, Coverage, DebugInfo, ExecMode, Lto, OptLevel, Platform,
+    Sanitizer, ALL_AXES,
 };
 pub use digest::{Digest, DigestParseError};
 pub use label::{Label, LabelParseError};

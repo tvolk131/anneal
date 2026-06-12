@@ -18,7 +18,8 @@ use std::process::Command as ProcessCommand;
 
 use anneal_analysis::Analyzer;
 use anneal_core::{
-    AxisValues, Configuration, Coverage, DebugInfo, Label, Lto, OptLevel, Platform, Sanitizer,
+    AxisValues, Configuration, Coverage, DebugInfo, ExecMode, Label, Lto, OptLevel, Platform,
+    Sanitizer,
 };
 use anneal_exec::{Action, ActionResult, LocalExecutor};
 use anneal_loader::{load_closure, load_workspace};
@@ -94,6 +95,12 @@ struct ConfigArgs {
     /// `on` | `off`.
     #[arg(long, global = true, value_name = "STATE")]
     coverage: Option<String>,
+    /// `incremental` | `hermetic` (DESIGN.md §4.1). Incremental actions may use
+    /// warm interleaved tool state (fast, machine-local results); hermetic
+    /// actions may not (cold, deterministic, shareable). Default: incremental —
+    /// the dev loop. CI passes `--exec-mode hermetic` (with `--require-enforced`).
+    #[arg(long, global = true, value_name = "MODE")]
+    exec_mode: Option<String>,
     /// Max actions to run concurrently. Defaults to the machine's parallelism.
     /// Scheduling-only — it never affects cache keys or results.
     #[arg(long, global = true, value_name = "N")]
@@ -412,6 +419,9 @@ fn build_config(args: &ConfigArgs) -> Result<Configuration, String> {
     if let Some(s) = &args.coverage {
         axes.coverage = parse_coverage(s)?;
     }
+    if let Some(s) = &args.exec_mode {
+        axes.exec_mode = parse_exec_mode(s)?;
+    }
     // A host placeholder triple matches the analysis/test defaults; `--platform`
     // overrides it (cross-compilation wiring into the inner tools is a later step).
     let platform = match &args.platform {
@@ -424,6 +434,14 @@ fn build_config(args: &ConfigArgs) -> Result<Configuration, String> {
 /// Normalize a flag value to the canonical `as_str` form (hyphens → underscores).
 fn norm(s: &str) -> String {
     s.trim().replace('-', "_")
+}
+
+fn parse_exec_mode(s: &str) -> Result<ExecMode, String> {
+    match norm(s).as_str() {
+        "incremental" => Ok(ExecMode::Incremental),
+        "hermetic" => Ok(ExecMode::Hermetic),
+        other => Err(format!("invalid --exec-mode {other:?}")),
+    }
 }
 
 fn parse_opt_level(s: &str) -> Result<OptLevel, String> {

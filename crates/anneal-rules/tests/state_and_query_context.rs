@@ -37,11 +37,19 @@ fn system_bin_dirs() -> Vec<PathBuf> {
 }
 
 fn system_runtime() -> Toolchain {
-    let roots = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/usr/lib", "/usr/lib64"]
-        .iter()
-        .map(PathBuf::from)
-        .filter(|p| p.exists())
-        .collect();
+    let roots = [
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/lib",
+        "/lib64",
+        "/usr/lib",
+        "/usr/lib64",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .filter(|p| p.exists())
+    .collect();
     Toolchain::new(
         "test-system-runtime",
         format!("shell={}", shell_path().display()),

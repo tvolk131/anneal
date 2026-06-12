@@ -47,7 +47,9 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use anneal_core::{AxisValues, Coverage, DebugInfo, Digest, Lto, OptLevel, Sanitizer, ALL_AXES};
+use anneal_core::{
+    AxisValues, Coverage, DebugInfo, Digest, ExecMode, Lto, OptLevel, Sanitizer, ALL_AXES,
+};
 use anneal_exec::{Action, ActionBuilder, Toolchain};
 
 use crate::context::RuleContext;
@@ -138,23 +140,32 @@ impl Rule for CargoWorkspace {
         // the very actions that read it — so declaring it carries the
         // attestation, and the epoch folds into the state key so a discovered
         // cargo-soundness bug revokes every warm tree derived under it.
-        let target_state = ctx.declare_state(PersistentStateDecl {
-            namespace: "cargo-target",
-            shard: diagnostics::time("cargo_workspace.state_shard", || {
-                target_state_shard(&toolchain, &runtime, &sources, ctx)
-            }),
-            kind: StateKind::Interleaved {
-                concurrency: Concurrency::Exclusive,
-                attestation: Attestation {
-                    epoch: 1,
-                    rationale: "cargo fingerprint reuse is sound under --locked, a \
+        // Declared only under `ExecMode::Incremental` (§4.4): the Hermetic arm
+        // of this rule emits the same actions with no state grant — cold,
+        // deterministic, promotable under full enforcement. That asymmetry is
+        // the §2.4 dev-loop/shared-cache reconciliation, per-rule-interpreted.
+        let incremental = ctx.config().axes().exec_mode == ExecMode::Incremental;
+        let target_state = if !incremental {
+            None
+        } else {
+            Some(ctx.declare_state(PersistentStateDecl {
+                namespace: "cargo-target",
+                shard: diagnostics::time("cargo_workspace.state_shard", || {
+                    target_state_shard(&toolchain, &runtime, &sources, ctx)
+                }),
+                kind: StateKind::Interleaved {
+                    concurrency: Concurrency::Exclusive,
+                    attestation: Attestation {
+                        epoch: 1,
+                        rationale: "cargo fingerprint reuse is sound under --locked, a \
                                 pinned toolchain, CARGO_INCREMENTAL=0, and warm-reuse \
                                 content sync; epoch bumped on cargo soundness-class \
                                 advisories (cf. the 1.52.0 incremental emergency)",
+                    },
                 },
-            },
-            paths: vec![PathBuf::from("target")],
-        })?;
+                paths: vec![PathBuf::from("target")],
+            })?)
+        };
         let label = ctx.label().clone();
 
         // Inputs from `data` deps (§14.6, inner-tool-only): every file a dependency
@@ -218,7 +229,7 @@ impl Rule for CargoWorkspace {
                 actions.push(
                     build
                         .configured(ctx.config().clone(), consumed.clone())
-                        .mutate_state(&target_state)?
+                        .mutate_state_opt(target_state.as_ref())?
                         .try_build()?,
                 );
                 Ok(())
@@ -264,7 +275,7 @@ impl Rule for CargoWorkspace {
                         )
                         .output("test-bin", test_bin_path)
                         .configured(ctx.config().clone(), consumed.clone())
-                        .mutate_state(&target_state)?;
+                        .mutate_state_opt(target_state.as_ref())?;
                         actions.push(compile.try_build()?);
 
                         // run depends on the compiled binary (an action-graph edge); its cache
@@ -323,7 +334,7 @@ impl Rule for CargoWorkspace {
                             crate_deps,
                         )
                         .configured(ctx.config().clone(), consumed.clone())
-                        .mutate_state(&target_state)?;
+                        .mutate_state_opt(target_state.as_ref())?;
                         actions.push(doc.try_build()?);
                     }
 
@@ -358,7 +369,7 @@ impl Rule for CargoWorkspace {
                             crate_deps,
                         )
                         .configured(ctx.config().clone(), consumed.clone())
-                        .mutate_state(&target_state)?;
+                        .mutate_state_opt(target_state.as_ref())?;
                         actions.push(integ.try_build()?);
                     }
                 }
