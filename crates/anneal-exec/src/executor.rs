@@ -26,6 +26,7 @@ use crate::cache::{action_digest, ActionCache, StoredResult};
 use crate::materializer;
 use crate::query::{query_identity, query_key, QueryResult, QuerySpec, QUERY_STDOUT};
 use crate::sandbox::{self, SandboxSpec};
+use crate::trust::{self, EnforcementGrade, Provenance};
 use crate::warm::{self, InputManifest};
 
 /// Disambiguates per-run sandbox directories for normal (non-snapshot) actions.
@@ -40,6 +41,10 @@ pub struct ActionResult {
     pub outputs: BTreeMap<String, Digest>,
     /// Whether this result was served from the action cache (no re-execution).
     pub cache_hit: bool,
+    /// Producing platform, enforcement grade, and computed tier (§2.8). Present
+    /// on successful runs and on cache hits whose entry recorded it; `None` on
+    /// failures and pre-provenance cache entries.
+    pub provenance: Option<Provenance>,
 }
 
 impl ActionResult {
@@ -108,6 +113,11 @@ pub struct LocalExecutor {
     /// tools embed absolute paths in stdout, so query byte-determinism requires a
     /// root that survives input edits).
     queries: PathBuf,
+    /// The §2.8 enforcement floor: when set, sealed execution on a platform whose
+    /// grade is below `Enforced` **fails rather than silently degrades** — the
+    /// mandatory CI posture, since a weakly-enforced run quietly populating even
+    /// the local cache undermines what its entries can later be promoted as.
+    require_enforced: bool,
 }
 
 impl LocalExecutor {
@@ -136,7 +146,41 @@ impl LocalExecutor {
             warm: root.join("warm"),
             warm_meta: root.join("warm-meta"),
             warm_locks: Mutex::new(HashMap::new()),
+            require_enforced: false,
         })
+    }
+
+    /// Enable the §2.8 enforcement floor: sealed execution fails on any platform
+    /// whose grade is below [`EnforcementGrade::Enforced`], instead of silently
+    /// producing weakly-enforced results. Scoped to sealed actions — permeable
+    /// and native modes are explicit non-hermetic escapes and are never cached,
+    /// so they cannot poison what the floor protects.
+    pub fn require_enforced(mut self, enabled: bool) -> Self {
+        self.require_enforced = enabled;
+        self
+    }
+
+    /// The provenance of a run executed here, now: host platform, the sealed
+    /// enforcement grade this host delivers, and the action's computed tier.
+    fn provenance_for(&self, action: &Action) -> Provenance {
+        let grade = sandbox::sealed_enforcement_grade();
+        Provenance {
+            platform: trust::host_platform(),
+            grade,
+            tier: trust::compute_tier(action, grade),
+        }
+    }
+
+    /// Fail sealed execution when the platform grade is below the configured floor.
+    fn check_enforcement_floor(&self, action: &Action) -> Result<(), ExecError> {
+        if !self.require_enforced || !matches!(action.execution_mode, ExecutionMode::Sealed) {
+            return Ok(());
+        }
+        let grade = sandbox::sealed_enforcement_grade();
+        if grade < EnforcementGrade::Enforced {
+            return Err(ExecError::EnforcementBelowFloor { grade });
+        }
+        Ok(())
     }
 
     /// The CAS, so callers can stage inputs and read outputs by digest.
@@ -482,6 +526,7 @@ impl LocalExecutor {
                 exit_code: 0,
                 outputs: BTreeMap::from([(out_name, expected)]),
                 cache_hit: true,
+                provenance: Some(self.provenance_for(action)),
             });
         }
 
@@ -589,10 +634,12 @@ impl LocalExecutor {
             });
         }
 
+        let provenance = (exit_code == 0).then(|| self.provenance_for(action));
         Ok(ActionResult {
             exit_code,
             outputs,
             cache_hit: false,
+            provenance,
         })
     }
 
@@ -759,10 +806,12 @@ impl LocalExecutor {
             });
         }
 
+        let provenance = (exit_code == 0).then(|| self.provenance_for(action));
         Ok(ActionResult {
             exit_code,
             outputs,
             cache_hit: false,
+            provenance,
         })
     }
 
@@ -801,6 +850,7 @@ impl LocalExecutor {
         let action = spec.action();
         guard_valid(action)?;
         guard_resolved(action)?;
+        self.check_enforcement_floor(action)?;
 
         let key = query_key(action);
         if let Some(stored) = self.cache.lookup(&key)? {
@@ -867,6 +917,7 @@ impl LocalExecutor {
             &StoredResult {
                 exit_code: 0,
                 outputs: BTreeMap::from([(QUERY_STDOUT.to_owned(), digest)]),
+                provenance: Some(self.provenance_for(action)),
             },
         )?;
         Ok(QueryResult {
@@ -905,6 +956,7 @@ impl Executor for LocalExecutor {
     fn execute(&self, action: &Action) -> Result<ActionResult, ExecError> {
         guard_valid(action)?;
         guard_resolved(action)?;
+        self.check_enforcement_floor(action)?;
 
         // Fixed-output (FOD) fetches are cached by their *output* hash, not their inputs,
         // and verified against the pin — a different execution path entirely (§FOD).
@@ -949,6 +1001,7 @@ impl Executor for LocalExecutor {
                     exit_code: stored.exit_code,
                     outputs: stored.outputs,
                     cache_hit: true,
+                    provenance: stored.provenance,
                 });
             }
         }
@@ -966,6 +1019,7 @@ impl Executor for LocalExecutor {
                 &StoredResult {
                     exit_code: result.exit_code,
                     outputs: result.outputs.clone(),
+                    provenance: result.provenance.clone(),
                 },
             )?;
         }
@@ -1058,6 +1112,9 @@ pub enum ExecError {
         exit_code: i32,
         stderr_tail: String,
     },
+    /// The `require_enforced` floor is set and this platform's sealed sandbox
+    /// delivers a weaker grade — fail loudly rather than degrade silently (§2.8).
+    EnforcementBelowFloor { grade: EnforcementGrade },
 }
 
 impl fmt::Display for ExecError {
@@ -1097,6 +1154,12 @@ impl fmt::Display for ExecError {
             } => write!(
                 f,
                 "query {name:?} exited with code {exit_code}: {stderr_tail}"
+            ),
+            ExecError::EnforcementBelowFloor { grade } => write!(
+                f,
+                "enforcement floor not met: this platform's sealed sandbox delivers \
+                 `{grade}`, but `require_enforced` demands `enforced`; run on a \
+                 Linux-namespace platform or drop the floor"
             ),
         }
     }

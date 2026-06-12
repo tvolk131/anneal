@@ -35,6 +35,9 @@ mod materializer;
 /// stability contract.
 mod query;
 mod sandbox;
+/// Trust plumbing (DESIGN.md §2.4, §2.8): enforcement grades, computed cache
+/// tiers, and cache-entry provenance.
+mod trust;
 mod verify;
 /// The warm-sandbox sync engine (docs/sandboxing.md §5), wired into the executor's
 /// snapshot-owner path via `LocalExecutor::warm_reuse`.
@@ -46,6 +49,7 @@ pub use action::{
 pub use cache::action_digest;
 pub use executor::{ActionResult, ExecError, Executor, LocalExecutor, PhaseTimings, SandboxError};
 pub use query::{QueryBuilder, QueryResult, QuerySpec};
+pub use trust::{compute_tier, CacheTier, EnforcementGrade, Provenance};
 pub use verify::{
     prime_snapshot, verify_correctness_neutral, verify_warm_neutral, NeutralityReport,
 };

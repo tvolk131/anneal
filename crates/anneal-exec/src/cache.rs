@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anneal_core::Digest;
 
 use crate::action::{Action, InputSource};
+use crate::trust::{CacheTier, EnforcementGrade, Provenance};
 use crate::SANDBOX_VERSION;
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -132,12 +133,16 @@ fn write_str(buf: &mut Vec<u8>, s: &str) {
     write_bytes(buf, s.as_bytes());
 }
 
-/// The persisted result of a successful action: exit code and output digests.
+/// The persisted result of a successful action: exit code, output digests, and
+/// the provenance of the run that produced it (DESIGN.md §2.8 — producing
+/// platform, enforcement grade, computed tier). Provenance is `Option` only to
+/// tolerate entries written before it existed; new inserts always carry it.
 /// (Only successful actions are stored — "save on success only", §8.5.)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredResult {
     pub exit_code: i32,
     pub outputs: BTreeMap<String, Digest>,
+    pub provenance: Option<Provenance>,
 }
 
 /// A persistent map from action digest to [`StoredResult`], stored as small
@@ -187,10 +192,19 @@ impl ActionCache {
     }
 }
 
-/// Serialize as one `exit <code>` line followed by `out <name> <hex>` lines. Output
-/// names are logical identifiers (no whitespace), so the format is unambiguous.
+/// Serialize as one `exit <code>` line, an optional `prov <platform> <grade>
+/// <tier>` line, then `out <name> <hex>` lines. Output names are logical
+/// identifiers (no whitespace), so the format is unambiguous.
 fn serialize_entry(result: &StoredResult) -> String {
     let mut s = format!("exit {}\n", result.exit_code);
+    if let Some(prov) = &result.provenance {
+        s.push_str(&format!(
+            "prov {} {} {}\n",
+            prov.platform,
+            prov.grade.as_str(),
+            prov.tier.as_str()
+        ));
+    }
     for (name, digest) in &result.outputs {
         s.push_str(&format!("out {} {}\n", name, digest.to_hex()));
     }
@@ -210,8 +224,23 @@ fn parse_entry(text: &str) -> io::Result<StoredResult> {
         .map_err(|_| invalid("bad exit code"))?;
 
     let mut outputs = BTreeMap::new();
+    let mut provenance = None;
     for line in lines {
         if line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("prov ") {
+            let mut parts = rest.split(' ');
+            let (platform, grade, tier) = (parts.next(), parts.next(), parts.next());
+            let (Some(platform), Some(grade), Some(tier)) = (platform, grade, tier) else {
+                return Err(invalid("malformed `prov` line"));
+            };
+            provenance = Some(Provenance {
+                platform: platform.to_owned(),
+                grade: EnforcementGrade::parse(grade)
+                    .ok_or_else(|| invalid("bad provenance grade"))?,
+                tier: CacheTier::parse(tier).ok_or_else(|| invalid("bad provenance tier"))?,
+            });
             continue;
         }
         let rest = line
@@ -224,7 +253,11 @@ fn parse_entry(text: &str) -> io::Result<StoredResult> {
         outputs.insert(name.to_owned(), digest);
     }
 
-    Ok(StoredResult { exit_code, outputs })
+    Ok(StoredResult {
+        exit_code,
+        outputs,
+        provenance,
+    })
 }
 
 #[cfg(test)]
@@ -316,11 +349,26 @@ mod tests {
         let stored = StoredResult {
             exit_code: 0,
             outputs,
+            provenance: Some(Provenance {
+                platform: "testos-testarch".to_owned(),
+                grade: EnforcementGrade::Enforced,
+                tier: CacheTier::Promotable,
+            }),
         };
 
         assert_eq!(cache.lookup(&key).unwrap(), None);
         cache.insert(&key, &stored).unwrap();
         assert_eq!(cache.lookup(&key).unwrap(), Some(stored));
+    }
+
+    #[test]
+    fn pre_provenance_entries_still_parse() {
+        // Entries written before the `prov` line existed must remain readable;
+        // they surface as `provenance: None`.
+        let parsed = parse_entry("exit 0\nout bin 2222222222222222222222222222222222222222222222222222222222222222\n").unwrap();
+        assert_eq!(parsed.exit_code, 0);
+        assert_eq!(parsed.provenance, None);
+        assert_eq!(parsed.outputs.len(), 1);
     }
 
     #[test]

@@ -45,6 +45,22 @@ use crate::executor::SandboxError;
 #[cfg(target_os = "linux")]
 use std::ffi::OsStr;
 
+/// The enforcement grade this host's **sealed** backend delivers (DESIGN.md
+/// §2.8). A platform fact, not an action property: Linux bubblewrap is
+/// structural absence (and a missing/unusable bwrap fails the build rather
+/// than degrading, so `Enforced` is accurate whenever a sealed action actually
+/// runs); macOS Seatbelt is loud policy interception; the no-backend cfg
+/// fallback applies no isolation at all.
+pub(crate) fn sealed_enforcement_grade() -> crate::trust::EnforcementGrade {
+    if cfg!(target_os = "linux") {
+        crate::trust::EnforcementGrade::Enforced
+    } else if cfg!(target_os = "macos") {
+        crate::trust::EnforcementGrade::LoudBestEffort
+    } else {
+        crate::trust::EnforcementGrade::Unenforced
+    }
+}
+
 /// Everything the sandbox needs that is not on the action itself.
 pub(crate) struct SandboxSpec<'a> {
     pub mode: ExecutionMode,
