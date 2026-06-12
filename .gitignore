@@ -7,3 +7,6 @@
 
 # Direnv / nix
 .direnv/
+
+# `nix build` output symlink
+/result

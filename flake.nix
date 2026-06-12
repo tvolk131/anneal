@@ -153,6 +153,20 @@
               }' > "$out"
           '';
 
+        # The `anneal` CLI as an installable package, so another repo can take
+        # this flake as an input and get the binary plus the toolchain manifest
+        # (the two things a consumer needs — see packages below). Tests are
+        # skipped: they exercise real cargo/pnpm against the network and the
+        # sandbox, which the Nix build sandbox forbids.
+        annealPackage = pkgs.rustPlatform.buildRustPackage {
+          pname = "anneal";
+          version = "0.0.0";
+          src = self;
+          cargoLock.lockFile = ./Cargo.lock;
+          cargoBuildFlags = [ "-p" "anneal-cli" ];
+          doCheck = false;
+        };
+
         devShellPackages =
           rustToolPackages
           ++ runtimeToolPackages
@@ -173,7 +187,11 @@
           ]);
       in
       {
-        packages.toolchain-manifest = toolchainManifest;
+        packages = {
+          toolchain-manifest = toolchainManifest;
+          anneal = annealPackage;
+          default = annealPackage;
+        };
 
         # `nix develop` / `nix develop --command <cmd>` gives a complete
         # contributor environment. The toolset is scoped to what the
