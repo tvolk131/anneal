@@ -8,7 +8,9 @@ use anneal_cas::Cas;
 use anneal_core::{Configuration, ExecMode, Label};
 use anneal_exec::{Action, LocalExecutor};
 use anneal_loader::TargetGraph;
-use anneal_rules::{ProviderSet, ResolvedDep, RuleContext, RuleRegistry, SourcePathRecorder, StateRegistry};
+use anneal_rules::{
+    ProviderSet, ResolvedDep, RuleContext, RuleRegistry, SourcePathRecorder, StateRegistry,
+};
 
 use crate::error::AnalysisError;
 
@@ -85,6 +87,10 @@ pub struct Analyzer<'a> {
     /// means per-node coloring: cone members build Incremental, everything
     /// else Hermetic. One configuration per node per invocation, always.
     cone: Option<HashSet<Label>>,
+    /// Workspace-relative tree paths written by `anneal materialize`, excluded
+    /// from every rule's source discovery (they are parked copies of generated
+    /// outputs, not sources — see `RuleContext::with_materialized`).
+    materialized: BTreeSet<PathBuf>,
 }
 
 impl<'a> Analyzer<'a> {
@@ -104,7 +110,17 @@ impl<'a> Analyzer<'a> {
             states: StateRegistry::new(),
             executor: None,
             cone: None,
+            materialized: BTreeSet::new(),
         }
+    }
+
+    /// Exclude `anneal materialize`-written tree paths (workspace-relative,
+    /// from the materialize manifest) from source discovery. Without this, a
+    /// materialized copy would be recorded as a source and collide with the
+    /// producing action's declared output in `validate_generated_paths`.
+    pub fn with_materialized_paths(mut self, paths: BTreeSet<PathBuf>) -> Self {
+        self.materialized = paths;
+        self
     }
 
     /// Color the graph per node (DESIGN.md §4.2): labels in `cone` analyze
@@ -242,6 +258,11 @@ impl<'a> Analyzer<'a> {
         let ctx = match self.executor {
             Some(executor) => ctx.with_executor(executor),
             None => ctx,
+        };
+        let ctx = if self.materialized.is_empty() {
+            ctx
+        } else {
+            ctx.with_materialized(&self.materialized)
         };
         let analysis = rule.analyze(&ctx).map_err(|error| AnalysisError::Rule {
             label: label.clone(),

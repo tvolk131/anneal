@@ -29,6 +29,13 @@
 mod action;
 mod cache;
 mod executor;
+/// Materializing provided files into the working tree (`anneal materialize`):
+/// the manifest-tracked bridge from CAS outputs to what native tools (cargo
+/// run, rust-analyzer) can see. Not part of the [`Executor`] deep module — a
+/// user-facing surface of its own, so it stays a public module rather than
+/// flat re-exports. (Distinct from the private `materializer`, which stages
+/// action *inputs* into sandboxes.)
+pub mod materialize;
 mod materializer;
 /// Tool queries (DESIGN.md §3.6, spiked): sealed, network-denied, stdout-captured
 /// actions whose output feeds analysis. See the module docs for the sandbox-root

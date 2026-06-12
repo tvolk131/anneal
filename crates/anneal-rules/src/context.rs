@@ -100,6 +100,14 @@ pub struct RuleContext<'a> {
     /// The executor, for analysis-time tool queries (§3.6). Optional so
     /// query-free contexts (most tests) need no executor.
     executor: Option<&'a LocalExecutor>,
+    /// Workspace-relative paths written into the tree by `anneal materialize`.
+    /// Source discovery skips them: they are tree copies of *generated*
+    /// outputs, kept only so native tools can see them — the routed action
+    /// edge is the real input. Without the exclusion a materialized copy
+    /// would be recorded as a source and shadow the producing action's
+    /// declared output (an analysis-time hard error), and would perturb
+    /// source-derived snapshot keys.
+    materialized: Option<&'a BTreeSet<PathBuf>>,
 }
 
 impl<'a> RuleContext<'a> {
@@ -154,7 +162,16 @@ impl<'a> RuleContext<'a> {
             rule_kind: None,
             state_registry: None,
             executor: None,
+            materialized: None,
         }
+    }
+
+    /// Attach the set of `anneal materialize`-written tree paths (workspace-
+    /// relative) so source discovery ignores them. The analyzer wires this
+    /// from the materialize manifest.
+    pub fn with_materialized(mut self, paths: &'a BTreeSet<PathBuf>) -> Self {
+        self.materialized = Some(paths);
+        self
     }
 
     /// Attach the declaring rule's kind (the analyzer does this) — required for
@@ -359,6 +376,9 @@ impl<'a> RuleContext<'a> {
                     .strip_prefix(self.package_dir)
                     .unwrap_or(&path)
                     .to_path_buf();
+                if self.is_materialized(&rel) {
+                    continue; // a tree copy of a generated output, not a source
+                }
                 let digest = self
                     .cas
                     .ingest_file(&path)
@@ -379,6 +399,13 @@ impl<'a> RuleContext<'a> {
             return;
         };
         source_paths.record(workspace_relative_path(self.label.package(), rel));
+    }
+
+    /// Whether a package-relative path is an `anneal materialize`-written tree
+    /// copy (the exclusion set holds workspace-relative paths).
+    fn is_materialized(&self, rel: &Path) -> bool {
+        self.materialized
+            .is_some_and(|set| set.contains(&workspace_relative_path(self.label.package(), rel)))
     }
 }
 
@@ -434,4 +461,55 @@ fn package_relative_path(rel: &Path, kind: &str, allow_dot: bool) -> Result<Path
         }
     }
     Ok(rel.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::attrs::Attrs;
+    use anneal_core::{AxisValues, Platform};
+
+    /// `source_tree` skips materialized tree copies: they are generated
+    /// outputs parked in the tree for native tools, not sources — recording
+    /// them would shadow the producing action's declared output.
+    #[test]
+    fn source_tree_skips_materialized_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg = tmp.path().join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("real.txt"), b"source").unwrap();
+        std::fs::write(pkg.join("config.json"), b"generated").unwrap();
+        let cas = Cas::open(tmp.path().join("cas")).unwrap();
+        let attrs = Attrs::builder().build();
+        let config = Configuration::new(Platform::new("host", "host"), AxisValues::default());
+        let label = Label::parse("//pkg:t").unwrap();
+        let deps: Vec<ResolvedDep> = Vec::new();
+        let recorder = SourcePathRecorder::default();
+
+        // The exclusion set holds workspace-relative paths.
+        let materialized: BTreeSet<PathBuf> = [PathBuf::from("pkg/config.json")].into();
+        let ctx = RuleContext::new_recording_sources(
+            label.clone(),
+            &attrs,
+            &config,
+            &pkg,
+            &cas,
+            &deps,
+            &recorder,
+        )
+        .with_materialized(&materialized);
+
+        let artifacts = ctx.source_tree(Path::new("."), &[]).unwrap();
+        let paths: Vec<&Path> = artifacts.iter().map(|a| a.path.as_path()).collect();
+        assert_eq!(paths, vec![Path::new("real.txt")]);
+        assert!(
+            !recorder.paths().contains(Path::new("pkg/config.json")),
+            "a materialized copy must not be recorded as a source"
+        );
+
+        // Without the exclusion the same file is an ordinary source.
+        let ctx = RuleContext::new(label, &attrs, &config, &pkg, &cas, &deps);
+        let artifacts = ctx.source_tree(Path::new("."), &[]).unwrap();
+        assert_eq!(artifacts.len(), 2);
+    }
 }

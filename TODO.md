@@ -258,8 +258,16 @@
         pass/fail per test action only.
   - [x] **Multi-package targets** — the CLI now loads the target's transitive package closure
         (`load_closure`), so cross-package deps build.
-  - [ ] **`materialize`** (§14.4) — write generated native packages/files to stable on-disk paths for IDEs and
-        native tooling. Also the mechanism for the §14.6 **staged pass** (generated `Cargo.toml`, etc.).
+  - [x] **`materialize`** (§14.4) — write a target's provided files into the working tree for IDEs and
+        native tooling (`cargo run` over routed `data` inputs). Manifest-tracked (`.anneal/materialized`):
+        digest-compare skips identical rewrites (no mtime churn), orphans are pruned, edits are never
+        clobbered or deleted without `--force`; `--check` / `--list` / `--clean` round it out. Tree copies
+        are excluded from source discovery (`RuleContext::with_materialized`), so they can't shadow the
+        producer's declared output or perturb cache/snapshot keys (asserted byte-identical in
+        `materialize_exclusion.rs`).
+    - [ ] Consumer-side destinations: materializing *into a consumer's package* when the producer lives
+          elsewhere (today the copy lands producer-package-relative — the same-package layout). Also the
+          mechanism for the §14.6 **staged pass** (generated `Cargo.toml`, etc.).
   - [ ] **`exec`** escape hatch (§7.6) — run an arbitrary command in a sandbox (permissive by default;
         `--hermetic`/`--no-network` opt-in).
   - [ ] **`init` / `init --detect`** (§15.2) — interactive setup / scaffold config without touching native files.
