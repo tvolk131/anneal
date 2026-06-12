@@ -32,11 +32,17 @@ mod providers;
 mod rule;
 mod rules;
 mod schema;
+/// Typed persistent state (DESIGN.md §2.1/§2.5/§2.6, Appendix A ruling 4): the
+/// state taxonomy grown in place out of the snapshot mechanics.
+mod state;
 mod toolchain;
 
 pub use attrs::{AttrError, AttrValue, Attrs};
 pub use cargo_workspace::CargoWorkspace;
-pub use context::{ResolvedDep, RuleContext, SourcePathRecorder};
+pub use context::{ResolvedDep, RuleContext, SourcePathRecorder, StateRegistry};
+pub use state::{
+    Attestation, Concurrency, PersistentStateDecl, StateActionExt, StateHandle, StateKind,
+};
 pub use diagnostics::{start_rule_timings, take_rule_timings, RuleTiming};
 pub use nickel_eval::NickelEval;
 pub use pnpm_workspace::PnpmWorkspace;
