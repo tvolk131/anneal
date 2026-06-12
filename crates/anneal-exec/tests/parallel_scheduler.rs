@@ -1,8 +1,10 @@
 //! `execute_graph` schedules an action DAG concurrently. These tests pin the
 //! behaviors that distinguish it from a sequential loop: the input slice need not be
 //! topologically ordered (dependencies are derived from edges), independent actions
-//! genuinely overlap, multi-dependency joins wait for all parents, and execution
-//! *errors* abort the run while a non-zero *exit* is a normal result.
+//! genuinely overlap, multi-dependency joins wait for all parents, and **failure is
+//! per-action data**: a non-zero exit is a normal result whose transitive dependents
+//! complete as *skipped* (carrying the root failure's name) while independent
+//! subgraphs keep running — only infrastructure errors abort the run.
 
 use anneal_exec::{Action, ActionBuilder, ExecError, ExecutionMode, LocalExecutor};
 
@@ -93,10 +95,10 @@ fn independent_actions_actually_overlap() {
 }
 
 #[test]
-fn an_execution_error_aborts_dependents() {
-    // The producer exits non-zero and so produces no output. Its consumer references
-    // that missing output → the run fails with UnresolvedInput (an execution error),
-    // not a silent empty result.
+fn a_failed_dependency_skips_its_dependents() {
+    // The producer exits non-zero and so produces no output. Its consumer never
+    // runs: it completes as *skipped*, naming the failed producer — and the run
+    // returns Ok, because a build failure is per-action data, not a graph error.
     let dir = tempfile::tempdir().unwrap();
     let exec = LocalExecutor::new(dir.path()).unwrap();
 
@@ -106,11 +108,65 @@ fn an_execution_error_aborts_dependents() {
         .output("final", "final.txt")
         .build();
 
-    let err = exec.execute_graph(&[producer, consumer]).unwrap_err();
-    assert!(
-        matches!(&err, ExecError::UnresolvedInput { action, output } if action == "p" && output == "out"),
-        "expected UnresolvedInput for p's output, got {err:?}"
+    let results = exec.execute_graph(&[producer, consumer]).unwrap();
+    assert_eq!(results[0].exit_code, 1);
+    assert!(results[0].skipped_dependency.is_none(), "p actually ran");
+    assert!(!results[1].success());
+    assert_eq!(results[1].skipped_dependency.as_deref(), Some("p"));
+    assert!(results[1].outputs.is_empty());
+}
+
+#[test]
+fn skips_cascade_to_the_root_cause_while_independent_work_completes() {
+    // fail → mid → leaf: both dependents are skipped, and *both* name the root
+    // failure (not the nearest skipped link). An unrelated action still runs.
+    let dir = tempfile::tempdir().unwrap();
+    let exec = LocalExecutor::new(dir.path()).unwrap();
+
+    let root = shell("root", "exit 3").output("r", "r.txt").build();
+    let mid = shell("mid", "cat r.txt > m.txt")
+        .input_from_output("r", "r.txt", "root", "r")
+        .output("m", "m.txt")
+        .build();
+    let leaf = shell("leaf", "cat m.txt > l.txt")
+        .input_from_output("m", "m.txt", "mid", "m")
+        .output("l", "l.txt")
+        .build();
+    let unrelated = writes("unrelated", "u.txt", "fine");
+
+    let results = exec.execute_graph(&[root, mid, leaf, unrelated]).unwrap();
+    assert_eq!(results[0].exit_code, 3);
+    assert_eq!(results[1].skipped_dependency.as_deref(), Some("root"));
+    assert_eq!(
+        results[2].skipped_dependency.as_deref(),
+        Some("root"),
+        "the leaf names the root failure, not the skipped mid link"
     );
+    assert!(
+        results[3].success(),
+        "independent work completes despite the failure"
+    );
+}
+
+#[test]
+fn a_join_with_one_failed_parent_is_skipped() {
+    // join needs both parents; one fails, one succeeds → join is skipped and
+    // names the failed parent.
+    let dir = tempfile::tempdir().unwrap();
+    let exec = LocalExecutor::new(dir.path()).unwrap();
+
+    let ok = writes("ok", "a.txt", "fine");
+    let bad = shell("bad", "exit 1").output("b", "b.txt").build();
+    let join = shell("join", "cat a.txt b.txt > j.txt")
+        .input_from_output("a", "a.txt", "ok", "a.txt")
+        .input_from_output("b", "b.txt", "bad", "b")
+        .output("j", "j.txt")
+        .build();
+
+    let results = exec.execute_graph(&[ok, bad, join]).unwrap();
+    assert!(results[0].success());
+    assert!(!results[1].success());
+    assert_eq!(results[2].skipped_dependency.as_deref(), Some("bad"));
 }
 
 #[test]

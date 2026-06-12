@@ -403,11 +403,11 @@ fn build(
         .map_err(|e| e.to_string())?;
     report_actions(&pipeline.actions, &results);
 
-    let failed = results.iter().filter(|r| !r.success()).count();
+    let (failed, skipped) = failure_counts(&results);
     let cached = results.iter().filter(|r| r.cache_hit).count();
-    if failed > 0 {
+    if failed > 0 || skipped > 0 {
         eprintln!(
-            "build FAILED — {failed}/{} action(s) failed",
+            "build FAILED — {failed}/{} action(s) failed ({skipped} skipped)",
             pipeline.actions.len()
         );
         Ok(1)
@@ -589,11 +589,11 @@ fn materialize(
         .exec
         .execute_graph(&producers)
         .map_err(|e| e.to_string())?;
-    let failed = results.iter().filter(|r| !r.success()).count();
-    if failed > 0 {
+    let (failed, skipped) = failure_counts(&results);
+    if failed > 0 || skipped > 0 {
         report_actions(&producers, &results);
         eprintln!(
-            "materialize FAILED — {failed}/{} producing action(s) failed",
+            "materialize FAILED — {failed}/{} producing action(s) failed ({skipped} skipped)",
             producers.len()
         );
         return Ok(1);
@@ -845,6 +845,10 @@ fn join_paths(paths: &[PathBuf]) -> String {
 /// Print one line per action: its cache/run status and name.
 fn report_actions(actions: &[Action], results: &[ActionResult]) {
     for (action, result) in actions.iter().zip(results) {
+        if let Some(root) = &result.skipped_dependency {
+            println!("    skip  {} (dependency failed: {root})", action.name());
+            continue;
+        }
         let status = if result.cache_hit {
             "CACHED"
         } else if result.success() {
@@ -854,6 +858,17 @@ fn report_actions(actions: &[Action], results: &[ActionResult]) {
         };
         println!("  {status:>6}  {}", action.name());
     }
+}
+
+/// `(failed, skipped)` — actions that ran and failed vs. never ran because a
+/// dependency failed. Both make the run a failure; only the former is the news.
+fn failure_counts(results: &[ActionResult]) -> (usize, usize) {
+    let skipped = results
+        .iter()
+        .filter(|r| r.skipped_dependency.is_some())
+        .count();
+    let failed = results.iter().filter(|r| !r.success()).count() - skipped;
+    (failed, skipped)
 }
 
 /// If `result` captured a `results.txt`, read the `ANNEAL_TEST_EXIT` marker and return

@@ -46,12 +46,29 @@ pub struct ActionResult {
     /// on successful runs and on cache hits whose entry recorded it; `None` on
     /// failures and pre-provenance cache entries.
     pub provenance: Option<Provenance>,
+    /// When this action **never ran** because a dependency failed: the *root*
+    /// failed action's name (the original failure, not the nearest skipped
+    /// link). The result then carries exit code -1, no outputs, and no
+    /// provenance. `None` for actions that actually executed (or cache-hit).
+    pub skipped_dependency: Option<String>,
 }
 
 impl ActionResult {
-    /// Whether the action succeeded (exit code 0).
+    /// Whether the action succeeded (exit code 0). A skipped action did not.
     pub fn success(&self) -> bool {
         self.exit_code == 0
+    }
+
+    /// A synthesized "never ran" result for an action whose dependency chain
+    /// failed at `root`.
+    fn skipped(root: String) -> Self {
+        ActionResult {
+            exit_code: -1,
+            outputs: BTreeMap::new(),
+            cache_hit: false,
+            provenance: None,
+            skipped_dependency: Some(root),
+        }
     }
 }
 
@@ -257,7 +274,7 @@ impl LocalExecutor {
                 scope.spawn(|| {
                     while let Some((idx, resolved)) = next_task(&state, &progress, actions) {
                         let outcome = self.execute(&resolved);
-                        complete(&state, &progress, &edges, idx, actions[idx].name(), outcome);
+                        complete(&state, &progress, &edges, actions, idx, outcome);
                     }
                 });
             }
@@ -267,7 +284,8 @@ impl LocalExecutor {
         if let Some(err) = state.failed.take() {
             return Err(err);
         }
-        // Every action completed successfully → every slot is filled.
+        // Every action finished — ran, failed, or was skipped → every slot is
+        // filled. Failure is per-action data, not an `Err`.
         Ok(state.results.into_iter().map(Option::unwrap).collect())
     }
 }
@@ -363,6 +381,11 @@ struct SchedState {
     running: usize,
     /// First execution error; once set, no new work is dispatched.
     failed: Option<ExecError>,
+    /// Per-action doom marker: the *root* failed action whose failure makes
+    /// this action unrunnable (its inputs can never resolve). Set on the
+    /// dependents of every failed or skipped action; when a doomed action's
+    /// last dependency finishes it is completed as skipped instead of run.
+    doomed: Vec<Option<String>>,
 }
 
 impl SchedState {
@@ -378,6 +401,7 @@ impl SchedState {
             remaining: n,
             running: 0,
             failed: None,
+            doomed: vec![None; n],
         }
     }
 }
@@ -403,8 +427,9 @@ fn next_task(
                     return Some((idx, resolved));
                 }
                 Err(e) => {
-                    // A dependency finished without producing the referenced output
-                    // (e.g. it exited non-zero). Treat as a graph error and stop.
+                    // A *successful* dependency lacks the referenced output name —
+                    // a malformed graph (failed dependencies never get here; their
+                    // dependents are completed as skipped). Abort the run.
                     st.failed.get_or_insert(e);
                     progress.notify_all();
                     return None;
@@ -422,15 +447,18 @@ fn next_task(
     }
 }
 
-/// Record an action's outcome under the lock and unblock its dependents. A non-zero
-/// exit is a normal result (its empty output set surfaces later as an `UnresolvedInput`
-/// for any consumer that needed it); only an `Err` aborts the run.
+/// Record an action's outcome under the lock and settle its dependents. A non-zero
+/// exit is a normal result: the action's transitive dependents are completed as
+/// **skipped** (their inputs can never resolve), independent subgraphs keep
+/// running, and the whole run still returns `Ok` — failure is data, reported
+/// per action. Only an `Err` (an infrastructure error: spawn, I/O, a malformed
+/// graph) aborts the run.
 fn complete(
     state: &Mutex<SchedState>,
     progress: &Condvar,
     edges: &Edges,
+    actions: &[Action],
     idx: usize,
-    name: &str,
     outcome: Result<ActionResult, ExecError>,
 ) {
     let mut st = state.lock().unwrap();
@@ -439,24 +467,57 @@ fn complete(
         Err(e) => {
             st.failed.get_or_insert(e);
         }
-        Ok(result) => {
-            for (output_name, digest) in &result.outputs {
-                st.produced
-                    .insert((name.to_owned(), output_name.clone()), *digest);
-            }
-            if st.failed.is_none() {
-                for &dep in &edges.dependents[idx] {
-                    st.pending[dep] -= 1;
-                    if st.pending[dep] == 0 {
-                        st.ready.push(dep);
-                    }
-                }
-            }
-            st.results[idx] = Some(result);
-            st.remaining -= 1;
-        }
+        Ok(result) => finish(&mut st, edges, actions, idx, result),
     }
     progress.notify_all();
+}
+
+/// Record a finished action — a real result or a synthesized skip — and settle
+/// its dependents. Iterative, because a failure cascades: each dependent whose
+/// dependencies have now all finished either becomes ready (clean) or is itself
+/// finished as skipped (doomed), which in turn settles *its* dependents. Skips
+/// carry the **root** failed action's name, not the nearest skipped link, so
+/// every skip in a chain points at the one action worth reading.
+fn finish(
+    st: &mut SchedState,
+    edges: &Edges,
+    actions: &[Action],
+    idx: usize,
+    result: ActionResult,
+) {
+    let mut stack = vec![(idx, result)];
+    while let Some((i, result)) = stack.pop() {
+        for (output_name, digest) in &result.outputs {
+            st.produced
+                .insert((actions[i].name().to_owned(), output_name.clone()), *digest);
+        }
+        // What this action's dependents inherit: a skip propagates its root;
+        // a fresh failure starts one.
+        let doom = if result.success() {
+            None
+        } else {
+            Some(
+                result
+                    .skipped_dependency
+                    .clone()
+                    .unwrap_or_else(|| actions[i].name().to_owned()),
+            )
+        };
+        st.results[i] = Some(result);
+        st.remaining -= 1;
+        for &dep in &edges.dependents[i] {
+            if let Some(root) = &doom {
+                st.doomed[dep].get_or_insert_with(|| root.clone());
+            }
+            st.pending[dep] -= 1;
+            if st.pending[dep] == 0 {
+                match st.doomed[dep].clone() {
+                    Some(root) => stack.push((dep, ActionResult::skipped(root))),
+                    None => st.ready.push(dep),
+                }
+            }
+        }
+    }
 }
 
 /// The machine's available parallelism, or 1 if it cannot be determined.
@@ -531,6 +592,7 @@ impl LocalExecutor {
                 outputs: BTreeMap::from([(out_name, expected)]),
                 cache_hit: true,
                 provenance: Some(self.provenance_for(action)),
+                skipped_dependency: None,
             });
         }
 
@@ -552,6 +614,7 @@ impl LocalExecutor {
                 outputs: BTreeMap::from([(out_name, expected)]),
                 cache_hit: false,
                 provenance: Some(self.provenance_for(action)),
+                skipped_dependency: None,
             });
         }
 
@@ -665,6 +728,7 @@ impl LocalExecutor {
             outputs,
             cache_hit: false,
             provenance,
+            skipped_dependency: None,
         })
     }
 
@@ -837,6 +901,7 @@ impl LocalExecutor {
             outputs,
             cache_hit: false,
             provenance,
+            skipped_dependency: None,
         })
     }
 
@@ -1027,6 +1092,7 @@ impl Executor for LocalExecutor {
                     outputs: stored.outputs,
                     cache_hit: true,
                     provenance: stored.provenance,
+                    skipped_dependency: None,
                 });
             }
         }
