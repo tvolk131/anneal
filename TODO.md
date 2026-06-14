@@ -47,8 +47,16 @@
 - [ ] **Read-tracking to *enforce* declared inputs** (`docs/sandboxing.md`). Fail on undeclared reads —
       defensive, catches under-declaration. Most valuable on macOS (where it's otherwise silent); on Linux
       it's mostly a better diagnostic (isolation already guarantees it). NOT for relaxing invalidation.
-- [ ] **Wire the correctness-neutral verification gate into CI per-PR** (§22). Harness exists
-      (`verify_correctness_neutral`); it isn't run automatically yet.
+- [x] **CI gates: fmt, clippy, network tests.** `cargo fmt --check` + `cargo clippy --workspace
+      --all-targets -- -D warnings` run per-PR (a `lint` job); the workspace allows only
+      `result_large_err`. The macOS lane sets `ANNEAL_NETWORK_TESTS=1` so fetch mode is actually
+      exercised in CI.
+- [x] **Correctness-neutral verification runs in CI.** `verify_correctness_neutral` /
+      `verify_warm_neutral` are exercised by `crates/anneal-analysis/tests/snapshot_neutrality.rs`
+      under `cargo test`, which CI runs on both platforms. (Earlier note that it "isn't run
+      automatically yet" was stale.)
+  - [ ] A *broader* neutrality gate over real built targets (not just the unit harness) is still
+        worthwhile — run cold-vs-warm on the demo workspaces per-PR and diff outputs.
 
 ## Phase 4 — cross-language routing (M1 done; deferred enhancements remain)
 
