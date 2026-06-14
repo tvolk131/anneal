@@ -256,6 +256,15 @@
   - [ ] **`run` / `check`**; `query` / `aquery`; `cache` push/info/clean; `status`.
   - [ ] **Structured per-test output** in `test` (libtest/JSON parse via `anneal-test`) — currently
         pass/fail per test action only.
+  - [x] **Failure-aware scheduling + reporting.** A failed action no longer aborts the run with an
+        opaque `UnresolvedInput` (edge plumbing on the *consumer*) that discarded every result and
+        exited 2. `execute_graph` now treats failure as per-action data: a failed action's transitive
+        dependents complete as **skipped** (carrying the *root* failure's name), independent subgraphs
+        run to completion, and the call returns `Ok` with every slot filled. `Err` is reserved for
+        infrastructure (spawn/IO, cycles, malformed graphs). The CLI reports `FAIL`/`skip` lines and
+        a `N/M failed (K skipped)` summary at exit 1. Failed actions also **capture a stderr/stdout
+        tail** (was fully nulled — diagnosing the CA/gzip bugs needed hand-built probes), printed
+        inline under each `FAIL`; a pure diagnostic side channel, never an output or cache-key input.
   - [x] **Multi-package targets** — the CLI now loads the target's transitive package closure
         (`load_closure`), so cross-package deps build.
   - [x] **`materialize`** (§14.4) — make a consuming target's tree view match its sandbox: build the
