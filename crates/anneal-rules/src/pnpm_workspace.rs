@@ -147,7 +147,7 @@ impl Rule for PnpmWorkspace {
             // consuming scripts** at its per-edge destination — not routed through install.
             let routed = resolve_data(ctx)?;
 
-            for (script_index, (name, spec)) in scripts.into_iter().enumerate() {
+            for (script_index, (name, spec)) in scripts.iter().enumerate() {
                 let spec = spec.as_dict().ok_or_else(|| {
                     RuleError::Message(format!("pnpm_workspace: scripts[{name:?}] must be a table"))
                 })?;

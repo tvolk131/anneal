@@ -20,6 +20,10 @@ use crate::providers::{Artifact, ArtifactSource, ProviderSet};
 use crate::rule::RuleError;
 use crate::state::{state_key, PersistentStateDecl, StateHandle};
 
+/// A state declaration's identity: `(rule_kind, namespace, shard)` — what must
+/// match bit-identically across every target that declares the same state.
+type StateIdentity = (String, &'static str, Vec<String>);
+
 /// Cross-target registry of persistent state declarations, owned by the
 /// analysis run (DESIGN.md §3.3 runtime checks): `declare_state` is idempotent
 /// across targets on **bit-identical** declarations and a hard error on any
@@ -27,7 +31,7 @@ use crate::state::{state_key, PersistentStateDecl, StateHandle};
 /// or paths is a fork of the trust contract, never silently resolved.
 #[derive(Debug, Default)]
 pub struct StateRegistry {
-    declared: Mutex<BTreeMap<(String, &'static str, Vec<String>), PersistentStateDecl>>,
+    declared: Mutex<BTreeMap<StateIdentity, PersistentStateDecl>>,
 }
 
 impl StateRegistry {

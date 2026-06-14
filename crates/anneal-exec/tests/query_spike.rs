@@ -141,11 +141,19 @@ fn bootstrap_query_no_deps() {
 
     // The bootstrap rung of the §3.6 ladder: registry-free, reads only the
     // workspace manifests — exactly the query that feeds CargoFetch's includes.
-    let spec = metadata_query(&exec, fixture.path(), "cargo-metadata-no-deps", &["--no-deps"]);
+    let spec = metadata_query(
+        &exec,
+        fixture.path(),
+        "cargo-metadata-no-deps",
+        &["--no-deps"],
+    );
     let result = exec.run_query(&spec).unwrap();
     assert!(!result.cache_hit);
     let json = String::from_utf8(result.stdout).unwrap();
-    assert!(json.contains("\"workspace_members\""), "metadata JSON expected");
+    assert!(
+        json.contains("\"workspace_members\""),
+        "metadata JSON expected"
+    );
     assert!(json.contains("\"name\":\"a\"") || json.contains("\"name\": \"a\""));
     assert!(json.contains("\"name\":\"b\"") || json.contains("\"name\": \"b\""));
 }
@@ -168,7 +176,10 @@ fn full_query_resolves_and_caches() {
     let first = exec.run_query(&spec).unwrap();
     assert!(!first.cache_hit);
     let json = String::from_utf8_lossy(&first.stdout);
-    assert!(json.contains("\"resolve\""), "full metadata includes a resolve graph");
+    assert!(
+        json.contains("\"resolve\""),
+        "full metadata includes a resolve graph"
+    );
 
     let second = exec.run_query(&spec).unwrap();
     assert!(second.cache_hit, "identical query key must hit the cache");
@@ -186,7 +197,12 @@ fn early_cutoff_bytes_stable_across_input_edit() {
     write_fixture(fixture.path());
     let exec = LocalExecutor::new(store.path()).unwrap();
 
-    let spec = metadata_query(&exec, fixture.path(), "cargo-metadata-cutoff", &["--no-deps"]);
+    let spec = metadata_query(
+        &exec,
+        fixture.path(),
+        "cargo-metadata-cutoff",
+        &["--no-deps"],
+    );
     let before = exec.run_query(&spec).unwrap();
     assert!(!before.cache_hit);
 
@@ -200,7 +216,12 @@ fn early_cutoff_bytes_stable_across_input_edit() {
     text.push_str("# a comment that changes the digest, not the metadata\n");
     fs::write(&manifest, text).unwrap();
 
-    let spec = metadata_query(&exec, fixture.path(), "cargo-metadata-cutoff", &["--no-deps"]);
+    let spec = metadata_query(
+        &exec,
+        fixture.path(),
+        "cargo-metadata-cutoff",
+        &["--no-deps"],
+    );
     let after = exec.run_query(&spec).unwrap();
     assert!(!after.cache_hit, "digest changed, so the query must re-run");
     assert_eq!(
@@ -221,7 +242,12 @@ fn metadata_embeds_sandbox_paths() {
     write_fixture(fixture.path());
     let exec = LocalExecutor::new(store.path()).unwrap();
 
-    let spec = metadata_query(&exec, fixture.path(), "cargo-metadata-paths", &["--no-deps"]);
+    let spec = metadata_query(
+        &exec,
+        fixture.path(),
+        "cargo-metadata-paths",
+        &["--no-deps"],
+    );
     let result = exec.run_query(&spec).unwrap();
     let json = String::from_utf8_lossy(&result.stdout);
 

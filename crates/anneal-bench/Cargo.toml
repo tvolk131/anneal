@@ -15,3 +15,6 @@ anneal-analysis = { path = "../anneal-analysis" }
 anneal-rules = { path = "../anneal-rules" }
 anneal-exec = { path = "../anneal-exec" }
 tempfile = "3"
+
+[lints]
+workspace = true

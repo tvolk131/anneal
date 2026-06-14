@@ -11,3 +11,6 @@ anneal-loader = { path = "../anneal-loader" }
 [dev-dependencies]
 anneal-rules = { path = "../anneal-rules" }
 tempfile = "3"
+
+[lints]
+workspace = true

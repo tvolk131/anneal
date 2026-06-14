@@ -6,3 +6,6 @@ description = "Anneal vocabulary types: Digest, Label, Platform, Configuration, 
 
 [dependencies]
 sha2 = "0.11"
+
+[lints]
+workspace = true

@@ -236,7 +236,11 @@ mod tests {
         assert_eq!(a.lto, Lto::Off);
         assert_eq!(a.sanitizer, Sanitizer::None);
         assert_eq!(a.coverage, Coverage::Off);
-        assert_eq!(a.exec_mode, ExecMode::Incremental, "the dev loop is the default");
+        assert_eq!(
+            a.exec_mode,
+            ExecMode::Incremental,
+            "the dev loop is the default"
+        );
     }
 
     #[test]

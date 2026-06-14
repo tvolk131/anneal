@@ -2,9 +2,7 @@
 //! real runs, round-tripped through the action cache, and the
 //! `require_enforced` floor failing closed on weakly-enforced platforms.
 
-use anneal_exec::{
-    CacheTier, EnforcementGrade, ExecError, Executor, LocalExecutor, QuerySpec,
-};
+use anneal_exec::{CacheTier, EnforcementGrade, ExecError, Executor, LocalExecutor, QuerySpec};
 
 mod support;
 
@@ -54,10 +52,13 @@ fn run_records_provenance_and_cache_hit_replays_it() {
 fn snapshot_owner_caps_at_local_even_where_enforced() {
     let dir = tempfile::tempdir().unwrap();
     let exec = LocalExecutor::new(dir.path()).unwrap();
-    let action = support::shell_action("warm", "mkdir -p state && date > state/s && echo ok > out.txt")
-        .output("out", "out.txt")
-        .snapshot(anneal_core::Digest::of(b"k"), vec!["state".into()])
-        .build();
+    let action = support::shell_action(
+        "warm",
+        "mkdir -p state && date > state/s && echo ok > out.txt",
+    )
+    .output("out", "out.txt")
+    .snapshot(anneal_core::Digest::of(b"k"), vec!["state".into()])
+    .build();
 
     let result = exec.execute(&action).unwrap();
     assert!(result.success());

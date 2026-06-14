@@ -14,3 +14,6 @@ anyhow = "1"
 anneal-cas = { path = "../anneal-cas" }
 anneal-exec = { path = "../anneal-exec" }
 tempfile = "3"
+
+[lints]
+workspace = true

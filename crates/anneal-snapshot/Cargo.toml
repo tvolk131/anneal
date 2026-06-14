@@ -10,3 +10,6 @@ anneal-cas = { path = "../anneal-cas" }
 
 [dev-dependencies]
 tempfile = "3"
+
+[lints]
+workspace = true
