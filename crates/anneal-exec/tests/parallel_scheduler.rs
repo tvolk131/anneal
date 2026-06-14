@@ -217,3 +217,40 @@ fn an_empty_graph_is_ok() {
     let exec = LocalExecutor::new(dir.path()).unwrap();
     assert!(exec.execute_graph(&[]).unwrap().is_empty());
 }
+
+#[test]
+fn a_failed_action_carries_a_bounded_output_tail() {
+    // The failure report needs the *why*: stderr is captured and a tail rides
+    // on the result. Successful actions carry none (no memory tax), and a
+    // tool that reports errors on stdout still gets a tail (the fallback).
+    let dir = tempfile::tempdir().unwrap();
+    let exec = LocalExecutor::new(dir.path()).unwrap();
+
+    let stderr_fail = shell("stderr-fail", "echo boom-on-stderr >&2; exit 1").build();
+    let stdout_fail = shell("stdout-fail", "echo boom-on-stdout; exit 1").build();
+    let quiet_ok = writes("ok", "o.txt", "fine");
+
+    let results = exec
+        .execute_graph(&[stderr_fail, stdout_fail, quiet_ok])
+        .unwrap();
+    assert!(
+        results[0]
+            .failure_output
+            .as_deref()
+            .is_some_and(|t| t.contains("boom-on-stderr")),
+        "stderr tail missing: {:?}",
+        results[0].failure_output
+    );
+    assert!(
+        results[1]
+            .failure_output
+            .as_deref()
+            .is_some_and(|t| t.contains("boom-on-stdout")),
+        "stdout fallback tail missing: {:?}",
+        results[1].failure_output
+    );
+    assert!(
+        results[2].failure_output.is_none(),
+        "success carries no output tail"
+    );
+}

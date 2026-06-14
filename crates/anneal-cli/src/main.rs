@@ -857,6 +857,11 @@ fn report_actions(actions: &[Action], results: &[ActionResult]) {
             "FAIL"
         };
         println!("  {status:>6}  {}", action.name());
+        if let Some(output) = &result.failure_output {
+            for line in output.lines() {
+                println!("          | {line}");
+            }
+        }
     }
 }
 

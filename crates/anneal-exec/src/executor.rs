@@ -11,7 +11,7 @@ use std::fs;
 use std::io;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
-use std::process::{Child, ExitStatus};
+use std::process::{Child, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -51,6 +51,12 @@ pub struct ActionResult {
     /// link). The result then carries exit code -1, no outputs, and no
     /// provenance. `None` for actions that actually executed (or cache-hit).
     pub skipped_dependency: Option<String>,
+    /// A bounded tail of the action's stderr (stdout when stderr was empty —
+    /// some tools report errors there), captured **only on failure** so the
+    /// report can show *why*. A diagnostic side channel: never an output,
+    /// never part of any cache key, absent on success/cache hits/skips, and
+    /// absent for `Native` actions (which keep inherited stdio, §7.2).
+    pub failure_output: Option<String>,
 }
 
 impl ActionResult {
@@ -68,6 +74,7 @@ impl ActionResult {
             cache_hit: false,
             provenance: None,
             skipped_dependency: Some(root),
+            failure_output: None,
         }
     }
 }
@@ -593,6 +600,7 @@ impl LocalExecutor {
                 cache_hit: true,
                 provenance: Some(self.provenance_for(action)),
                 skipped_dependency: None,
+                failure_output: None,
             });
         }
 
@@ -615,6 +623,7 @@ impl LocalExecutor {
                 cache_hit: false,
                 provenance: Some(self.provenance_for(action)),
                 skipped_dependency: None,
+                failure_output: None,
             });
         }
 
@@ -673,12 +682,7 @@ impl LocalExecutor {
             env: &action.env,
         };
         let run_start = Instant::now();
-        let mut child = sandbox::build_command(action, &spec)
-            .map_err(ExecError::Sandbox)?
-            .spawn()
-            .map_err(ExecError::Spawn)?;
-        let status = wait_with_timeout(&mut child, action.timeout_ms)?;
-        let exit_code = status.code().unwrap_or(-1);
+        let (exit_code, failure_output) = run_command(action, &spec)?;
         let t_run = run_start.elapsed();
 
         let mut t_capture = Duration::ZERO;
@@ -729,6 +733,7 @@ impl LocalExecutor {
             cache_hit: false,
             provenance,
             skipped_dependency: None,
+            failure_output,
         })
     }
 
@@ -849,12 +854,7 @@ impl LocalExecutor {
             env: &action.env,
         };
         let run_start = Instant::now();
-        let mut child = sandbox::build_command(action, &spec)
-            .map_err(ExecError::Sandbox)?
-            .spawn()
-            .map_err(ExecError::Spawn)?;
-        let status = wait_with_timeout(&mut child, action.timeout_ms)?;
-        let exit_code = status.code().unwrap_or(-1);
+        let (exit_code, failure_output) = run_command(action, &spec)?;
         let t_run = run_start.elapsed();
 
         let mut t_capture = Duration::ZERO;
@@ -902,6 +902,7 @@ impl LocalExecutor {
             cache_hit: false,
             provenance,
             skipped_dependency: None,
+            failure_output,
         })
     }
 
@@ -1093,6 +1094,7 @@ impl Executor for LocalExecutor {
                     cache_hit: true,
                     provenance: stored.provenance,
                     skipped_dependency: None,
+                    failure_output: None,
                 });
             }
         }
@@ -1151,6 +1153,59 @@ fn tail(bytes: &[u8]) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let start = lines.len().saturating_sub(10);
     lines[start..].join("\n")
+}
+
+/// Spawn the sandboxed command and wait for it. stdout/stderr are piped and
+/// drained on threads (the child's stdio is otherwise nulled — see
+/// `apply_sandbox_process_hardening`); on a non-zero exit a bounded tail comes
+/// back for the failure report. `Native` actions keep inherited stdio (§7.2:
+/// run directly in the host context), so their failures carry no tail.
+fn run_command(action: &Action, spec: &SandboxSpec) -> Result<(i32, Option<String>), ExecError> {
+    let mut cmd = sandbox::build_command(action, spec).map_err(ExecError::Sandbox)?;
+    if action.execution_mode == ExecutionMode::Native {
+        let mut child = cmd.spawn().map_err(ExecError::Spawn)?;
+        let status = wait_with_timeout(&mut child, action.timeout_ms)?;
+        return Ok((status.code().unwrap_or(-1), None));
+    }
+
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(ExecError::Spawn)?;
+    let stdout_pipe = child.stdout.take().expect("stdout was piped above");
+    let stderr_pipe = child.stderr.take().expect("stderr was piped above");
+    let stdout_thread = thread::spawn(move || drain(stdout_pipe));
+    let stderr_thread = thread::spawn(move || drain(stderr_pipe));
+    let status = wait_with_timeout(&mut child, action.timeout_ms)?;
+    let stdout = stdout_thread.join().unwrap_or_default();
+    let stderr = stderr_thread.join().unwrap_or_default();
+    let exit_code = status.code().unwrap_or(-1);
+    let failure_output = (exit_code != 0).then(|| diagnostic_tail(&stderr, &stdout));
+    Ok((exit_code, failure_output))
+}
+
+/// How much of a failed action's output the result carries: enough for a
+/// compiler error with context (rustc/cargo diagnostics span dozens of lines —
+/// the 10-line query `tail` is too tight), bounded so a pathological line
+/// cannot bloat the report.
+const DIAG_TAIL_LINES: usize = 40;
+const DIAG_TAIL_BYTES: usize = 16 * 1024;
+
+/// The last [`DIAG_TAIL_LINES`] lines of stderr — or of stdout when stderr is
+/// empty (some tools report errors there) — capped at [`DIAG_TAIL_BYTES`].
+fn diagnostic_tail(stderr: &[u8], stdout: &[u8]) -> String {
+    let source = if stderr.is_empty() { stdout } else { stderr };
+    let text = String::from_utf8_lossy(source);
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(DIAG_TAIL_LINES);
+    let mut tail = lines[start..].join("\n");
+    if tail.len() > DIAG_TAIL_BYTES {
+        let cut = tail.len() - DIAG_TAIL_BYTES;
+        // Keep the *end* (errors conclude the output), on a char boundary.
+        let boundary = (cut..tail.len())
+            .find(|&i| tail.is_char_boundary(i))
+            .unwrap_or(tail.len());
+        tail = format!("[... truncated ...]{}", &tail[boundary..]);
+    }
+    tail
 }
 
 fn wait_with_timeout(child: &mut Child, timeout_ms: u64) -> Result<ExitStatus, ExecError> {

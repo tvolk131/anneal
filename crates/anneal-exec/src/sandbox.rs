@@ -108,6 +108,9 @@ pub(crate) fn build_command(action: &Action, spec: &SandboxSpec) -> Result<Comma
 }
 
 fn apply_sandbox_process_hardening(cmd: &mut Command) -> Result<(), SandboxError> {
+    // Default stdio is fully nulled (no host terminal leaks into the action).
+    // The executor re-pipes stdout/stderr to fresh pipes for failure
+    // diagnostics (`run_command`) — equally hermetic; stdin stays null.
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
