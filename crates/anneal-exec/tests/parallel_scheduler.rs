@@ -254,3 +254,45 @@ fn a_failed_action_carries_a_bounded_output_tail() {
         "success carries no output tail"
     );
 }
+
+#[test]
+fn execute_graph_observed_streams_every_finished_action_including_skips() {
+    // The observer fires once per finished action — ran, failed, or skipped —
+    // so a caller can stream progress. A failure and the skip it cascades are
+    // both reported. Order is completion-order, so we assert on the *set*.
+    use std::sync::Mutex;
+
+    let dir = tempfile::tempdir().unwrap();
+    let exec = LocalExecutor::new(dir.path()).unwrap();
+
+    let good = writes("good", "g.txt", "ok");
+    let bad = shell("bad", "exit 1").output("b", "b.txt").build();
+    let consumer = shell("consumer", "cat b.txt > c.txt")
+        .input_from_output("b", "b.txt", "bad", "b")
+        .output("c", "c.txt")
+        .build();
+
+    let seen: Mutex<Vec<(String, bool, bool)>> = Mutex::new(Vec::new());
+    let results = exec
+        .execute_graph_observed(&[good, bad, consumer], &|action, result| {
+            seen.lock().unwrap().push((
+                action.name().to_owned(),
+                result.success(),
+                result.skipped_dependency.is_some(),
+            ));
+        })
+        .unwrap();
+    assert_eq!(results.len(), 3);
+
+    let mut seen = seen.into_inner().unwrap();
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec![
+            ("bad".to_owned(), false, false),     // ran and failed
+            ("consumer".to_owned(), false, true), // skipped (bad failed)
+            ("good".to_owned(), true, false),     // ran and succeeded
+        ],
+        "observer must see every finished action exactly once, skips included"
+    );
+}

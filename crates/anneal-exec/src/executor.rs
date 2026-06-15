@@ -102,6 +102,13 @@ pub struct PhaseTimings {
     pub total: Duration,
 }
 
+/// The callback [`LocalExecutor::execute_graph_observed`] invokes as each action
+/// finishes. Shared across the worker threads (hence `Sync`); see that method.
+/// The `'a` lets the observer borrow non-`'static` state (e.g. accumulate into
+/// a local `Mutex<Vec<_>>`), which a bare `dyn Fn` (implicitly `'static`) would
+/// forbid.
+pub type ProgressFn<'a> = dyn Fn(&Action, &ActionResult) + Sync + 'a;
+
 /// Runs actions. Local and (future) remote executors share this interface so callers
 /// never branch on where work runs (§7.1).
 pub trait Executor {
@@ -264,6 +271,30 @@ impl LocalExecutor {
     /// merely non-zero exit, which is a normal result) the scheduler stops dispatching
     /// new work, lets in-flight actions drain, and returns that error.
     pub fn execute_graph(&self, actions: &[Action]) -> Result<Vec<ActionResult>, ExecError> {
+        self.run_graph(actions, None)
+    }
+
+    /// Like [`execute_graph`](Self::execute_graph), but `observe` is called once
+    /// as each action **finishes** — ran, failed, or was skipped — in completion
+    /// order (nondeterministic under parallelism), so a caller can stream
+    /// progress instead of waiting for the whole graph. A failure and the skips
+    /// it cascades are reported back-to-back. The callback is `Sync` (shared
+    /// across workers) and runs **outside** the scheduler lock, so a slow or
+    /// blocked writer never stalls dispatch; it does its own output
+    /// synchronization (a plain `println!` is line-atomic and sufficient).
+    pub fn execute_graph_observed(
+        &self,
+        actions: &[Action],
+        observe: &ProgressFn<'_>,
+    ) -> Result<Vec<ActionResult>, ExecError> {
+        self.run_graph(actions, Some(observe))
+    }
+
+    fn run_graph(
+        &self,
+        actions: &[Action],
+        observer: Option<&ProgressFn<'_>>,
+    ) -> Result<Vec<ActionResult>, ExecError> {
         if actions.is_empty() {
             return Ok(Vec::new());
         }
@@ -281,7 +312,24 @@ impl LocalExecutor {
                 scope.spawn(|| {
                     while let Some((idx, resolved)) = next_task(&state, &progress, actions) {
                         let outcome = self.execute(&resolved);
-                        complete(&state, &progress, &edges, actions, idx, outcome);
+                        let finished = complete(&state, &progress, &edges, actions, idx, outcome);
+                        // Report off-lock: snapshot the just-finalized results
+                        // (the executed action plus any skips it cascaded) under
+                        // a brief lock, then invoke the observer without holding
+                        // it. Cloning is gated behind an actual observer, so the
+                        // unobserved path (tests, bench) pays nothing.
+                        if let Some(observe) = observer {
+                            let snapshots: Vec<(usize, ActionResult)> = {
+                                let st = state.lock().unwrap();
+                                finished
+                                    .iter()
+                                    .map(|&i| (i, st.results[i].clone().expect("finalized")))
+                                    .collect()
+                            };
+                            for (i, result) in snapshots {
+                                observe(&actions[i], &result);
+                            }
+                        }
                     }
                 });
             }
@@ -459,7 +507,8 @@ fn next_task(
 /// **skipped** (their inputs can never resolve), independent subgraphs keep
 /// running, and the whole run still returns `Ok` — failure is data, reported
 /// per action. Only an `Err` (an infrastructure error: spawn, I/O, a malformed
-/// graph) aborts the run.
+/// graph) aborts the run. Returns the indices finalized by this call — the
+/// executed action plus any it cascaded into skips — for streamed reporting.
 fn complete(
     state: &Mutex<SchedState>,
     progress: &Condvar,
@@ -467,16 +516,18 @@ fn complete(
     actions: &[Action],
     idx: usize,
     outcome: Result<ActionResult, ExecError>,
-) {
+) -> Vec<usize> {
     let mut st = state.lock().unwrap();
     st.running -= 1;
-    match outcome {
+    let finished = match outcome {
         Err(e) => {
             st.failed.get_or_insert(e);
+            Vec::new()
         }
         Ok(result) => finish(&mut st, edges, actions, idx, result),
-    }
+    };
     progress.notify_all();
+    finished
 }
 
 /// Record a finished action — a real result or a synthesized skip — and settle
@@ -491,7 +542,8 @@ fn finish(
     actions: &[Action],
     idx: usize,
     result: ActionResult,
-) {
+) -> Vec<usize> {
+    let mut finished = Vec::new();
     let mut stack = vec![(idx, result)];
     while let Some((i, result)) = stack.pop() {
         for (output_name, digest) in &result.outputs {
@@ -512,6 +564,7 @@ fn finish(
         };
         st.results[i] = Some(result);
         st.remaining -= 1;
+        finished.push(i);
         for &dep in &edges.dependents[i] {
             if let Some(root) = &doom {
                 st.doomed[dep].get_or_insert_with(|| root.clone());
@@ -525,6 +578,7 @@ fn finish(
             }
         }
     }
+    finished
 }
 
 /// The machine's available parallelism, or 1 if it cannot be determined.

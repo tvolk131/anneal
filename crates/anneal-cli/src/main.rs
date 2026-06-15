@@ -399,9 +399,10 @@ fn build(
     let pipeline = analyze_target(target, config, root, jobs, require_enforced, auto_cone)?;
     let results = pipeline
         .exec
-        .execute_graph(&pipeline.actions)
+        .execute_graph_observed(&pipeline.actions, &|action, result| {
+            print_action_status(action, result)
+        })
         .map_err(|e| e.to_string())?;
-    report_actions(&pipeline.actions, &results);
 
     let (failed, skipped) = failure_counts(&results);
     let cached = results.iter().filter(|r| r.cache_hit).count();
@@ -432,9 +433,10 @@ fn test(
     let pipeline = analyze_target(target, config, root, jobs, require_enforced, auto_cone)?;
     let results = pipeline
         .exec
-        .execute_graph(&pipeline.actions)
+        .execute_graph_observed(&pipeline.actions, &|action, result| {
+            print_action_status(action, result)
+        })
         .map_err(|e| e.to_string())?;
-    report_actions(&pipeline.actions, &results);
 
     // Test actions are rule-agnostic: any action that captured `results.txt` and wrote
     // the `ANNEAL_TEST_EXIT` marker (cargo's test-run, pnpm's test kind). Structured
@@ -493,6 +495,11 @@ fn analyze_target(
 ) -> Result<Pipeline, String> {
     let label = Label::parse(target).map_err(|e| format!("invalid target {target:?}: {e}"))?;
     let registry = builtin_rules();
+    // Loading + analysis runs before any action, and can take a noticeable
+    // moment on a large lockfile (parse, workspace introspection, toolchain
+    // resolution). Announce it on stderr so the terminal isn't silent until
+    // the first action streams — and so stdout (the action log) stays clean.
+    eprintln!("analyzing {label}…");
     // A mutating command takes the coarse exclusive workspace lock for its whole run, so
     // concurrent `anneal` processes can't collide on shared warm dirs / sandboxes. Held
     // until the returned `PipelineRun` is dropped. Read-only commands
@@ -587,11 +594,12 @@ fn materialize(
     let producers = producer_subgraph(&pipeline.actions, &routed);
     let results = pipeline
         .exec
-        .execute_graph(&producers)
+        .execute_graph_observed(&producers, &|action, result| {
+            print_action_status(action, result)
+        })
         .map_err(|e| e.to_string())?;
     let (failed, skipped) = failure_counts(&results);
     if failed > 0 || skipped > 0 {
-        report_actions(&producers, &results);
         eprintln!(
             "materialize FAILED — {failed}/{} producing action(s) failed ({skipped} skipped)",
             producers.len()
@@ -843,24 +851,26 @@ fn join_paths(paths: &[PathBuf]) -> String {
 }
 
 /// Print one line per action: its cache/run status and name.
-fn report_actions(actions: &[Action], results: &[ActionResult]) {
-    for (action, result) in actions.iter().zip(results) {
-        if let Some(root) = &result.skipped_dependency {
-            println!("    skip  {} (dependency failed: {root})", action.name());
-            continue;
-        }
-        let status = if result.cache_hit {
-            "CACHED"
-        } else if result.success() {
-            "ok"
-        } else {
-            "FAIL"
-        };
-        println!("  {status:>6}  {}", action.name());
-        if let Some(output) = &result.failure_output {
-            for line in output.lines() {
-                println!("          | {line}");
-            }
+/// Print one action's completion line — and, on failure, its captured output
+/// tail. Used as the live progress observer for `execute_graph_observed`, so
+/// the build log streams in completion order as each action finishes, instead
+/// of arriving in one burst when the whole graph is done.
+fn print_action_status(action: &Action, result: &ActionResult) {
+    if let Some(root) = &result.skipped_dependency {
+        println!("    skip  {} (dependency failed: {root})", action.name());
+        return;
+    }
+    let status = if result.cache_hit {
+        "CACHED"
+    } else if result.success() {
+        "ok"
+    } else {
+        "FAIL"
+    };
+    println!("  {status:>6}  {}", action.name());
+    if let Some(output) = &result.failure_output {
+        for line in output.lines() {
+            println!("          | {line}");
         }
     }
 }
