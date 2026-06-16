@@ -62,6 +62,36 @@ fn cargo_fixture() -> tempfile::TempDir {
     tmp
 }
 
+/// macOS regression for the SDK groundwork: the rust toolchain's declared env
+/// (`DEVELOPER_DIR`, the pinned apple-sdk store path) must be threaded onto the
+/// cargo **compiling** action — without it, `xcrun`/rustc can't resolve the SDK
+/// in the scrubbed sandbox. Analysis-only (no execution), so it needs neither
+/// network nor a working linker; it pins that the manifest env reaches the
+/// action, the link most likely to regress in a `cargo_builder` refactor.
+#[test]
+#[cfg(target_os = "macos")]
+fn cargo_compiling_actions_carry_the_rust_toolchain_developer_dir() {
+    let tmp = cargo_fixture();
+    let root = tmp.path();
+    let registry = builtin_rules();
+    let graph = load_package(root, "ws", &registry).unwrap();
+    let cfg = config(OptLevel::Debug);
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
+    let g = Analyzer::new(&graph, &registry, &cfg, root, exec.cas())
+        .analyze(&anneal_core::Label::parse("//ws:ws").unwrap())
+        .unwrap();
+
+    let action = build_action(&g);
+    assert!(
+        action
+            .env()
+            .get("DEVELOPER_DIR")
+            .is_some_and(|d| d.starts_with("/nix/store/")),
+        "cargo build action must carry DEVELOPER_DIR (a /nix/store SDK path) on macOS; got env {:?}",
+        action.env()
+    );
+}
+
 #[test]
 fn cargo_workspace_builds_hermetically_and_caches() {
     let tmp = cargo_fixture();

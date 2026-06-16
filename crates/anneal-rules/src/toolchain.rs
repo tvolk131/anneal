@@ -23,6 +23,12 @@ struct ToolchainManifest {
 struct ManifestToolchain {
     tools: BTreeMap<String, PathBuf>,
     read_only_roots: Vec<PathBuf>,
+    /// Environment variables a rule sets on actions that use this toolchain —
+    /// e.g. the `rust` toolchain's `DEVELOPER_DIR` (the pinned macOS SDK store
+    /// path) so `xcrun`/rustc/cc resolve the SDK in the scrubbed sandbox.
+    /// Optional: empty for every toolchain on Linux, and most on macOS.
+    #[serde(default)]
+    env: BTreeMap<String, String>,
 }
 
 /// The minimal shell/runtime surface used by first-party shell fragments.
@@ -54,6 +60,19 @@ pub(crate) fn nix_store_toolchain(name: &str, tools: &[&str]) -> Result<Toolchai
     }
 
     manifest_toolchain_from_manifest(toolchain_manifest()?, name, tools)
+}
+
+/// The environment variables a toolchain declares for its consuming rule to set
+/// on actions (e.g. `rust` → `DEVELOPER_DIR` on macOS). A rule applies these
+/// itself — they are deliberately **not** part of the canonical sandbox env, so
+/// only actions of rules that opt in carry them. Empty (and absent) toolchains
+/// yield an empty map.
+pub(crate) fn nix_toolchain_env(name: &str) -> Result<BTreeMap<String, String>, RuleError> {
+    Ok(toolchain_manifest()?
+        .toolchains
+        .get(name)
+        .map(|t| t.env.clone())
+        .unwrap_or_default())
 }
 
 /// Build a PATH containing only declared toolchain bin directories.
@@ -300,6 +319,32 @@ mod tests {
     }
 
     #[test]
+    fn toolchain_env_round_trips_and_defaults_empty() {
+        // The `env` field carries per-toolchain action env (e.g. the rust
+        // toolchain's DEVELOPER_DIR). It must parse when present...
+        let with_env: ToolchainManifest = serde_json::from_str(
+            r#"{"version":1,"toolchains":{"rust":{"tools":{},"read_only_roots":[],
+               "env":{"DEVELOPER_DIR":"/nix/store/abc-apple-sdk"}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            with_env.toolchains["rust"]
+                .env
+                .get("DEVELOPER_DIR")
+                .map(String::as_str),
+            Some("/nix/store/abc-apple-sdk")
+        );
+
+        // ...and default to empty when absent, so a manifest written before
+        // this field existed (or any env-less toolchain) still parses.
+        let without_env: ToolchainManifest = serde_json::from_str(
+            r#"{"version":1,"toolchains":{"nickel":{"tools":{},"read_only_roots":[]}}}"#,
+        )
+        .unwrap();
+        assert!(without_env.toolchains["nickel"].env.is_empty());
+    }
+
+    #[test]
     fn manifest_toolchain_requires_all_tools() {
         let mut toolchains = BTreeMap::new();
         toolchains.insert(
@@ -307,6 +352,7 @@ mod tests {
             ManifestToolchain {
                 tools: BTreeMap::new(),
                 read_only_roots: vec![PathBuf::from("/nix/store/abc-rust")],
+                env: BTreeMap::new(),
             },
         );
         let manifest = ToolchainManifest {

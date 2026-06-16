@@ -296,6 +296,12 @@ impl Action {
         &self.inputs
     }
 
+    /// Additional environment variables for this action (names and values both
+    /// enter the cache key, §7.4).
+    pub fn env(&self) -> &BTreeMap<String, String> {
+        &self.env
+    }
+
     /// Declared outputs, keyed by logical output name.
     pub fn outputs(&self) -> &BTreeMap<String, PathBuf> {
         &self.outputs

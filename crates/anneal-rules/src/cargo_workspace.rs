@@ -44,7 +44,7 @@
 //! git/`path`-registry deps and non-crates.io registries (vendor those), and a generated
 //! lockfile (needs the staged-graph pass).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anneal_core::{
@@ -58,7 +58,9 @@ use crate::providers::{Artifact, ArtifactSource, ProviderSet};
 use crate::rule::{Analysis, Rule, RuleError};
 use crate::schema::{AttrSchema, AttrType};
 use crate::state::{Attestation, Concurrency, PersistentStateDecl, StateActionExt, StateKind};
-use crate::toolchain::{nix_base_runtime, nix_store_toolchain, toolchain_path_env};
+use crate::toolchain::{
+    nix_base_runtime, nix_store_toolchain, nix_toolchain_env, toolchain_path_env,
+};
 
 /// Directories never treated as build inputs.
 const IGNORED_DIRS: &[&str] = &["target", ".git", ".anneal"];
@@ -127,6 +129,12 @@ impl Rule for CargoWorkspace {
         let path_env = diagnostics::time("cargo_workspace.path_env", || {
             toolchain_path_env(&[&toolchain, &runtime])
         });
+        // Env the rust toolchain declares for compiling/linking actions —
+        // `DEVELOPER_DIR` on macOS, so `xcrun`/rustc/cc find the pinned SDK in
+        // the scrubbed sandbox (its store path is a declared rust root, so it
+        // is mounted read-only). Empty on Linux. Applied only here, never to
+        // the canonical sandbox env, so non-cargo rules are unaffected.
+        let rust_env = nix_toolchain_env("rust")?;
 
         // cargo_workspace interprets all five axes (§13.6), so it consumes all five —
         // each enters the cache key, and the snapshot key, at its current value.
@@ -214,6 +222,7 @@ impl Rule for CargoWorkspace {
                                 &rustflags,
                                 &toolchain,
                                 &runtime,
+                                &rust_env,
                             ),
                             &sources,
                         ),
@@ -266,6 +275,7 @@ impl Rule for CargoWorkspace {
                                         &rustflags,
                                         &toolchain,
                                         &runtime,
+                                        &rust_env,
                                     ),
                                     &sources,
                                 ),
@@ -326,6 +336,7 @@ impl Rule for CargoWorkspace {
                                         &rustflags,
                                         &toolchain,
                                         &runtime,
+                                        &rust_env,
                                     ),
                                     &sources,
                                 ),
@@ -361,6 +372,7 @@ impl Rule for CargoWorkspace {
                                         &rustflags,
                                         &toolchain,
                                         &runtime,
+                                        &rust_env,
                                     ),
                                     &sources,
                                 ),
@@ -431,6 +443,7 @@ fn cargo_builder(
     rustflags: &str,
     toolchain: &Toolchain,
     runtime: &Toolchain,
+    rust_env: &BTreeMap<String, String>,
 ) -> ActionBuilder {
     let mut builder = Action::builder(name, command)
         .toolchain(toolchain.clone())
@@ -438,6 +451,11 @@ fn cargo_builder(
         .env("PATH", path_env)
         .env("CARGO_TERM_COLOR", "never")
         .env("CARGO_INCREMENTAL", "0");
+    // The rust toolchain's declared env (e.g. DEVELOPER_DIR on macOS). Each is a
+    // store-path value, so it enters the action cache key like any other env.
+    for (key, value) in rust_env {
+        builder = builder.env(key, value);
+    }
     // Only set RUSTFLAGS when an axis actually changes a flag, so a default-config
     // build is byte-for-byte what plain `cargo` produces.
     if !rustflags.is_empty() {

@@ -18,9 +18,23 @@
           stdenv.cc
         ] ++ lib.optionals pkgs.stdenv.isDarwin (with pkgs; [
           xcbuild.xcrun
+          # The macOS SDK as a pinned /nix/store input. rustc/cc resolve it via
+          # DEVELOPER_DIR (set per cargo action from the manifest below); listing
+          # it here makes its store path a declared rust-toolchain closure root,
+          # so the sandbox mounts it read-only — no host SDK, fully hermetic.
+          apple-sdk
         ]);
         rustToolNames = [ "cargo" "rustc" "cc" ]
           ++ lib.optionals pkgs.stdenv.isDarwin [ "xcrun" ];
+
+        # Per-toolchain environment the manifest carries for rules to apply to
+        # their actions (NOT general sandbox env). The rust toolchain needs
+        # DEVELOPER_DIR on macOS so `xcrun`/rustc can locate the pinned SDK; the
+        # value is a store path covered by the rust roots above, so it enters
+        # both the toolchain identity and (when a rule sets it) the action key.
+        rustEnvJson = builtins.toJSON (lib.optionalAttrs pkgs.stdenv.isDarwin {
+          DEVELOPER_DIR = "${pkgs.apple-sdk}";
+        });
 
         runtimeToolPackages = with pkgs; [
           bash
@@ -124,10 +138,12 @@
             node_roots="$(json_roots ${nodeClosure}/store-paths ${shellWordList nodeToolNames})"
             nickel_tools="$(json_tools ${shellWordList nickelToolNames})"
             nickel_roots="$(json_roots ${nickelClosure}/store-paths ${shellWordList nickelToolNames})"
+            rust_env='${rustEnvJson}'
 
             jq -n \
               --argjson rust_tools "$rust_tools" \
               --argjson rust_roots "$rust_roots" \
+              --argjson rust_env "$rust_env" \
               --argjson runtime_tools "$runtime_tools" \
               --argjson runtime_roots "$runtime_roots" \
               --argjson node_tools "$node_tools" \
@@ -139,19 +155,23 @@
                 toolchains: {
                   rust: {
                     tools: $rust_tools,
-                    read_only_roots: $rust_roots
+                    read_only_roots: $rust_roots,
+                    env: $rust_env
                   },
                   "posix-runtime": {
                     tools: $runtime_tools,
-                    read_only_roots: $runtime_roots
+                    read_only_roots: $runtime_roots,
+                    env: {}
                   },
                   node: {
                     tools: $node_tools,
-                    read_only_roots: $node_roots
+                    read_only_roots: $node_roots,
+                    env: {}
                   },
                   nickel: {
                     tools: $nickel_tools,
-                    read_only_roots: $nickel_roots
+                    read_only_roots: $nickel_roots,
+                    env: {}
                   }
                 }
               }' > "$out"
