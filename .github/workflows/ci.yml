@@ -40,10 +40,10 @@ jobs:
       - uses: DeterminateSystems/determinate-nix-action@v3
 
       # The macOS host has direct network, so it carries the network-gated
-      # tests (fetch mode against static.crates.io) — set ANNEAL_NETWORK_TESTS
-      # so they actually run instead of silently skipping (the gate that kept
-      # fetch mode's regressions invisible). #[ignore]d tests still need
-      # --ignored and stay opt-in.
+      # tests (fetch mode + native_libs, against static.crates.io) — set
+      # ANNEAL_NETWORK_TESTS so they actually run instead of silently skipping
+      # (the gate that kept fetch mode's regressions invisible). #[ignore]d
+      # tests still need --ignored and stay opt-in.
       - name: Rust tests (macOS host)
         if: matrix.os == 'macos-15'
         env:

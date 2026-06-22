@@ -446,11 +446,16 @@ shape is shared across every package ecosystem.
       — compose path-vars into one toolchain in the flake). Native-lib identity folds into the `target/`
       snapshot shard (else a lib bump could restore a stale, wrong-linked tree — §8.2). Declared, not inferred
       (no `-sys`→nixpkgs auto-mapping). Flake exports `lib.mkNativeLibToolchain pkgs <pkg>` and ships `zlib` as
-      the worked example. Tests: tool-less resolution, env-merge conflict, and analysis-level attachment of
-      roots+env to compile and run actions. **Deferred:** promote to a first-class `native_lib` *target* (graph
-      visibility via `why`, reuse) if/when monorepo precision is wanted — accepting a BUILD-file migration; a
-      reusable "consumer builds its own manifest" helper so `mkNativeLibToolchain` is usable end-to-end
-      off-the-shelf; the same attach mechanism for `pnpm_workspace` (node-gyp).
+      the worked example. Tests: tool-less resolution, env-merge conflict, analysis-level attachment of
+      roots+env to compile and run actions, and a **network-gated execution test** (`tests/native_libs.rs`,
+      `ANNEAL_NETWORK_TESTS=1`, runs on the macOS CI lane) that builds a workspace linking zlib via
+      `pkg-config`, **runs** its unit test calling a zlib symbol (proving the link *and* runtime-mount), and
+      asserts the build *fails* without `native_libs` (load-bearing). That execution test caught a real
+      `mkNativeLibToolchain` bug the analysis test couldn't — zlib's `.pc` is under `share/pkgconfig`, not
+      `lib/pkgconfig`; `PKG_CONFIG_PATH` now lists both. **Deferred:** promote to a first-class `native_lib`
+      *target* (graph visibility via `why`, reuse) if/when monorepo precision is wanted — accepting a BUILD-file
+      migration; a reusable "consumer builds its own manifest" helper so `mkNativeLibToolchain` is usable
+      end-to-end off-the-shelf; the same attach mechanism for `pnpm_workspace` (node-gyp).
 - [ ] **The per-ecosystem acquisition pattern (one shape everywhere).** Every modern ecosystem converged on the
       same two things — a lockfile with per-artifact hashes + an internal content-addressed store — which *is* the
       FOD shape: `lockfile {(coord, hash)} → one FOD fetch per artifact → assemble blobs into the tool's offline

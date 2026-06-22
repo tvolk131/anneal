@@ -21,7 +21,12 @@
           packages = [ pkgs.pkg-config libPkg dev ];
           toolNames = [ "pkg-config" ];
           closure = pkgs.closureInfo { rootPaths = packages; };
-          env = { PKG_CONFIG_PATH = "${dev}/lib/pkgconfig"; };
+          # Both conventions: nixpkgs packages ship `<dev>/lib/pkgconfig`
+          # (most) or `<dev>/share/pkgconfig` (zlib, …). pkg-config skips a
+          # nonexistent dir, so listing both is safe and portable.
+          env = {
+            PKG_CONFIG_PATH = "${dev}/lib/pkgconfig:${dev}/share/pkgconfig";
+          };
         };
     in
     flake-utils.lib.eachDefaultSystem (system:
