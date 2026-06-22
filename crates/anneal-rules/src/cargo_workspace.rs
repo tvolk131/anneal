@@ -39,6 +39,17 @@
 //!   thousands of individual vendored files — so a committed `vendor/` isn't required and
 //!   the per-build input-handling cost is O(workspace sources), not O(vendored files).
 //!
+//! # Native libraries (`native_libs`)
+//!
+//! A workspace that links a prebuilt native library (`libpq`, `openssl`, `zlib`, …
+//! via a `-sys` crate) names it in `native_libs`, by toolchain-manifest key. Each
+//! resolves to a native-lib toolchain whose closure mounts read-only and whose env
+//! (`PKG_CONFIG_PATH`, …) + `pkg-config` bin dir join the compiling actions, so the
+//! `-sys` build script discovers it; its roots also mount on the test-run action
+//! (dynamic libs are needed at runtime). The library is declared, not inferred — no
+//! auto-mapping of `-sys` crates to nixpkgs attrs (§Q3). Bundled-C crates (`ring`)
+//! need none of this; they compile their own C with the toolchain.
+//!
 //! Deferred: `RUSTFLAGS`/sanitizer/coverage axes (§13.6), binary/bin-unit test targets,
 //! integration multi-binary split, separately-addressable test targets; in fetch mode,
 //! git/`path`-registry deps and non-crates.io registries (vendor those), and a generated
@@ -59,7 +70,7 @@ use crate::rule::{Analysis, Rule, RuleError};
 use crate::schema::{AttrSchema, AttrType};
 use crate::state::{Attestation, Concurrency, PersistentStateDecl, StateActionExt, StateKind};
 use crate::toolchain::{
-    nix_base_runtime, nix_store_toolchain, nix_toolchain_env, toolchain_path_env,
+    nix_base_runtime, nix_lib_toolchain, nix_store_toolchain, nix_toolchain_env, toolchain_path_env,
 };
 
 /// Directories never treated as build inputs.
@@ -79,7 +90,19 @@ const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-
 /// …; §14.1, §14.6). This is the inner-tool-only case: Cargo/rustc read the content at
 /// execution; Anneal never introspects it at analysis. (A generated `Cargo.toml`, which
 /// the rule *would* parse at analysis, is the §14.6 staged-pass case, not an edge.)
-const SCHEMA: &[AttrSchema] = &[AttrSchema::optional("data", AttrType::LabelList)];
+/// `native_libs` names extra Nix-provided native libraries this workspace links —
+/// `libpq`, `openssl`, `zlib`, … — by their **toolchain-manifest key** (declared in
+/// the consuming flake, e.g. via `mkNativeLibToolchain`), *not* a label. Each
+/// contributes read-only roots (the library's closure, mounted into the build) and
+/// env (PATH / `PKG_CONFIG_PATH` / link flags) to the compiling actions, so a `-sys`
+/// crate's build script finds the library. An unknown name is an analysis error; an
+/// env-var collision across two libraries is a hard error (compose them into one
+/// toolchain in the flake). This is the declared-not-inferred path (no auto-mapping
+/// of `-sys` crates to nixpkgs attrs).
+const SCHEMA: &[AttrSchema] = &[
+    AttrSchema::optional("data", AttrType::LabelList),
+    AttrSchema::optional("native_libs", AttrType::StringList),
+];
 
 pub struct CargoWorkspace;
 
@@ -126,20 +149,50 @@ impl Rule for CargoWorkspace {
         };
         let release_flag = if release { " --release" } else { "" };
 
+        // Workspace `native_libs`: extra Nix-provided native libraries this
+        // workspace links (libpq, openssl, …), each named by manifest toolchain
+        // key. Resolved to toolchains whose roots mount into the build and whose
+        // env joins the compiling actions; their bin dirs (e.g. `pkg-config`)
+        // also join PATH. Unknown name → analysis error.
+        let native_lib_names = ctx.attrs().string_list_opt("native_libs")?;
+        let native_libs: Vec<Toolchain> = native_lib_names
+            .iter()
+            .map(|name| nix_lib_toolchain(name))
+            .collect::<Result<_, _>>()?;
+
         let path_env = diagnostics::time("cargo_workspace.path_env", || {
-            toolchain_path_env(&[&toolchain, &runtime])
+            let mut toolchains: Vec<&Toolchain> = vec![&toolchain, &runtime];
+            toolchains.extend(native_libs.iter());
+            toolchain_path_env(&toolchains)
         });
-        // Env the rust toolchain declares for compiling/linking actions —
-        // `DEVELOPER_DIR` on macOS, so `xcrun`/rustc/cc find the pinned SDK in
-        // the scrubbed sandbox (its store path is a declared rust root, so it
-        // is mounted read-only). Empty on Linux. Applied only here, never to
-        // the canonical sandbox env, so non-cargo rules are unaffected.
-        let rust_env = nix_toolchain_env("rust")?;
+
+        // Compiling/linking env: the rust toolchain's declared env (`DEVELOPER_DIR`
+        // on macOS, so `xcrun`/rustc/cc find the pinned SDK in the scrubbed sandbox)
+        // merged with each native lib's env. A key set to *different* values by two
+        // toolchains is a hard error (compose them into one toolchain in the flake)
+        // so a path-like var like `NIX_LDFLAGS`/`PKG_CONFIG_PATH` is never silently
+        // half-dropped. Applied only to these cargo actions, never the canonical
+        // sandbox env, so other rules are unaffected.
+        let mut env = nix_toolchain_env("rust")?;
+        for name in native_lib_names {
+            merge_toolchain_env(&mut env, nix_toolchain_env(name)?, name)?;
+        }
 
         // cargo_workspace interprets all five axes (§13.6), so it consumes all five —
         // each enters the cache key, and the snapshot key, at its current value.
         let rustflags = rustflags_for(ctx.config().axes());
         let consumed = ALL_AXES.to_vec();
+
+        // The shared environment every compiling/linking cargo action runs with.
+        // Built once; only the action name and command vary per action.
+        let setup = CargoActionEnv {
+            path_env: &path_env,
+            rustflags: &rustflags,
+            toolchain: &toolchain,
+            runtime: &runtime,
+            native_libs: &native_libs,
+            env: &env,
+        };
 
         let crates =
             diagnostics::time("cargo_workspace.workspace_crates", || workspace_crates(ctx))?;
@@ -159,7 +212,7 @@ impl Rule for CargoWorkspace {
             Some(ctx.declare_state(PersistentStateDecl {
                 namespace: "cargo-target",
                 shard: diagnostics::time("cargo_workspace.state_shard", || {
-                    target_state_shard(&toolchain, &runtime, &sources, ctx)
+                    target_state_shard(&toolchain, &runtime, &native_libs, &sources, ctx)
                 }),
                 kind: StateKind::Interleaved {
                     concurrency: Concurrency::Exclusive,
@@ -218,11 +271,7 @@ impl Rule for CargoWorkspace {
                             cargo_builder(
                                 format!("cargo_workspace build {label}"),
                                 build_cmd,
-                                &path_env,
-                                &rustflags,
-                                &toolchain,
-                                &runtime,
-                                &rust_env,
+                                &setup,
                             ),
                             &sources,
                         ),
@@ -271,11 +320,7 @@ impl Rule for CargoWorkspace {
                                                 &test_bin_path,
                                             ),
                                         ),
-                                        &path_env,
-                                        &rustflags,
-                                        &toolchain,
-                                        &runtime,
-                                        &rust_env,
+                                        &setup,
                                     ),
                                     &sources,
                                 ),
@@ -305,7 +350,7 @@ impl Rule for CargoWorkspace {
                             results_path.display(),
                             results_path.display()
                         );
-                        let run = Action::builder(
+                        let mut run = Action::builder(
                             run_id,
                             vec!["sh".to_owned(), "-c".to_owned(), run_script],
                         )
@@ -313,8 +358,15 @@ impl Rule for CargoWorkspace {
                         .output("results.txt", results_path)
                         .toolchain(toolchain.clone())
                         .toolchain(runtime.clone())
-                        .env("PATH", &path_env)
-                        .configured(ctx.config().clone(), Vec::new());
+                        .env("PATH", &path_env);
+                        // Native-lib roots mount into the run too: a dynamically-linked
+                        // test binary needs its libraries present at *runtime* (its
+                        // RUNPATH points at the mounted store paths). Env is not needed
+                        // here — the run compiles nothing.
+                        for lib in &native_libs {
+                            run = run.toolchain(lib.clone());
+                        }
+                        let run = run.configured(ctx.config().clone(), Vec::new());
                         actions.push(run.try_build()?);
 
                         // doc: single action (no reusable binary, §12.3).
@@ -332,11 +384,7 @@ impl Rule for CargoWorkspace {
                                                 release_flag,
                                             ),
                                         ),
-                                        &path_env,
-                                        &rustflags,
-                                        &toolchain,
-                                        &runtime,
-                                        &rust_env,
+                                        &setup,
                                     ),
                                     &sources,
                                 ),
@@ -368,11 +416,7 @@ impl Rule for CargoWorkspace {
                                                 release_flag,
                                             ),
                                         ),
-                                        &path_env,
-                                        &rustflags,
-                                        &toolchain,
-                                        &runtime,
-                                        &rust_env,
+                                        &setup,
                                     ),
                                     &sources,
                                 ),
@@ -433,35 +477,75 @@ impl CrateInfo {
     }
 }
 
-/// Build a base `cargo` action builder with the shared environment (toolchain on
-/// PATH, deterministic settings, and the axis-derived `RUSTFLAGS`). `command` is the
-/// full argv.
-fn cargo_builder(
-    name: String,
-    command: Vec<String>,
-    path_env: &str,
-    rustflags: &str,
-    toolchain: &Toolchain,
-    runtime: &Toolchain,
-    rust_env: &BTreeMap<String, String>,
-) -> ActionBuilder {
+/// The shared environment every `cargo` compiling/linking action runs with:
+/// the toolchains whose roots mount into the build (rust + posix runtime + any
+/// workspace `native_libs`), their merged env, the PATH spanning their bin dirs,
+/// and the axis-derived `RUSTFLAGS`. Built once per analysis; only the action name
+/// and command vary across the build/compile/doc/integration actions.
+struct CargoActionEnv<'a> {
+    path_env: &'a str,
+    rustflags: &'a str,
+    toolchain: &'a Toolchain,
+    runtime: &'a Toolchain,
+    native_libs: &'a [Toolchain],
+    env: &'a BTreeMap<String, String>,
+}
+
+/// Build a base `cargo` action builder with the shared [`CargoActionEnv`]: every
+/// toolchain attached (roots mounted), the merged env applied, and the axis-derived
+/// `RUSTFLAGS`. `command` is the full argv.
+fn cargo_builder(name: String, command: Vec<String>, setup: &CargoActionEnv) -> ActionBuilder {
     let mut builder = Action::builder(name, command)
-        .toolchain(toolchain.clone())
-        .toolchain(runtime.clone())
-        .env("PATH", path_env)
+        .toolchain(setup.toolchain.clone())
+        .toolchain(setup.runtime.clone());
+    // Native-lib toolchains: their closures mount read-only so the linker/build
+    // scripts find the libraries (their env joined `setup.env` already).
+    for lib in setup.native_libs {
+        builder = builder.toolchain(lib.clone());
+    }
+    builder = builder
+        .env("PATH", setup.path_env)
         .env("CARGO_TERM_COLOR", "never")
         .env("CARGO_INCREMENTAL", "0");
-    // The rust toolchain's declared env (e.g. DEVELOPER_DIR on macOS). Each is a
-    // store-path value, so it enters the action cache key like any other env.
-    for (key, value) in rust_env {
+    // The merged toolchain env (DEVELOPER_DIR on macOS, native-lib PATH/pkg-config/
+    // link flags). Each value is a store path, so it enters the action cache key.
+    for (key, value) in setup.env {
         builder = builder.env(key, value);
     }
     // Only set RUSTFLAGS when an axis actually changes a flag, so a default-config
     // build is byte-for-byte what plain `cargo` produces.
-    if !rustflags.is_empty() {
-        builder = builder.env("RUSTFLAGS", rustflags);
+    if !setup.rustflags.is_empty() {
+        builder = builder.env("RUSTFLAGS", setup.rustflags);
     }
     builder
+}
+
+/// Merge `additions` into `base`, erroring on a true conflict (same key set to a
+/// *different* value); same key + same value is idempotent. This layers a native
+/// lib's env onto the rust toolchain's. Path-like vars (`NIX_LDFLAGS`,
+/// `PKG_CONFIG_PATH`) that two libraries both set must be composed into a single
+/// toolchain in the flake — silently half-dropping one would be a subtle build
+/// breakage, so it fails loudly instead.
+fn merge_toolchain_env(
+    base: &mut BTreeMap<String, String>,
+    additions: BTreeMap<String, String>,
+    source: &str,
+) -> Result<(), RuleError> {
+    for (key, value) in additions {
+        match base.get(&key) {
+            Some(existing) if *existing != value => {
+                return Err(RuleError::Message(format!(
+                    "cargo_workspace native_libs env conflict on {key:?}: {source:?} sets it to \
+                     {value:?} but another toolchain set {existing:?}; compose these libraries \
+                     into a single toolchain in your flake so their values merge correctly"
+                )));
+            }
+            _ => {
+                base.insert(key, value);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Translate the `lto`, `debug_info`, `sanitizer`, and `coverage` axes into a
@@ -751,6 +835,7 @@ fn assembly_prelude(deps: &[LockDep]) -> String {
 fn target_state_shard(
     toolchain: &Toolchain,
     runtime: &Toolchain,
+    native_libs: &[Toolchain],
     sources: &[Artifact],
     ctx: &RuleContext,
 ) -> Vec<String> {
@@ -758,6 +843,15 @@ fn target_state_shard(
         toolchain.identity().to_owned(),
         runtime.identity().to_owned(),
     ];
+    // Native libs change what links into `target/`, so they must re-key the warm
+    // tree (else switching libpq versions could restore a stale, wrong-linked
+    // `target/` — §8.2). Sorted so list reordering in BUILD isn't a spurious bust.
+    let mut lib_identities: Vec<String> = native_libs
+        .iter()
+        .map(|t| t.identity().to_owned())
+        .collect();
+    lib_identities.sort();
+    shard.extend(lib_identities);
     shard.push(
         match sources
             .iter()
@@ -867,12 +961,47 @@ fn workspace_crates(ctx: &RuleContext) -> Result<Vec<CrateInfo>, RuleError> {
 
 #[cfg(test)]
 mod tests {
-    use super::rustflags_for;
+    use super::{merge_toolchain_env, rustflags_for};
     use anneal_core::{AxisValues, Coverage, DebugInfo, Lto, Sanitizer};
+    use std::collections::BTreeMap;
 
     #[test]
     fn default_config_emits_no_rustflags() {
         assert_eq!(rustflags_for(&AxisValues::default()), "");
+    }
+
+    #[test]
+    fn env_merge_layers_distinct_keys_and_is_idempotent() {
+        let mut base = BTreeMap::from([("DEVELOPER_DIR".to_owned(), "/sdk".to_owned())]);
+        merge_toolchain_env(
+            &mut base,
+            BTreeMap::from([("PKG_CONFIG_PATH".to_owned(), "/zlib/pc".to_owned())]),
+            "zlib",
+        )
+        .unwrap();
+        // Same key, same value from another lib is fine (idempotent), not a conflict.
+        merge_toolchain_env(
+            &mut base,
+            BTreeMap::from([("PKG_CONFIG_PATH".to_owned(), "/zlib/pc".to_owned())]),
+            "zlib-again",
+        )
+        .unwrap();
+        assert_eq!(base["DEVELOPER_DIR"], "/sdk");
+        assert_eq!(base["PKG_CONFIG_PATH"], "/zlib/pc");
+    }
+
+    #[test]
+    fn env_merge_conflict_on_different_value_is_a_hard_error() {
+        let mut base = BTreeMap::from([("PKG_CONFIG_PATH".to_owned(), "/openssl/pc".to_owned())]);
+        let err = merge_toolchain_env(
+            &mut base,
+            BTreeMap::from([("PKG_CONFIG_PATH".to_owned(), "/libpq/pc".to_owned())]),
+            "postgresql",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("PKG_CONFIG_PATH"), "names the key: {msg}");
+        assert!(msg.contains("conflict"), "calls it a conflict: {msg}");
     }
 
     #[test]

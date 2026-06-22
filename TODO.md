@@ -419,6 +419,33 @@ shape is shared across every package ecosystem.
         `fetch_mode_builds_a_registry_dep_offline` is now **gated on `ANNEAL_NETWORK_TESTS=1` instead of
         `#[ignore]`d** so a networked CI lane actually exercises fetch mode (it rotted silently twice behind
         the ignore). The sandboxed-command FOD form remains for user-authored fetch actions.
+- [ ] **Hermetic native (C/system) linking on macOS — the cc-wrapper environment.** Same root pattern as
+      the CA/gzip fetch bugs: the scrubbed sealed sandbox drops host toolchain context the Nix Darwin
+      clang-wrapper needs to link. **Probe (Linux, in a fresh Nix container) settled scope:** a plain Rust
+      binary links scrubbed on Linux because the gcc-wrapper *bakes* its lib paths (closure = mounted roots →
+      hermetic by construction); the macOS clang-wrapper does **not** — it stays passive until its *salted*
+      `NIX_CC_WRAPPER_TARGET_HOST_<arch>` flag + `NIX_LDFLAGS`/`NIX_CFLAGS_COMPILE` are present (libiconv et al.
+      live in nixpkgs, not the SDK). Replaying the full `NIX_*` env makes it link. **Done so far (groundwork):**
+      per-toolchain `env` in the manifest; the flake sets the rust toolchain's `DEVELOPER_DIR` on macOS (fixes
+      SDK *resolution* — the `xcrun ... unable to find sdk` warning is gone). **Remaining:** capture the curated
+      cc-wrapper env (host-context, allowlist — exclude build-noise like `NIX_BUILD_TOP` or it poisons the cache
+      key) and carry it as a generated env-file declared as a rust-toolchain root (clean content-digest in the
+      key; composes with native_libs). The "attach toolchains' env+roots to an action" mechanism is shared with
+      native_libs below.
+- [x] **`cargo_workspace` `native_libs` (workspace native libraries, Shape 2).** A workspace links a prebuilt
+      native lib (`libpq`/`openssl`/`zlib` via a `-sys` crate) by naming a manifest toolchain key:
+      `cargo_workspace(native_libs = ["zlib"])`. Each resolves (`nix_lib_toolchain`, tool-optional) to a
+      toolchain whose closure mounts read-only and whose env (`PKG_CONFIG_PATH`) + `pkg-config` bin dir join the
+      **compiling** actions; its roots also mount on the **run** action (dynamic libs needed at test runtime).
+      Env across libs (and the rust toolchain) is merged with a **hard error on conflict** (`merge_toolchain_env`
+      — compose path-vars into one toolchain in the flake). Native-lib identity folds into the `target/`
+      snapshot shard (else a lib bump could restore a stale, wrong-linked tree — §8.2). Declared, not inferred
+      (no `-sys`→nixpkgs auto-mapping). Flake exports `lib.mkNativeLibToolchain pkgs <pkg>` and ships `zlib` as
+      the worked example. Tests: tool-less resolution, env-merge conflict, and analysis-level attachment of
+      roots+env to compile and run actions. **Deferred:** promote to a first-class `native_lib` *target* (graph
+      visibility via `why`, reuse) if/when monorepo precision is wanted — accepting a BUILD-file migration; a
+      reusable "consumer builds its own manifest" helper so `mkNativeLibToolchain` is usable end-to-end
+      off-the-shelf; the same attach mechanism for `pnpm_workspace` (node-gyp).
 - [ ] **The per-ecosystem acquisition pattern (one shape everywhere).** Every modern ecosystem converged on the
       same two things — a lockfile with per-artifact hashes + an internal content-addressed store — which *is* the
       FOD shape: `lockfile {(coord, hash)} → one FOD fetch per artifact → assemble blobs into the tool's offline

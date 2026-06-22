@@ -75,6 +75,24 @@ pub(crate) fn nix_toolchain_env(name: &str) -> Result<BTreeMap<String, String>, 
         .unwrap_or_default())
 }
 
+/// Resolve a **native-library toolchain** from the manifest by name (the value of a
+/// `cargo_workspace` `native_libs` entry): a toolchain that contributes read-only
+/// roots (the library's closure) and env, and that may declare *zero* tools (a pure
+/// library) or some (e.g. `pkg-config`). Unlike [`nix_store_toolchain`], the caller
+/// doesn't pre-name the tools — every tool the manifest declares for the entry is
+/// resolved. An unknown name is a clean analysis error.
+pub(crate) fn nix_lib_toolchain(name: &str) -> Result<Toolchain, RuleError> {
+    let manifest = toolchain_manifest()?;
+    let declared = manifest.toolchains.get(name).ok_or_else(|| {
+        RuleError::Message(format!(
+            "native_libs references {name:?}, which the toolchain manifest does not declare; \
+             add it to your flake's manifest (e.g. via `mkNativeLibToolchain`)"
+        ))
+    })?;
+    let tools: Vec<&str> = declared.tools.keys().map(String::as_str).collect();
+    manifest_toolchain_from_manifest(manifest, name, &tools)
+}
+
 /// Build a PATH containing only declared toolchain bin directories.
 pub(crate) fn toolchain_path_env(toolchains: &[&Toolchain]) -> String {
     let mut dirs = Vec::new();
@@ -342,6 +360,33 @@ mod tests {
         )
         .unwrap();
         assert!(without_env.toolchains["nickel"].env.is_empty());
+    }
+
+    #[test]
+    fn tool_less_lib_toolchain_resolves_to_roots_only() {
+        // A `native_libs` entry can declare zero tools — just roots (a pure
+        // library). It must still resolve to a Toolchain carrying those roots,
+        // with no bin dirs. (`nix_lib_toolchain` passes the entry's declared
+        // tools, which may be empty, straight to this resolver.)
+        let mut toolchains = BTreeMap::new();
+        toolchains.insert(
+            "zlib".to_owned(),
+            ManifestToolchain {
+                tools: BTreeMap::new(),
+                read_only_roots: vec![PathBuf::from("/nix/store/abc-zlib")],
+                env: BTreeMap::new(),
+            },
+        );
+        let manifest = ToolchainManifest {
+            version: 1,
+            toolchains,
+        };
+        let tc = manifest_toolchain_from_manifest(&manifest, "zlib", &[]).unwrap();
+        assert_eq!(
+            tc.read_only_roots().to_vec(),
+            vec![PathBuf::from("/nix/store/abc-zlib")]
+        );
+        assert!(tc.bin_dirs().is_empty());
     }
 
     #[test]

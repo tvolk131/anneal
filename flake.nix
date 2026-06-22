@@ -7,6 +7,23 @@
   };
 
   outputs = { self, nixpkgs, flake-utils }:
+    let
+      # A native-library toolchain (the `cargo_workspace` `native_libs` target):
+      # a library a workspace links, exposed by manifest key. Bundles the lib's
+      # closure (mounted read-only into the build) + `pkg-config` (so a `-sys`
+      # crate's build script can discover it) + `PKG_CONFIG_PATH` env pointing at
+      # the lib's `.pc` files. Consumers call this to add libpq / openssl / etc.
+      # to their own manifest; `zlib` below is the worked example. Exposed as a
+      # system-independent `lib` output (it takes `pkgs`).
+      mkNativeLibToolchain = pkgs: libPkg:
+        let dev = libPkg.dev or libPkg;
+        in rec {
+          packages = [ pkgs.pkg-config libPkg dev ];
+          toolNames = [ "pkg-config" ];
+          closure = pkgs.closureInfo { rootPaths = packages; };
+          env = { PKG_CONFIG_PATH = "${dev}/lib/pkgconfig"; };
+        };
+    in
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
@@ -72,6 +89,11 @@
         ];
         nickelToolNames = [ "nickel" ];
 
+        # zlib: a real, broadly-useful native lib (libz-sys / flate2's zlib backend)
+        # and the worked example exercised by the cargo_workspace native_libs tests.
+        # Uses the `mkNativeLibToolchain` helper from the outer `let` (also exported).
+        zlibLib = mkNativeLibToolchain pkgs pkgs.zlib;
+
         rustClosure = pkgs.closureInfo { rootPaths = rustToolPackages; };
         runtimeClosure = pkgs.closureInfo { rootPaths = runtimeToolPackages; };
         nodeClosure = pkgs.closureInfo { rootPaths = nodeToolPackages; };
@@ -86,6 +108,7 @@
               ++ runtimeToolPackages
               ++ nodeToolPackages
               ++ nickelToolPackages
+              ++ zlibLib.packages
               ++ [ pkgs.jq ];
           }
           ''
@@ -139,6 +162,9 @@
             nickel_tools="$(json_tools ${shellWordList nickelToolNames})"
             nickel_roots="$(json_roots ${nickelClosure}/store-paths ${shellWordList nickelToolNames})"
             rust_env='${rustEnvJson}'
+            zlib_tools="$(json_tools ${shellWordList zlibLib.toolNames})"
+            zlib_roots="$(json_roots ${zlibLib.closure}/store-paths ${shellWordList zlibLib.toolNames})"
+            zlib_env='${builtins.toJSON zlibLib.env}'
 
             jq -n \
               --argjson rust_tools "$rust_tools" \
@@ -150,6 +176,9 @@
               --argjson node_roots "$node_roots" \
               --argjson nickel_tools "$nickel_tools" \
               --argjson nickel_roots "$nickel_roots" \
+              --argjson zlib_tools "$zlib_tools" \
+              --argjson zlib_roots "$zlib_roots" \
+              --argjson zlib_env "$zlib_env" \
               '{
                 version: 1,
                 toolchains: {
@@ -172,6 +201,11 @@
                     tools: $nickel_tools,
                     read_only_roots: $nickel_roots,
                     env: {}
+                  },
+                  zlib: {
+                    tools: $zlib_tools,
+                    read_only_roots: $zlib_roots,
+                    env: $zlib_env
                   }
                 }
               }' > "$out"
@@ -231,5 +265,10 @@
             echo "anneal dev shell — rustc $(rustc --version | cut -d' ' -f2), nickel $(nickel --version 2>/dev/null | cut -d' ' -f2), node $(node --version), pnpm $(pnpm --version)"
           '';
         };
-      });
+      }) // {
+        # System-independent: the helper a consumer flake uses to add a native
+        # library to its toolchain manifest (`mkNativeLibToolchain pkgs pkgs.postgresql`),
+        # then references from a BUILD `cargo_workspace(native_libs = [...])`.
+        lib.mkNativeLibToolchain = mkNativeLibToolchain;
+      };
 }

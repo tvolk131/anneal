@@ -302,6 +302,12 @@ impl Action {
         &self.env
     }
 
+    /// Toolchains attached to this action, keyed by name. Their `read_only_roots`
+    /// are mounted read-only in the sandbox and their identities enter the cache key.
+    pub fn toolchains(&self) -> &BTreeMap<String, Toolchain> {
+        &self.toolchains
+    }
+
     /// Declared outputs, keyed by logical output name.
     pub fn outputs(&self) -> &BTreeMap<String, PathBuf> {
         &self.outputs
