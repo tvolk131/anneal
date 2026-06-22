@@ -419,19 +419,24 @@ shape is shared across every package ecosystem.
         `fetch_mode_builds_a_registry_dep_offline` is now **gated on `ANNEAL_NETWORK_TESTS=1` instead of
         `#[ignore]`d** so a networked CI lane actually exercises fetch mode (it rotted silently twice behind
         the ignore). The sandboxed-command FOD form remains for user-authored fetch actions.
-- [ ] **Hermetic native (C/system) linking on macOS — the cc-wrapper environment.** Same root pattern as
+- [x] **Hermetic native (C/system) linking on macOS — the cc-wrapper environment.** Same root pattern as
       the CA/gzip fetch bugs: the scrubbed sealed sandbox drops host toolchain context the Nix Darwin
       clang-wrapper needs to link. **Probe (Linux, in a fresh Nix container) settled scope:** a plain Rust
       binary links scrubbed on Linux because the gcc-wrapper *bakes* its lib paths (closure = mounted roots →
       hermetic by construction); the macOS clang-wrapper does **not** — it stays passive until its *salted*
-      `NIX_CC_WRAPPER_TARGET_HOST_<arch>` flag + `NIX_LDFLAGS`/`NIX_CFLAGS_COMPILE` are present (libiconv et al.
-      live in nixpkgs, not the SDK). Replaying the full `NIX_*` env makes it link. **Done so far (groundwork):**
-      per-toolchain `env` in the manifest; the flake sets the rust toolchain's `DEVELOPER_DIR` on macOS (fixes
-      SDK *resolution* — the `xcrun ... unable to find sdk` warning is gone). **Remaining:** capture the curated
-      cc-wrapper env (host-context, allowlist — exclude build-noise like `NIX_BUILD_TOP` or it poisons the cache
-      key) and carry it as a generated env-file declared as a rust-toolchain root (clean content-digest in the
-      key; composes with native_libs). The "attach toolchains' env+roots to an action" mechanism is shared with
-      native_libs below.
+      `NIX_CC_WRAPPER_TARGET_HOST_<arch>=1` flag + `NIX_LDFLAGS` are present (libiconv et al. live in nixpkgs,
+      not the SDK). **Bisection** pinned the minimal link set to `NIX_LDFLAGS` + the two salted
+      `*_WRAPPER_TARGET_HOST` flags (dropping either fails); we capture the *full* curated set so the sandbox
+      `cc` matches a normal Nix build. **Fix:** a Darwin-only `runCommandCC` derivation captures its build-context
+      wrapper env (a plain `runCommand` sees empty/build-suffixed vars — must be CC-stdenv), filtered to an
+      allowlist via `jq $ENV`, folded into the manifest's `rust.env` (Option A — reuses the groundwork's
+      `rust.env`→`cargo_builder` path, *zero* Rust change). Excludes build-instance noise that would poison the
+      cache key or misbehave (`NIX_BUILD_TOP`, `NIX_BUILD_CORES`, `NIX_SSL_CERT_FILE=/no-cert-file.crt` (!),
+      `NIX_ENFORCE_*`, the `_FOR_BUILD` twins, `PATH`). Closure-complete: every `-L` path is already a mounted
+      rust root (via `stdenv.cc`). Linux's `rust.env` stays `{}` (probe-confirmed). Composes with `native_libs`
+      (same `cargo_builder` env merge, hard-error on conflict). *Deferred refinement:* carry it as an env-file
+      root keyed by content-digest (Option B) instead of spraying values into the key — marginal, not worth it
+      yet since the values are store paths already in the toolchain identity.
 - [x] **`cargo_workspace` `native_libs` (workspace native libraries, Shape 2).** A workspace links a prebuilt
       native lib (`libpq`/`openssl`/`zlib` via a `-sys` crate) by naming a manifest toolchain key:
       `cargo_workspace(native_libs = ["zlib"])`. Each resolves (`nix_lib_toolchain`, tool-optional) to a

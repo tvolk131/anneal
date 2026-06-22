@@ -44,14 +44,56 @@
         rustToolNames = [ "cargo" "rustc" "cc" ]
           ++ lib.optionals pkgs.stdenv.isDarwin [ "xcrun" ];
 
-        # Per-toolchain environment the manifest carries for rules to apply to
-        # their actions (NOT general sandbox env). The rust toolchain needs
-        # DEVELOPER_DIR on macOS so `xcrun`/rustc can locate the pinned SDK; the
-        # value is a store path covered by the rust roots above, so it enters
-        # both the toolchain identity and (when a rule sets it) the action key.
-        rustEnvJson = builtins.toJSON (lib.optionalAttrs pkgs.stdenv.isDarwin {
-          DEVELOPER_DIR = "${pkgs.apple-sdk}";
-        });
+        # The rust toolchain's per-action environment the manifest carries for the
+        # `cargo_workspace` rule to apply (NOT general sandbox env). On macOS the
+        # Nix clang-wrapper is *passive* until its salted `NIX_CC_WRAPPER_TARGET_HOST`
+        # flag + `NIX_LDFLAGS` are present, and the scrubbed sandbox strips them —
+        # so a crate linking a system/nixpkgs lib (libiconv, …) fails with
+        # `library not found`. We re-supply exactly the wrapper's link/compile
+        # environment, captured in a real CC-stdenv build context (a plain
+        # `runCommand` sees empty/build-suffixed vars — this must be `runCommandCC`),
+        # filtered to a curated allowlist. Every value is a `/nix/store` path already
+        # covered by the rust roots above (closure-complete), so it stays hermetic and
+        # enters the action+snapshot key honestly. Linux's gcc-wrapper *bakes* these
+        # paths into itself, so Linux needs nothing — its rust.env is empty (probe-
+        # confirmed). Bisection showed `NIX_LDFLAGS` + the two salted `*_TARGET_HOST`
+        # flags are the minimal link set; we capture the full set so the sandbox `cc`
+        # matches a normal Nix build. Excludes build-instance noise (`NIX_BUILD_TOP`,
+        # `NIX_SSL_CERT_FILE=/no-cert-file.crt` which would break TLS, the `_FOR_BUILD`
+        # twins, `PATH`) that would poison the cache key or misbehave at run time.
+        rustLinkEnvAllow = [
+          "DEVELOPER_DIR"
+          "SDKROOT"
+          "NIX_APPLE_SDK_VERSION"
+          "NIX_CFLAGS_COMPILE"
+          "NIX_LDFLAGS"
+          "NIX_HARDENING_ENABLE"
+          "NIX_DONT_SET_RPATH"
+          "NIX_IGNORE_LD_THROUGH_GCC"
+          "NIX_NO_SELF_RPATH"
+        ];
+        # Always a derivation emitting a JSON env map: the captured wrapper env on
+        # macOS, an empty object on Linux. The manifest folds it into `rust.env`.
+        rustLinkEnv =
+          if pkgs.stdenv.isDarwin then
+            pkgs.runCommandCC "anneal-rust-link-env.json"
+              { nativeBuildInputs = [ pkgs.jq ]; }
+              ''
+                jq -n --argjson allow ${
+                  lib.escapeShellArg (builtins.toJSON rustLinkEnvAllow)
+                } '
+                  $ENV
+                  | to_entries
+                  | map(select(
+                      (.key as $k | $allow | index($k))
+                      or (.key | startswith("NIX_CC_WRAPPER_TARGET_HOST_"))
+                      or (.key | startswith("NIX_BINTOOLS_WRAPPER_TARGET_HOST_"))
+                    ))
+                  | from_entries
+                ' > "$out"
+              ''
+          else
+            pkgs.runCommand "anneal-rust-link-env.json" { } ''printf '{}' > "$out"'';
 
         runtimeToolPackages = with pkgs; [
           bash
@@ -161,7 +203,7 @@
             node_roots="$(json_roots ${nodeClosure}/store-paths ${shellWordList nodeToolNames})"
             nickel_tools="$(json_tools ${shellWordList nickelToolNames})"
             nickel_roots="$(json_roots ${nickelClosure}/store-paths ${shellWordList nickelToolNames})"
-            rust_env='${rustEnvJson}'
+            rust_env="$(cat ${rustLinkEnv})"
             zlib_tools="$(json_tools ${shellWordList zlibLib.toolNames})"
             zlib_roots="$(json_roots ${zlibLib.closure}/store-paths ${shellWordList zlibLib.toolNames})"
             zlib_env='${builtins.toJSON zlibLib.env}'
