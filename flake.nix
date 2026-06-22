@@ -77,25 +77,37 @@
           "NIX_IGNORE_LD_THROUGH_GCC"
           "NIX_NO_SELF_RPATH"
         ];
-        # Always a derivation emitting a JSON env map: the captured wrapper env on
-        # macOS, an empty object on Linux. The manifest folds it into `rust.env`.
+        # Capture is split in two so the capture tool can't contaminate the capture:
+        #
+        #   1. `rustLinkRawEnv` — a CC-stdenv build with **no extra inputs** dumps its
+        #      raw environment. Any package added here (even just to run a tool) would
+        #      have the cc-wrapper setup hook fold *its* dev/lib paths into
+        #      NIX_CFLAGS_COMPILE/NIX_LDFLAGS — so it stays bare. The dumped vars we
+        #      keep are all single-line, so a newline-delimited `env` dump is safe.
+        #   2. `rustLinkEnv` — a plain build (jq here is fine; it only reads the file,
+        #      its own env is irrelevant) filters that dump to the allowlist and emits
+        #      JSON, which the manifest folds into `rust.env`.
+        #
+        # On Linux the gcc-wrapper bakes its paths in, so rust.env is empty — no capture.
+        rustLinkRawEnv = pkgs.runCommandCC "anneal-rust-link-rawenv" { } ''env > "$out"'';
         rustLinkEnv =
           if pkgs.stdenv.isDarwin then
-            pkgs.runCommandCC "anneal-rust-link-env.json"
+            pkgs.runCommand "anneal-rust-link-env.json"
               { nativeBuildInputs = [ pkgs.jq ]; }
               ''
-                jq -n --argjson allow ${
+                jq -Rn --argjson allow ${
                   lib.escapeShellArg (builtins.toJSON rustLinkEnvAllow)
                 } '
-                  $ENV
-                  | to_entries
-                  | map(select(
-                      (.key as $k | $allow | index($k))
-                      or (.key | startswith("NIX_CC_WRAPPER_TARGET_HOST_"))
-                      or (.key | startswith("NIX_BINTOOLS_WRAPPER_TARGET_HOST_"))
-                    ))
-                  | from_entries
-                ' > "$out"
+                  reduce inputs as $line ({};
+                    ($line | index("=")) as $i
+                    | if $i == null then . else
+                        ($line[0:$i]) as $k | ($line[$i + 1:]) as $v
+                        | if ($allow | index($k))
+                             or ($k | startswith("NIX_CC_WRAPPER_TARGET_HOST_"))
+                             or ($k | startswith("NIX_BINTOOLS_WRAPPER_TARGET_HOST_"))
+                          then . + { ($k): $v } else . end
+                      end)
+                ' < ${rustLinkRawEnv} > "$out"
               ''
           else
             pkgs.runCommand "anneal-rust-link-env.json" { } ''printf '{}' > "$out"'';
