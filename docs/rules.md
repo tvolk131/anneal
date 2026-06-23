@@ -13,12 +13,15 @@
 Strip away intent and the `Rule` trait says exactly what a rule is:
 
 ```
-analyze(ctx) -> Analysis { actions, providers }
+analyze(ctx) -> Analysis { actions, providers, routed_data }
 ```
 
 **A rule is a pure function from a configured-target context to a slice of the action
-graph plus a set of providers.** That is the entire contract. Everything else in this
-document is an *obligation* or a *freedom* of that function — not a separate mechanism.
+graph plus a set of providers.** That pair is the entire *semantic* contract — `actions` are
+the work, `providers` are the interface upward. The third field, `routed_data`, carries no
+build semantics; it is a materialization affordance derived from the actions (broken down
+below). Everything else in this document is an *obligation* or a *freedom* of that function —
+not a separate mechanism.
 
 Two consequences fall directly out of "pure function, run in the analysis phase":
 
@@ -28,6 +31,35 @@ Two consequences fall directly out of "pure function, run in the analysis phase"
   *static declared structure* only. (This is the §14.6 phase wall — the reason a generated
   `Cargo.toml` / `pnpm-workspace.yaml` is impossible to consume as an edge, but a generated
   `config.json` is fine.)
+
+### What `analyze` returns
+
+`Analysis` has three fields, and they are deliberately *not* co-equal — two are the contract,
+one is an affordance:
+
+- **`actions` — the work.** A slice of the action graph: coarse units the engine schedules,
+  keys, sandboxes, and runs (the rule never runs them — the phase wall above). This is *what
+  gets done*, and it is the sole thing that determines the build's outputs.
+- **`providers` — the interface offered upward.** What this target exposes to anything that
+  depends on it (`FileSet` today; the broader typed-provider vocabulary — `TestSuite`,
+  `LibraryInfo`, … — is `build-system-design.md` §5.5). Providers flow *up*, configuration flows
+  *down* (§5.4). Routing a generated artifact across a language boundary is entirely a
+  provider/consumer story (§14): a `nickel_eval` exposes its JSON as a provider; a consumer
+  picks it up. This is *what the target offers*.
+- **`routed_data` — the consumer-side materialization map.** The generated files *this*
+  target's actions consume at tree-shaped paths — the resolved `data` routing, each artifact's
+  `path` being the package-relative spot the inner tool reads it as if it were a source. It is
+  **not new information**: the dependency already lives in `actions` as an input edge. This field
+  re-surfaces *which generated inputs land at which working-tree paths* so `anneal materialize`
+  can mirror the sandbox's input view into the developer's working tree for native tools
+  (`cargo run`, rust-analyzer). Drop it and the build is byte-identical — only `materialize`
+  loses its map. It excludes sources (already in the tree) and sandbox plumbing (fetched
+  `.crate` blobs, vendor assembly); most provider-only rules leave it empty.
+
+The asymmetry is the point. `actions` + `providers` define the build; `routed_data` only lets a
+tooling command reconstruct what a build *sees*. A rule that gets `routed_data` wrong yields a
+worse `materialize` experience, never a wrong build — which is exactly why it sits *outside* the
+§6 trust-boundary's correctness duties.
 
 ## 2. The eight obligations
 
