@@ -290,7 +290,128 @@ key on its *version* and deliver the binary, rather than hashing it into every a
 data identified by a coarse key and delivered into the sandbox is the snapshot pattern, not the
 Output pattern.
 
-## 6. Checklist for designing a new rule
+### How the snapshot key is formed — conservative by construction
+
+The snapshot's *content* is re-derivable (above); its **key** — "which warm tree is safe to
+reuse here?" — is engine-derived and deliberately conservative. It keys on everything that
+could make reuse unsafe (toolchain identity, the lockfile digest, the target triple, the
+consumed axes, any native-library identities — `cargo_workspace.rs::target_state_shard`) and
+excludes only the one thing the wrapped tool absorbs incrementally: the workspace **source
+tree**. A source edit is caught by the *action* key (every source file is a declared input)
+and merely absorbed by the tool's own fingerprinting inside the warm tree; a toolchain / dep
+/ flag change re-keys the snapshot and forces a cold tree.
+
+There is deliberately **no "incremental-safe" exclusion verb.** A rule cannot tell the engine
+"this input or env doesn't affect the warm tree, leave it out of the key." The only
+incrementality judgment the API admits is coarse and categorical — *which directory is the
+wrapped tool's incremental domain* — and it is carried by the **declaration channel**
+(`source_tree(".")` = the tool's incremental domain → excluded; explicit `input()` / lockfile
+/ `data` → keyed), never by a per-input flag. Conservative-by-default falls straight out of
+the vocabulary: anything not routed through the tool-domain channel is keyed, so a rule errs
+only ever toward *more* cold rebuilds (a performance cost) — never toward an under-keyed warm
+tree (a §1.4 violation).
+
+This is the cacheability foot-gun stance (§4) one level down. A finer incrementality claim
+would be a **cost-free, engine-unverifiable trust with no revocation lever** — precisely the
+shape the design refuses everywhere (a consumer's levers move only *toward* non-cacheable;
+cache *tier* may be restricted, never escalated). And it buys nothing legitimate: every input
+a rule might want to mark incremental-safe is either the source tree (already excluded), an
+output-relevant input (excluding it *is* the cardinal sin), or an output-irrelevant input
+that churns — and the last is already an anti-pattern poisoning the *action* key too, whose
+correct fix is to stop feeding it to the action (fixing both caches). The verb has no honest
+use and only foot-gun potential.
+
+**Guaranteed vs. trusted is the pure-vs-stateful line.** A structural neutrality *guarantee*
+exists for content-addressed accelerators — the action cache reuses an output keyed on its
+inputs' content, neutral by construction, trusting no tool behavior. It does **not** exist for
+the stateful snapshot, whose neutrality is a property of the wrapped tool's internal
+incrementality: a counterfactual about the cold build the engine can neither observe nor
+enforce, only sample (§4's one-sided harness). That line is the price of "wrap, don't
+decompose" (`build-system-design.md` §3.2) — the only way to *earn* a structural guarantee for
+the fine-grained layer is to own incrementality yourself (shatter the build into per-unit
+content-addressed actions), which is the decomposition anneal exists not to do. So the
+snapshot's neutrality is **trusted, not guaranteed**, and the design makes that trust safe
+rather than pretending it away:
+
+- **Minimized** — keyed conservatively, the warm tree absorbs only source edits, so the trust
+  reduces to one universally-relied-on property: the wrapped tool recompiles changed sources
+  correctly. (anneal in fact trusts the tool *less* than its own default does — a developer's
+  `target/` survives toolchain and dep changes too, leaning on cargo's fingerprint for all of
+  them; anneal re-keys cold on those.)
+- **Contained** — snapshot owners are capped at the `Local` cache tier
+  (`anneal-exec/src/trust.rs`), so warm-derived outputs are never promoted to the
+  shared/remote cache, which is populated only by the cold Hermetic arm (content-addressed,
+  full identity). A neutrality violation therefore poisons one machine — recoverable with
+  `anneal clean` — and never the team.
+- **Revocable** — the attestation epoch folds into the state key (`anneal-rules/src/state.rs`),
+  so a discovered tool-incrementality bug is retracted by one constant bump that mass-
+  invalidates every warm tree derived under it. You cannot *prevent* the violation; you can
+  globally *withdraw* the trust once it is known.
+
+*(Known residual, tracked in `TODO.md`: env enters the action key but not yet the snapshot
+shard, so a build script that reads an env var without declaring `cargo:rerun-if-env-changed`
+could reuse a stale warm tree on an env change. `cargo_workspace` is currently safe — its
+action env is either closure-derived, hence captured via toolchain identity in the shard;
+axis-derived, hence in the shard; or constant — but the structural fix, folding author-added
+env into the snapshot key or forbidding it on snapshot owners, is open work.)*
+
+## 6. The trust boundary — what a rule can and can't enforce
+
+> The specific ruling behind this section — *no incremental-safe exclusion verb*, the
+> conservative engine-derived snapshot key, the `Local`-cap containment, and the alternatives
+> weighed and rejected — is recorded in
+> `docs/decisions/0001-snapshot-keying-and-the-rule-trust-boundary.md`.
+
+Everything above resolves into one picture: a rule makes the engine a handful of promises, and
+the engine's safety rests on knowing, for each, whether it can **enforce** the promise,
+**derive** it, only **verify** it as a sanity check, or merely **trust** it — because that is
+exactly what decides what happens when a rule gets it wrong.
+
+A rule author therefore has **two correctness duties, and they are orthogonal — neither
+backstops the other:**
+
+- **Input completeness** (the *action* key): declare every input that affects the output, and
+  feed the action nothing output-irrelevant. This governs *"do we re-run when something that
+  matters changed?"* It is **enforced** — the sandbox mounts exactly the declared inputs, so an
+  undeclared read fails (loudly on Linux by construction; best-effort on macOS,
+  `docs/sandboxing.md`). Under-declaration is the §1.4 cardinal sin, but enforcement converts it
+  from a silent stale output into a build failure.
+- **State neutrality** (the *snapshot*): restoring the warm tool-state must never change the
+  output versus a cold build. This governs *"is a warm re-run the same as a cold one?"* It is
+  **not** enforceable — it is the wrapped tool's internal property (§5), so it is trusted,
+  sampled by the double-build harness, contained by the `Local` tier cap, and revocable by the
+  attestation epoch.
+
+They do not substitute for each other. A complete action key does **not** rescue a non-neutral
+snapshot: the changed input correctly triggers a re-run, but that re-run reuses the stale warm
+tree and then *caches the wrong output under the now-correct key*. A neutral snapshot does not
+rescue an incomplete action key: the action never re-runs at all. Both duties are independently
+necessary — the lockfile sits in **both** keys for exactly this reason (§5).
+
+The full map of what the engine does with each rule-shaped promise:
+
+| Promise | Engine's stance | Mechanism | If the rule is wrong |
+|---|---|---|---|
+| Declared inputs are complete | **Enforced** (Linux) / best-effort (macOS) | sandbox mounts only declared inputs; undeclared read fails | Loud failure (enforced); silent stale output where best-effort — the §1.4 sin |
+| Output is reproducible | **Verified** — falsifiable, not provable | off-hot-path double-build byte-compare, one-sided error (§4) | Stays non-cacheable (the safe default) until observed reproducible |
+| Result is cacheable / its cache tier | **Derived, never claimed** | engine computes; rule/consumer levers move only *toward* non-cacheable / a *lower* tier | Cannot err in the unsafe direction — there is no lever toward more-cacheable |
+| Snapshot key is complete | **Engine-derived, conservative** | everything keyed except the tool's incremental domain; no exclusion verb (§5) | Over-key → cold rebuild (performance); under-key is structurally hard to express |
+| Snapshot is neutral | **Trusted** + sampled + contained + revocable | tool's own incrementality; harness samples; `Local` cap; epoch revokes | Silent wrong output — but quarantined to one machine, recoverable, never the shared cache, revocable |
+| State directories are complete | **Trusted** (a rule declaration) | rule names the interleaved-state paths | Incomplete set → a non-neutral snapshot (folds into the row above) |
+
+The principle the table makes explicit — and the one to hold while authoring a rule — is that
+**the API is deliberately shaped so a rule cannot make an engine-trusted claim which, if wrong,
+silently miscaches.** Every rule- and consumer-expressible lever moves toward the *safe* (more
+conservative) side — non-cacheable, lower tier, more cold rebuilds — and none toward the
+dangerous side. The single trust that *cannot* be designed away (snapshot neutrality, because it
+is the wrapped tool's property and erasing it would mean abandoning "wrap, don't decompose") is
+not left bare: it is minimized to one well-understood property, contained to a single machine,
+and made revocable. So a rule author's job is not to *assert* correctness to the engine — the
+API mostly forbids that — but to *earn* it: declare inputs and state paths honestly so the
+enforced and derived machinery can work, and remove nondeterminism so the verifier can graduate
+the cache.
+
+## 7. Checklist for designing a new rule
 
 1. **What does it wrap, and where is the fixed structure?** Locate the rule on the
    inference↔declaration spectrum (§3). Infer what the ecosystem makes knowable; require the
@@ -304,3 +425,8 @@ Output pattern.
    *derived, reproducibility-verified* property of a *sealed* action, never a user claim
    (§4).
 7. **What is the BUILD-file schema?** Its public API (obligation 8).
+8. **Re-read §6: is every promise your rule makes one the engine can enforce, derive, or
+   contain-and-revoke — never a bare trusted claim that silently miscaches if wrong?** If your
+   rule needs to *assert* a correctness property to the engine (rather than declare inputs/state
+   honestly and let the machinery work), treat that as a design smell and find the conservative
+   formulation instead.
