@@ -112,7 +112,6 @@ impl Rule for NickelEval {
         Ok(Analysis {
             actions: vec![action.try_build()?],
             providers,
-            routed_data: Vec::new(),
         })
     }
 }

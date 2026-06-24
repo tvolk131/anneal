@@ -38,6 +38,19 @@ pub struct Input {
     /// the materializer uses a distinct writable copy rather than a CAS hardlink/clone,
     /// and the Linux sandbox does not overmount this path read-only.
     pub writable: bool,
+    /// Whether this input is a **generated file the inner tool reads at a tree-shaped
+    /// path** that `anneal materialize` should mirror into the developer's working tree
+    /// (so native tools — `cargo run`, rust-analyzer — see what the sandbox sees). The
+    /// analyzer derives a target's routed-data view from the inputs carrying this flag;
+    /// there is no separate `Analysis.routed_data` field. It marks the rule's declaration
+    /// that this edge is contract-visible generated data, NOT sandbox plumbing (a fetched
+    /// `.crate`, a vendored tree) — a distinction the engine cannot infer structurally.
+    ///
+    /// It is a **materialize affordance, not build identity**: deliberately EXCLUDED from
+    /// the action cache key (`cache.rs::action_digest` writes inputs field-by-field and
+    /// never folds this in — like `writable` is folded but this is not). Two actions
+    /// differing only in `mirror_to_tree` MUST hash identically.
+    pub mirror_to_tree: bool,
 }
 
 /// A host toolchain made visible to an action.
@@ -562,6 +575,7 @@ impl ActionBuilder {
                 path: path.into(),
                 source: InputSource::Blob(digest),
                 writable: false,
+                mirror_to_tree: false,
             },
         );
         self
@@ -585,6 +599,7 @@ impl ActionBuilder {
                 path: path.into(),
                 source: InputSource::Blob(digest),
                 writable: true,
+                mirror_to_tree: false,
             },
         );
         self
@@ -609,6 +624,7 @@ impl ActionBuilder {
                     name: output_name.into(),
                 },
                 writable: false,
+                mirror_to_tree: false,
             },
         );
         self
@@ -631,6 +647,37 @@ impl ActionBuilder {
                     name: output_name.into(),
                 },
                 writable: true,
+                mirror_to_tree: false,
+            },
+        );
+        self
+    }
+
+    /// Declare an input from another action's output that is **dev-tree-visible
+    /// generated data** (`mirror_to_tree`): identical to [`input_from_output`] but flags
+    /// the input so `anneal materialize` mirrors it into the working tree. Use this for a
+    /// rule's consumed `data`/routed edges (a generated `config.json`, a routed file) —
+    /// NOT for sandbox plumbing (a fetched `.crate`, an internal test binary), which use
+    /// the plain [`input_from_output`].
+    ///
+    /// [`input_from_output`]: Self::input_from_output
+    pub fn routed_input_from_output(
+        mut self,
+        name: impl Into<String>,
+        path: impl Into<PathBuf>,
+        action_id: impl Into<String>,
+        output_name: impl Into<String>,
+    ) -> Self {
+        self.action.inputs.insert(
+            name.into(),
+            Input {
+                path: path.into(),
+                source: InputSource::Output {
+                    action: action_id.into(),
+                    name: output_name.into(),
+                },
+                writable: false,
+                mirror_to_tree: true,
             },
         );
         self

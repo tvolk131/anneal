@@ -139,7 +139,6 @@ impl Rule for PnpmWorkspace {
 
         // --- per-script actions: SnapshotConsuming (restore node_modules read-only) ---
         let mut provided: Vec<Artifact> = Vec::new();
-        let mut routed_data: Vec<Artifact> = Vec::new();
         if let Some(scripts) = ctx.attrs().dict_opt("scripts")? {
             // Scripts need the actual source to run; install does not.
             let sources = ctx.source_tree(Path::new("."), IGNORED_DIRS)?;
@@ -228,9 +227,6 @@ impl Rule for PnpmWorkspace {
                     }
                 }
             }
-            // Each routed artifact's path is its per-edge destination — the
-            // in-sandbox tree path `materialize` parks it at.
-            routed_data = routed;
         }
 
         let providers = if provided.is_empty() {
@@ -241,11 +237,7 @@ impl Rule for PnpmWorkspace {
             }
         };
 
-        Ok(Analysis {
-            actions,
-            providers,
-            routed_data,
-        })
+        Ok(Analysis { actions, providers })
     }
 }
 
@@ -340,14 +332,17 @@ fn with_routed(mut builder: ActionBuilder, routed: &[Artifact]) -> ActionBuilder
     for artifact in routed {
         let name = artifact.path.to_string_lossy().into_owned();
         match &artifact.source {
+            // Source-backed routed file: already in the tree, plain input.
             ArtifactSource::Source(digest) => {
                 builder = builder.input(name, artifact.path.clone(), *digest);
             }
+            // Generated routed file at its per-edge dest: mirror it to the tree.
             ArtifactSource::Output {
                 action,
                 name: output,
             } => {
-                builder = builder.input_from_output(name, artifact.path.clone(), action, output);
+                builder =
+                    builder.routed_input_from_output(name, artifact.path.clone(), action, output);
             }
         }
     }

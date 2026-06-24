@@ -44,7 +44,6 @@ impl Rule for FileGroup {
             providers: ProviderSet {
                 files: Some(FileSet { files }),
             },
-            routed_data: Vec::new(),
         })
     }
 }
@@ -66,15 +65,13 @@ impl Rule for Alias {
         let dep = ctx.deps().first().ok_or_else(|| {
             RuleError::Message("alias requires its `actual` target to be resolved".to_owned())
         })?;
-        // Providers forward; routed data does not. A routed destination is
-        // package-relative to the *consuming* target, and an alias may live in
-        // a different package — forwarding would re-home the dest into the
-        // alias's package, which is not where the actual target's sandbox
-        // stages it. `materialize` the actual target instead.
+        // Providers forward to dependents; routing does not. routed-data lives on a
+        // target's own action inputs, and an alias emits none — so it structurally
+        // routes nothing (no actions ⇒ no mirror_to_tree inputs ⇒ empty derived view),
+        // exactly the intended cross-package behavior, now without a special case.
         Ok(Analysis {
             actions: Vec::new(),
             providers: dep.providers.clone(),
-            routed_data: Vec::new(),
         })
     }
 }
@@ -114,13 +111,11 @@ impl Rule for GenRule {
         for src in direct_srcs {
             inputs.push(ctx.source_artifact(Path::new(src))?);
         }
-        let mut routed_data: Vec<Artifact> = Vec::new();
         for dep in ctx.deps() {
             if let Some(file_set) = &dep.providers.files {
-                routed_data.extend(file_set.files.iter().cloned());
+                inputs.extend(file_set.files.iter().cloned());
             }
         }
-        inputs.extend(routed_data.iter().cloned());
 
         // `$(SRCS)` expands to every input path; `$(OUTS)` to every output path.
         let srcs_joined = inputs
@@ -148,12 +143,19 @@ impl Rule for GenRule {
                 ArtifactSource::Source(digest) => {
                     builder = builder.input(name, artifact.path.clone(), *digest);
                 }
+                // A dep-provided generated file is this target's routed data — flag it
+                // mirror_to_tree so the analyzer's derived view (and `materialize`) sees
+                // it. genrule's only Output inputs are dep-provided data.
                 ArtifactSource::Output {
                     action: producer,
                     name: output,
                 } => {
-                    builder =
-                        builder.input_from_output(name, artifact.path.clone(), producer, output);
+                    builder = builder.routed_input_from_output(
+                        name,
+                        artifact.path.clone(),
+                        producer,
+                        output,
+                    );
                 }
             }
         }
@@ -184,7 +186,6 @@ impl Rule for GenRule {
                     files: provided_outputs,
                 }),
             },
-            routed_data,
         })
     }
 }

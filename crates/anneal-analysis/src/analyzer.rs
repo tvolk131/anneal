@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 
 use anneal_cas::Cas;
 use anneal_core::{Configuration, ExecMode, Label};
-use anneal_exec::{Action, LocalExecutor};
+use anneal_exec::{Action, InputSource, LocalExecutor};
 use anneal_loader::TargetGraph;
 use anneal_rules::{
-    Artifact, ProviderSet, ResolvedDep, RuleContext, RuleRegistry, SourcePathRecorder,
-    StateRegistry,
+    Artifact, ArtifactSource, ProviderSet, ResolvedDep, RuleContext, RuleRegistry,
+    SourcePathRecorder, StateRegistry,
 };
 
 use crate::error::AnalysisError;
@@ -26,9 +26,11 @@ pub struct AnalyzedTarget {
     pub providers: ProviderSet,
     /// Actions contributed by this target (often empty for provider-only rules).
     pub actions: Vec<Action>,
-    /// The generated files this target's actions consume at tree-shaped paths
-    /// (the rule's `Analysis::routed_data`), with each `path` re-homed to a
-    /// **workspace-relative** destination — what `anneal materialize` parks.
+    /// The generated files this target's actions consume at tree-shaped paths —
+    /// **derived** from the action inputs flagged `mirror_to_tree`, each `path`
+    /// re-homed to a **workspace-relative** destination. This is the view `anneal
+    /// materialize` parks; it is not a rule-authored field but a projection of the
+    /// imports (a single source of truth — the action inputs).
     pub routed_data: Vec<Artifact>,
 }
 
@@ -283,17 +285,35 @@ impl<'a> Analyzer<'a> {
 
         in_progress.remove(label);
         order.push(label.clone());
-        // Rules declare routed destinations package-relative (all a rule can
-        // see); re-home them to workspace-relative here, where the package is
-        // known — so consumers of the graph never re-derive it.
-        let routed_data = analysis
-            .routed_data
-            .into_iter()
-            .map(|artifact| Artifact {
-                path: workspace_relative_path(decl.label.package(), &artifact.path),
-                source: artifact.source,
-            })
-            .collect();
+        // Derive the routed-data view (what `anneal materialize` mirrors) from this
+        // target's own actions: every input flagged `mirror_to_tree` is a generated
+        // file the inner tool reads at a tree path. Re-home each to its
+        // workspace-relative destination — composing the action's working directory,
+        // not just the package (the package alone was a latent bug for any future
+        // non-"." working dir) — and dedup, since the same routed file is attached to
+        // several compiling actions (cargo's build/compile/doc/integration) yet should
+        // appear once. No rule-authored list: the inputs are the single source of truth.
+        let mut routed_data: Vec<Artifact> = Vec::new();
+        for action in &analysis.actions {
+            for input in action.inputs().values() {
+                if !input.mirror_to_tree {
+                    continue;
+                }
+                let artifact = Artifact {
+                    path: action_workspace_path(&decl.label, action, &input.path),
+                    source: match &input.source {
+                        InputSource::Blob(digest) => ArtifactSource::Source(*digest),
+                        InputSource::Output { action, name } => ArtifactSource::Output {
+                            action: action.clone(),
+                            name: name.clone(),
+                        },
+                    },
+                };
+                if !routed_data.contains(&artifact) {
+                    routed_data.push(artifact);
+                }
+            }
+        }
         targets.insert(
             label.clone(),
             AnalyzedTarget {

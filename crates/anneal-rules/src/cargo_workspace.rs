@@ -433,14 +433,11 @@ impl Rule for CargoWorkspace {
             },
         )?;
 
+        // The routed-data view (what `materialize` parks) is derived by the analyzer
+        // from the `data` inputs `with_data` flagged `mirror_to_tree`; no separate field.
         Ok(Analysis {
             actions,
             providers: ProviderSet::default(),
-            // The `data` artifacts are staged at their provider paths in the
-            // build tree — exactly the set `materialize` parks for native
-            // tools. Fetched `.crate` blobs enter via `with_crates`, not
-            // `data`, so sandbox plumbing is excluded by construction.
-            routed_data: data,
         })
     }
 }
@@ -601,14 +598,20 @@ fn with_data(mut builder: ActionBuilder, data: &[Artifact]) -> ActionBuilder {
     for artifact in data {
         let name = artifact.path.to_string_lossy().into_owned();
         match &artifact.source {
+            // A source-backed `data` file is already in the tree; it flows in as a plain
+            // input (materialize skips sources anyway).
             ArtifactSource::Source(digest) => {
                 builder = builder.input(name, artifact.path.clone(), *digest);
             }
+            // A generated `data` file is dev-tree-visible: route it (mirror_to_tree) so
+            // `anneal materialize` parks it for native tools. (Fetched `.crate` plumbing
+            // enters via `with_crates` with the plain edge, so it is never routed.)
             ArtifactSource::Output {
                 action,
                 name: output,
             } => {
-                builder = builder.input_from_output(name, artifact.path.clone(), action, output);
+                builder =
+                    builder.routed_input_from_output(name, artifact.path.clone(), action, output);
             }
         }
     }

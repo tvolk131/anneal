@@ -13,15 +13,16 @@
 Strip away intent and the `Rule` trait says exactly what a rule is:
 
 ```
-analyze(ctx) -> Analysis { actions, providers, routed_data }
+analyze(ctx) -> Analysis { actions, providers }
 ```
 
 **A rule is a pure function from a configured-target context to a slice of the action
-graph plus a set of providers.** That pair is the entire *semantic* contract — `actions` are
-the work, `providers` are the interface upward. The third field, `routed_data`, carries no
-build semantics; it is a materialization affordance derived from the actions (broken down
-below). Everything else in this document is an *obligation* or a *freedom* of that function —
-not a separate mechanism.
+graph plus a set of providers.** That pair is the entire contract — `actions` are the work
+(their *inputs* are this target's imports), `providers` are the interface upward. There is no
+third field: the materialization view that `anneal materialize` mirrors into the working tree
+is *derived* from the action inputs a rule flags `mirror_to_tree` (broken down below), not a
+parallel list a rule maintains by hand. Everything else in this document is an *obligation* or
+a *freedom* of that function — not a separate mechanism.
 
 Two consequences fall directly out of "pure function, run in the analysis phase":
 
@@ -34,32 +35,42 @@ Two consequences fall directly out of "pure function, run in the analysis phase"
 
 ### What `analyze` returns
 
-`Analysis` has three fields, and they are deliberately *not* co-equal — two are the contract,
-one is an affordance:
+`Analysis` has two fields — the **two directions** of the build graph at this target:
 
-- **`actions` — the work.** A slice of the action graph: coarse units the engine schedules,
-  keys, sandboxes, and runs (the rule never runs them — the phase wall above). This is *what
-  gets done*, and it is the sole thing that determines the build's outputs.
+- **`actions` — the work (and the import edges).** A slice of the action graph: coarse units the
+  engine schedules, keys, sandboxes, and runs (the rule never runs them — the phase wall above).
+  This is *what gets done*, and it is the sole thing that determines the build's outputs. Each
+  action's *inputs* are this target's imports — the files it reads, whether a source blob or
+  another action's output.
 - **`providers` — the interface offered upward.** What this target exposes to anything that
   depends on it (`FileSet` today; the broader typed-provider vocabulary — `TestSuite`,
   `LibraryInfo`, … — is `build-system-design.md` §5.5). Providers flow *up*, configuration flows
   *down* (§5.4). Routing a generated artifact across a language boundary is entirely a
   provider/consumer story (§14): a `nickel_eval` exposes its JSON as a provider; a consumer
   picks it up. This is *what the target offers*.
-- **`routed_data` — the consumer-side materialization map.** The generated files *this*
-  target's actions consume at tree-shaped paths — the resolved `data` routing, each artifact's
-  `path` being the package-relative spot the inner tool reads it as if it were a source. It is
-  **not new information**: the dependency already lives in `actions` as an input edge. This field
-  re-surfaces *which generated inputs land at which working-tree paths* so `anneal materialize`
-  can mirror the sandbox's input view into the developer's working tree for native tools
-  (`cargo run`, rust-analyzer). Drop it and the build is byte-identical — only `materialize`
-  loses its map. It excludes sources (already in the tree) and sandbox plumbing (fetched
-  `.crate` blobs, vendor assembly); most provider-only rules leave it empty.
 
-The asymmetry is the point. `actions` + `providers` define the build; `routed_data` only lets a
-tooling command reconstruct what a build *sees*. A rule that gets `routed_data` wrong yields a
-worse `materialize` experience, never a wrong build — which is exactly why it sits *outside* the
-§6 trust-boundary's correctness duties.
+**The materialization view is derived, not a field.** `anneal materialize` mirrors the sandbox's
+input view into the developer's working tree so native tools (`cargo run`, rust-analyzer) see the
+same generated files the build does. The map it needs — *which generated inputs land at which
+working-tree paths* — is **not new information**: every such input already lives in `actions` as
+an input edge. So instead of a third field a rule maintains in parallel, a rule flags the relevant
+inputs at the input site (`ActionBuilder::routed_input_from_output`, which sets `Input.mirror_to_tree`),
+and the analyzer *derives* the routed view by walking each action's flagged inputs and re-homing
+each into its declaring package. One source of truth, projected — a rule can't list a routed file
+it doesn't actually consume, and the path is computed the same way the input's is.
+
+`mirror_to_tree` is deliberately **excluded from the action cache key**: two actions differing only
+in that flag hash identically (guarded by `cache.rs::mirror_to_tree_is_excluded_from_the_key`). The
+flag changes what `materialize` *shows*, never what the build *does*. Drop the whole view and the
+build is byte-identical — only `materialize` loses its map. It naturally excludes sources (already
+in the tree) and sandbox plumbing (fetched `.crate` blobs are inputs but not `mirror_to_tree`); a
+target with no actions — `filegroup`, `alias` — routes nothing, structurally (no actions ⇒ no
+flagged inputs ⇒ empty view), with no special case.
+
+The asymmetry is the point. `actions` + `providers` define the build; the derived view only lets a
+tooling command reconstruct what a build *sees*. A rule that flags the wrong input yields a worse
+`materialize` experience, never a wrong build — which is exactly why it sits *outside* the §6
+trust-boundary's correctness duties.
 
 ## 2. The eight obligations
 
