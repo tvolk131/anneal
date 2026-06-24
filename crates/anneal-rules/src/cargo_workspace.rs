@@ -65,7 +65,7 @@ use anneal_exec::{Action, ActionBuilder, Toolchain};
 
 use crate::context::RuleContext;
 use crate::diagnostics;
-use crate::providers::{Artifact, ArtifactSource, ProviderSet};
+use crate::providers::{route_data_inputs, Artifact, ArtifactSource, ProviderSet};
 use crate::rule::{Analysis, Rule, RuleError};
 use crate::schema::{AttrSchema, AttrType};
 use crate::state::{Attestation, Concurrency, PersistentStateDecl, StateActionExt, StateKind};
@@ -266,7 +266,7 @@ impl Rule for CargoWorkspace {
                     cargo_args("build", None, None, release_flag),
                 );
                 let mut build = with_crates(
-                    with_data(
+                    route_data_inputs(
                         with_sources(
                             cargo_builder(
                                 format!("cargo_workspace build {label}"),
@@ -308,7 +308,7 @@ impl Rule for CargoWorkspace {
                         let test_bin_path =
                             PathBuf::from(format!("target/anneal-tests/{}/test-bin", c.name));
                         let compile = with_crates(
-                            with_data(
+                            route_data_inputs(
                                 with_sources(
                                     cargo_builder(
                                         compile_id.clone(),
@@ -371,7 +371,7 @@ impl Rule for CargoWorkspace {
 
                         // doc: single action (no reusable binary, §12.3).
                         let doc = with_crates(
-                            with_data(
+                            route_data_inputs(
                                 with_sources(
                                     cargo_builder(
                                         format!("cargo_workspace test {label} {} doc", c.name),
@@ -400,7 +400,7 @@ impl Rule for CargoWorkspace {
                     if c.has_tests {
                         // integration: single action for now (multi-binary split deferred).
                         let integ = with_crates(
-                            with_data(
+                            route_data_inputs(
                                 with_sources(
                                     cargo_builder(
                                         format!(
@@ -433,8 +433,8 @@ impl Rule for CargoWorkspace {
             },
         )?;
 
-        // The routed-data view (what `materialize` parks) is derived by the analyzer
-        // from the `data` inputs `with_data` flagged `mirror_to_tree`; no separate field.
+        // The routed-data view (what `materialize` parks) is derived by the analyzer from
+        // the `data` inputs `route_data_inputs` flagged `mirror_to_tree`; no separate field.
         Ok(Analysis {
             actions,
             providers: ProviderSet::default(),
@@ -586,33 +586,6 @@ fn with_sources(mut builder: ActionBuilder, sources: &[Artifact]) -> ActionBuild
         if let ArtifactSource::Source(digest) = &artifact.source {
             let name = artifact.path.to_string_lossy().into_owned();
             builder = builder.input(name, artifact.path.clone(), *digest);
-        }
-    }
-    builder
-}
-
-/// Add `data` dependency artifacts as inputs, materialized at their declared paths in
-/// the build tree. A resolved source flows in as a blob; a produced output flows in as
-/// an action-graph edge resolved at execution.
-fn with_data(mut builder: ActionBuilder, data: &[Artifact]) -> ActionBuilder {
-    for artifact in data {
-        let name = artifact.path.to_string_lossy().into_owned();
-        match &artifact.source {
-            // A source-backed `data` file is already in the tree; it flows in as a plain
-            // input (materialize skips sources anyway).
-            ArtifactSource::Source(digest) => {
-                builder = builder.input(name, artifact.path.clone(), *digest);
-            }
-            // A generated `data` file is dev-tree-visible: route it (mirror_to_tree) so
-            // `anneal materialize` parks it for native tools. (Fetched `.crate` plumbing
-            // enters via `with_crates` with the plain edge, so it is never routed.)
-            ArtifactSource::Output {
-                action,
-                name: output,
-            } => {
-                builder =
-                    builder.routed_input_from_output(name, artifact.path.clone(), action, output);
-            }
         }
     }
     builder

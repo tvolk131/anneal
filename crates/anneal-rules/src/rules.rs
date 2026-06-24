@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anneal_exec::Action;
 
 use crate::context::RuleContext;
-use crate::providers::{Artifact, ArtifactSource, FileSet, ProviderSet};
+use crate::providers::{route_data_inputs, Artifact, ArtifactSource, FileSet, ProviderSet};
 use crate::rule::{Analysis, Rule, RuleError};
 use crate::schema::{AttrSchema, AttrType};
 use crate::toolchain::{nix_base_runtime, toolchain_path_env};
@@ -137,28 +137,10 @@ impl Rule for GenRule {
         let mut builder = Action::builder(action_id.clone(), command)
             .toolchain(runtime)
             .env("PATH", path_env);
-        for artifact in &inputs {
-            let name = artifact.path.to_string_lossy().into_owned();
-            match &artifact.source {
-                ArtifactSource::Source(digest) => {
-                    builder = builder.input(name, artifact.path.clone(), *digest);
-                }
-                // A dep-provided generated file is this target's routed data — flag it
-                // mirror_to_tree so the analyzer's derived view (and `materialize`) sees
-                // it. genrule's only Output inputs are dep-provided data.
-                ArtifactSource::Output {
-                    action: producer,
-                    name: output,
-                } => {
-                    builder = builder.routed_input_from_output(
-                        name,
-                        artifact.path.clone(),
-                        producer,
-                        output,
-                    );
-                }
-            }
-        }
+        // Direct srcs flow in as plain source inputs; dep-provided generated files are this
+        // target's routed data (genrule's only Output inputs are dep-provided). Both via the
+        // shared routed-data dispatch.
+        builder = route_data_inputs(builder, &inputs);
         for out in outs {
             builder = builder.output(out.clone(), PathBuf::from(out));
         }

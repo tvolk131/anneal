@@ -42,7 +42,7 @@ use anneal_exec::{Action, ActionBuilder, Toolchain};
 
 use crate::attrs::AttrValue;
 use crate::context::RuleContext;
-use crate::providers::{Artifact, ArtifactSource, FileSet, ProviderSet};
+use crate::providers::{route_data_inputs, Artifact, ArtifactSource, FileSet, ProviderSet};
 use crate::rule::{Analysis, Rule, RuleError};
 use crate::schema::{AttrSchema, AttrType};
 use crate::state::{PersistentStateDecl, StateActionExt, StateKind};
@@ -160,7 +160,7 @@ impl Rule for PnpmWorkspace {
                     "test" => {
                         let results_path =
                             PathBuf::from(format!(".anneal/pnpm-tests/{script_index}/results.txt"));
-                        let action = with_routed(
+                        let action = route_data_inputs(
                             with_sources(
                                 with_env(
                                     Action::builder(
@@ -188,7 +188,7 @@ impl Rule for PnpmWorkspace {
                             .map(<[String]>::to_vec)
                             .unwrap_or_default();
                         let action_id = format!("pnpm_workspace build {label} {name}");
-                        let mut builder = with_routed(
+                        let mut builder = route_data_inputs(
                             with_sources(
                                 with_env(
                                     Action::builder(
@@ -324,29 +324,6 @@ fn resolve_data(ctx: &RuleContext) -> Result<Vec<Artifact>, RuleError> {
         }
     }
     Ok(routed)
-}
-
-/// Add routed `data` artifacts as inputs at their per-edge destination. A resolved source
-/// flows in as a blob; a produced output as an action-graph edge resolved at execution.
-fn with_routed(mut builder: ActionBuilder, routed: &[Artifact]) -> ActionBuilder {
-    for artifact in routed {
-        let name = artifact.path.to_string_lossy().into_owned();
-        match &artifact.source {
-            // Source-backed routed file: already in the tree, plain input.
-            ArtifactSource::Source(digest) => {
-                builder = builder.input(name, artifact.path.clone(), *digest);
-            }
-            // Generated routed file at its per-edge dest: mirror it to the tree.
-            ArtifactSource::Output {
-                action,
-                name: output,
-            } => {
-                builder =
-                    builder.routed_input_from_output(name, artifact.path.clone(), action, output);
-            }
-        }
-    }
-    builder
 }
 
 /// Add a single resolved source artifact as a content-addressed input at its own path.
