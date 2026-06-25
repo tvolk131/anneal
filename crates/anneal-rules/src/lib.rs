@@ -39,7 +39,7 @@ mod toolchain;
 
 pub use attrs::{AttrError, AttrValue, Attrs};
 pub use cargo_workspace::CargoWorkspace;
-pub use context::{ResolvedDep, RuleContext, SourcePathRecorder, StateRegistry};
+pub use context::{ResolvedDep, RuleContext, SourcePathRecorder, StateRegistry, TestContext};
 pub use diagnostics::{start_rule_timings, take_rule_timings, RuleTiming};
 pub use nickel_eval::NickelEval;
 pub use pnpm_workspace::PnpmWorkspace;

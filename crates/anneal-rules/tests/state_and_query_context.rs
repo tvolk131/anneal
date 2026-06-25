@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use anneal_core::{AxisValues, Configuration, Label, Platform};
 use anneal_exec::{LocalExecutor, QuerySpec, Toolchain};
 use anneal_rules::{
-    Attestation, Attrs, Concurrency, PersistentStateDecl, RuleContext, StateKind, StateRegistry,
+    Attestation, Attrs, Concurrency, PersistentStateDecl, RuleContext, StateKind, TestContext,
 };
 
 // Minimal shell/runtime helpers (the anneal-exec test-support module is not
@@ -101,8 +101,8 @@ impl Fixture {
         (fx, dir)
     }
 
-    fn ctx<'a>(&'a self, registry: &'a StateRegistry) -> RuleContext<'a> {
-        RuleContext::new(
+    fn ctx<'a>(&'a self, tc: &'a TestContext) -> RuleContext<'a> {
+        tc.context(
             Label::parse("//pkg:t").unwrap(),
             &self.attrs,
             &self.config,
@@ -110,8 +110,6 @@ impl Fixture {
             self.exec.cas(),
             &[],
         )
-        .with_rule_kind("test_rule")
-        .with_state_registry(registry)
         .with_executor(&self.exec)
     }
 }
@@ -119,8 +117,8 @@ impl Fixture {
 #[test]
 fn declare_state_is_idempotent_and_mismatch_is_a_hard_error() {
     let (fx, _dir) = Fixture::new();
-    let registry = StateRegistry::new();
-    let ctx = fx.ctx(&registry);
+    let tc = TestContext::new().rule_kind("test_rule");
+    let ctx = fx.ctx(&tc);
 
     // Bit-identical declarations across "targets": same handle key.
     let a = ctx.declare_state(decl(1)).unwrap();
@@ -132,28 +130,16 @@ fn declare_state_is_idempotent_and_mismatch_is_a_hard_error() {
     assert!(ctx.declare_state(decl(2)).is_err());
 }
 
-#[test]
-fn declare_state_requires_rule_scope() {
-    let (fx, _dir) = Fixture::new();
-    let ctx = RuleContext::new(
-        Label::parse("//pkg:t").unwrap(),
-        &fx.attrs,
-        &fx.config,
-        &fx.package_dir,
-        fx.exec.cas(),
-        &[],
-    );
-    assert!(
-        ctx.declare_state(decl(1)).is_err(),
-        "state keys are rule-scoped (§2.6); no scope, no state"
-    );
-}
+// (A scope-less context can no longer be constructed — `rule_kind` and the state
+// registry are mandatory wiring on `RuleContext::new` — so the former
+// `declare_state_requires_rule_scope` test is obsolete: the invariant it guarded is now
+// enforced at the type level rather than as a runtime error.)
 
 #[test]
 fn analysis_time_query_runs_and_caches() {
     let (fx, _dir) = Fixture::new();
-    let registry = StateRegistry::new();
-    let ctx = fx.ctx(&registry);
+    let tc = TestContext::new();
+    let ctx = fx.ctx(&tc);
 
     let spec = QuerySpec::builder("ctx-query", shell_argv("echo queried"))
         .toolchain(system_runtime())
@@ -170,7 +156,9 @@ fn analysis_time_query_runs_and_caches() {
 #[test]
 fn query_without_executor_fails_loudly() {
     let (fx, _dir) = Fixture::new();
-    let ctx = RuleContext::new(
+    // A context with no executor wired (the sole optional capability): `query` must fail.
+    let tc = TestContext::new();
+    let ctx = tc.context(
         Label::parse("//pkg:t").unwrap(),
         &fx.attrs,
         &fx.config,

@@ -132,7 +132,7 @@ fn invalid_label_in_attribute_is_rejected() {
 fn genrule_from_build_file_loads_analyzes_and_executes() {
     use anneal_core::{AxisValues, Configuration, Platform};
     use anneal_exec::{Executor, LocalExecutor};
-    use anneal_rules::RuleContext;
+    use anneal_rules::TestContext;
 
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
@@ -163,7 +163,8 @@ genrule(
     // 2. Analyze the loaded target through its rule.
     let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
     let config = Configuration::new(Platform::new("host", "host"), AxisValues::default());
-    let ctx = RuleContext::new(
+    let tc = TestContext::new();
+    let ctx = tc.context(
         decl.label.clone(),
         &decl.attrs,
         &config,

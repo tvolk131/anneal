@@ -6,9 +6,7 @@
 use anneal_core::{AxisValues, Configuration, Platform};
 use anneal_exec::{Executor, LocalExecutor};
 use anneal_rules::{Alias, FileGroup};
-use anneal_rules::{
-    Attrs, GenRule, ProviderSet, ResolvedDep, Rule, RuleContext, SourcePathRecorder,
-};
+use anneal_rules::{Attrs, GenRule, ProviderSet, ResolvedDep, Rule, TestContext};
 use std::path::{Path, PathBuf};
 
 fn host_config() -> Configuration {
@@ -52,21 +50,13 @@ fn package_file_exists_records_existing_source_paths() {
     let config = host_config();
     let attrs = Attrs::default();
     let label = anneal_core::Label::parse("//pkg:probe").unwrap();
-    let recorder = SourcePathRecorder::default();
-    let ctx = RuleContext::new_recording_sources(
-        label,
-        &attrs,
-        &config,
-        &fx.package_dir,
-        fx.exec.cas(),
-        &[],
-        &recorder,
-    );
+    let tc = TestContext::new();
+    let ctx = tc.context(label, &attrs, &config, &fx.package_dir, fx.exec.cas(), &[]);
 
     assert!(ctx.package_file_exists(Path::new("observed.txt")));
     assert!(!ctx.package_file_exists(Path::new("missing.txt")));
 
-    let paths = recorder.paths();
+    let paths = tc.source_paths().paths();
     assert!(paths.contains(&PathBuf::from("pkg/observed.txt")));
     assert!(!paths.contains(&PathBuf::from("pkg/missing.txt")));
 }
@@ -80,16 +70,8 @@ fn list_dir_records_the_directory_and_returned_entries() {
     let config = host_config();
     let attrs = Attrs::default();
     let label = anneal_core::Label::parse("//pkg:probe").unwrap();
-    let recorder = SourcePathRecorder::default();
-    let ctx = RuleContext::new_recording_sources(
-        label,
-        &attrs,
-        &config,
-        &fx.package_dir,
-        fx.exec.cas(),
-        &[],
-        &recorder,
-    );
+    let tc = TestContext::new();
+    let ctx = tc.context(label, &attrs, &config, &fx.package_dir, fx.exec.cas(), &[]);
 
     let entries = ctx.list_dir(Path::new("members")).unwrap();
     assert_eq!(
@@ -101,7 +83,7 @@ fn list_dir_records_the_directory_and_returned_entries() {
     );
     assert!(ctx.list_dir(Path::new("missing")).unwrap().is_empty());
 
-    let paths = recorder.paths();
+    let paths = tc.source_paths().paths();
     assert!(paths.contains(&PathBuf::from("pkg/members")));
     assert!(paths.contains(&PathBuf::from("pkg/members/alpha.txt")));
     assert!(paths.contains(&PathBuf::from("pkg/members/beta.txt")));
@@ -121,7 +103,8 @@ fn genrule_analyzes_executes_and_caches() {
         .string("cmd", "cat $(SRCS) > $(OUTS)")
         .build();
     let label = anneal_core::Label::parse("//pkg:combined").unwrap();
-    let ctx = RuleContext::new(label, &attrs, &config, &fx.package_dir, fx.exec.cas(), &[]);
+    let tc = TestContext::new();
+    let ctx = tc.context(label, &attrs, &config, &fx.package_dir, fx.exec.cas(), &[]);
 
     // Analyze: the rule emits exactly one action.
     let analysis = GenRule.analyze(&ctx).unwrap();
@@ -154,7 +137,8 @@ fn filegroup_provides_resolved_sources() {
     let config = host_config();
     let attrs = Attrs::builder().strings("srcs", ["x.txt", "y.txt"]).build();
     let label = anneal_core::Label::parse("//pkg:group").unwrap();
-    let ctx = RuleContext::new(label, &attrs, &config, &fx.package_dir, fx.exec.cas(), &[]);
+    let tc = TestContext::new();
+    let ctx = tc.context(label, &attrs, &config, &fx.package_dir, fx.exec.cas(), &[]);
 
     let analysis = FileGroup.analyze(&ctx).unwrap();
     assert!(analysis.actions.is_empty());
@@ -180,7 +164,8 @@ fn alias_forwards_dependency_providers() {
     // First analyze a filegroup, then feed its providers to an alias as a dep.
     let fg_attrs = Attrs::builder().strings("srcs", ["z.txt"]).build();
     let fg_label = anneal_core::Label::parse("//pkg:group").unwrap();
-    let fg_ctx = RuleContext::new(
+    let fg_tc = TestContext::new();
+    let fg_ctx = fg_tc.context(
         fg_label.clone(),
         &fg_attrs,
         &config,
@@ -198,7 +183,8 @@ fn alias_forwards_dependency_providers() {
         .label("actual", anneal_core::Label::parse("//pkg:group").unwrap())
         .build();
     let alias_label = anneal_core::Label::parse("//pkg:g").unwrap();
-    let alias_ctx = RuleContext::new(
+    let alias_tc = TestContext::new();
+    let alias_ctx = alias_tc.context(
         alias_label,
         &alias_attrs,
         &config,
@@ -220,7 +206,8 @@ fn genrule_without_outs_is_an_error() {
     let config = host_config();
     let attrs = Attrs::builder().string("cmd", "true").build();
     let label = anneal_core::Label::parse("//pkg:bad").unwrap();
-    let ctx = RuleContext::new(label, &attrs, &config, &fx.package_dir, fx.exec.cas(), &[]);
+    let tc = TestContext::new();
+    let ctx = tc.context(label, &attrs, &config, &fx.package_dir, fx.exec.cas(), &[]);
 
     let err = GenRule.analyze(&ctx).unwrap_err();
     // `outs` is required; the error should name it.

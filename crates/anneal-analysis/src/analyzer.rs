@@ -258,7 +258,7 @@ impl<'a> Analyzer<'a> {
             Path::new("BUILD"),
         ));
         let node_config = self.node_config(label);
-        let ctx = RuleContext::new_recording_sources(
+        let ctx = RuleContext::new(
             decl.label.clone(),
             &decl.attrs,
             &node_config,
@@ -266,17 +266,13 @@ impl<'a> Analyzer<'a> {
             self.cas,
             &resolved_deps,
             source_paths,
-        )
-        .with_rule_kind(rule.kind())
-        .with_state_registry(&self.states);
+            rule.kind(),
+            &self.states,
+            &self.materialized,
+        );
         let ctx = match self.executor {
             Some(executor) => ctx.with_executor(executor),
             None => ctx,
-        };
-        let ctx = if self.materialized.is_empty() {
-            ctx
-        } else {
-            ctx.with_materialized(&self.materialized)
         };
         let analysis = rule.analyze(&ctx).map_err(|error| AnalysisError::Rule {
             label: label.clone(),
