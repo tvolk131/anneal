@@ -70,7 +70,7 @@ use crate::rule::{Analysis, Rule, RuleError};
 use crate::schema::{AttrSchema, AttrType};
 use crate::state::{Attestation, Concurrency, PersistentStateDecl, StateActionExt, StateKind};
 use crate::toolchain::{
-    nix_base_runtime, nix_lib_toolchain, nix_store_toolchain, nix_toolchain_env, toolchain_path_env,
+    nix_base_runtime, nix_lib_toolchain, nix_store_toolchain, nix_toolchain_env,
 };
 
 /// Directories never treated as build inputs.
@@ -160,12 +160,6 @@ impl Rule for CargoWorkspace {
             .map(|name| nix_lib_toolchain(name))
             .collect::<Result<_, _>>()?;
 
-        let path_env = diagnostics::time("cargo_workspace.path_env", || {
-            let mut toolchains: Vec<&Toolchain> = vec![&toolchain, &runtime];
-            toolchains.extend(native_libs.iter());
-            toolchain_path_env(&toolchains)
-        });
-
         // Compiling/linking env: the rust toolchain's declared env (`DEVELOPER_DIR`
         // on macOS, so `xcrun`/rustc/cc find the pinned SDK in the scrubbed sandbox)
         // merged with each native lib's env. A key set to *different* values by two
@@ -186,7 +180,6 @@ impl Rule for CargoWorkspace {
         // The shared environment every compiling/linking cargo action runs with.
         // Built once; only the action name and command vary per action.
         let setup = CargoActionEnv {
-            path_env: &path_env,
             rustflags: &rustflags,
             toolchain: &toolchain,
             runtime: &runtime,
@@ -356,9 +349,10 @@ impl Rule for CargoWorkspace {
                         )
                         .dependency_input("test-bin", "test-bin", compile_id, "test-bin")
                         .output("results.txt", results_path)
+                        // PATH composes from these toolchains' bin dirs at build (+ the
+                        // native-lib bin dirs added just below) — see ActionBuilder.
                         .toolchain(toolchain.clone())
-                        .toolchain(runtime.clone())
-                        .env("PATH", &path_env);
+                        .toolchain(runtime.clone());
                         // Native-lib roots mount into the run too: a dynamically-linked
                         // test binary needs its libraries present at *runtime* (its
                         // RUNPATH points at the mounted store paths). Env is not needed
@@ -476,11 +470,10 @@ impl CrateInfo {
 
 /// The shared environment every `cargo` compiling/linking action runs with:
 /// the toolchains whose roots mount into the build (rust + posix runtime + any
-/// workspace `native_libs`), their merged env, the PATH spanning their bin dirs,
-/// and the axis-derived `RUSTFLAGS`. Built once per analysis; only the action name
+/// workspace `native_libs`) — their bin dirs compose into PATH at build — their merged
+/// env, and the axis-derived `RUSTFLAGS`. Built once per analysis; only the action name
 /// and command vary across the build/compile/doc/integration actions.
 struct CargoActionEnv<'a> {
-    path_env: &'a str,
     rustflags: &'a str,
     toolchain: &'a Toolchain,
     runtime: &'a Toolchain,
@@ -500,8 +493,8 @@ fn cargo_builder(name: String, command: Vec<String>, setup: &CargoActionEnv) -> 
     for lib in setup.native_libs {
         builder = builder.toolchain(lib.clone());
     }
+    // PATH composes from the attached toolchains' bin dirs at build (see ActionBuilder).
     builder = builder
-        .env("PATH", setup.path_env)
         .env("CARGO_TERM_COLOR", "never")
         .env("CARGO_INCREMENTAL", "0");
     // The merged toolchain env (DEVELOPER_DIR on macOS, native-lib PATH/pkg-config/

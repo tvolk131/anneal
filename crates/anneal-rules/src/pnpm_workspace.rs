@@ -46,7 +46,7 @@ use crate::providers::{route_data_inputs, Artifact, ArtifactSource, FileSet, Pro
 use crate::rule::{Analysis, Rule, RuleError};
 use crate::schema::{AttrSchema, AttrType};
 use crate::state::{PersistentStateDecl, StateActionExt, StateKind};
-use crate::toolchain::{nix_base_runtime, nix_store_toolchain, toolchain_path_env};
+use crate::toolchain::{nix_base_runtime, nix_store_toolchain};
 
 /// `scripts` is an optional table; the rule validates its structure. `data` routes other
 /// targets' file outputs into the workspace — plain-path (§4 of `docs/pnpm-workspace.md`):
@@ -78,7 +78,6 @@ impl Rule for PnpmWorkspace {
     fn analyze(&self, ctx: &RuleContext) -> Result<Analysis, RuleError> {
         let toolchain = nix_store_toolchain("node", &["pnpm", "node"])?;
         let runtime = nix_base_runtime()?;
-        let path_env = toolchain_path_env(&[&toolchain, &runtime]);
 
         // --- install inputs: manifests + lockfile only (not the source tree) ---
         if !ctx.package_file_exists(Path::new("package.json")) {
@@ -124,7 +123,6 @@ impl Rule for PnpmWorkspace {
                     format!("--store-dir={STORE_DIR}"),
                 ],
             ),
-            &path_env,
             &toolchain,
             &runtime,
         );
@@ -167,7 +165,6 @@ impl Rule for PnpmWorkspace {
                                         format!("pnpm_workspace test {label} {name}"),
                                         test_command(name, &results_path),
                                     ),
-                                    &path_env,
                                     &toolchain,
                                     &runtime,
                                 ),
@@ -195,7 +192,6 @@ impl Rule for PnpmWorkspace {
                                         action_id.clone(),
                                         vec!["pnpm".to_owned(), "run".to_owned(), name.clone()],
                                     ),
-                                    &path_env,
                                     &toolchain,
                                     &runtime,
                                 ),
@@ -254,18 +250,13 @@ fn test_command(script: &str, results_path: &Path) -> Vec<String> {
     vec!["sh".to_owned(), "-c".to_owned(), body]
 }
 
-/// Apply the shared environment: toolchain on PATH, an in-sandbox pnpm store, and the
-/// update notifier disabled (no network reach).
-fn with_env(
-    builder: ActionBuilder,
-    path_env: &str,
-    toolchain: &Toolchain,
-    runtime: &Toolchain,
-) -> ActionBuilder {
+/// Apply the shared environment: the toolchains (whose bin dirs compose into PATH at
+/// build — see `ActionBuilder`), an in-sandbox pnpm store, and the update notifier
+/// disabled (no network reach).
+fn with_env(builder: ActionBuilder, toolchain: &Toolchain, runtime: &Toolchain) -> ActionBuilder {
     builder
         .toolchain(toolchain.clone())
         .toolchain(runtime.clone())
-        .env("PATH", path_env)
         .env("npm_config_store_dir", STORE_DIR)
         .env("npm_config_update_notifier", "false")
 }

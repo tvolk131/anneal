@@ -26,7 +26,7 @@ use crate::context::RuleContext;
 use crate::providers::{Artifact, ArtifactSource, FileSet, ProviderSet};
 use crate::rule::{Analysis, Rule, RuleError};
 use crate::schema::{AttrSchema, AttrType};
-use crate::toolchain::{nix_base_runtime, nix_store_toolchain, toolchain_path_env};
+use crate::toolchain::{nix_base_runtime, nix_store_toolchain};
 
 const SCHEMA: &[AttrSchema] = &[
     AttrSchema::required("src", AttrType::String),
@@ -80,7 +80,6 @@ impl Rule for NickelEval {
 
         let action_id = format!("nickel_eval {}", ctx.label());
         let script = format!("nickel export {src} --format {format} > {out}");
-        let path_env = toolchain_path_env(&[&toolchain, &runtime]);
 
         let action = Action::builder(
             action_id.clone(),
@@ -88,9 +87,9 @@ impl Rule for NickelEval {
         )
         .source_input(src.clone(), PathBuf::from(&src), *src_digest)
         .output(out.clone(), PathBuf::from(&out))
+        // PATH composes from these toolchains' bin dirs at build (see ActionBuilder).
         .toolchain(toolchain)
         .toolchain(runtime)
-        .env("PATH", path_env)
         // Pure data evaluation: no axes, no platform dependence ⇒ configuration-
         // invariant cache key (§6.3).
         .platform_independent()

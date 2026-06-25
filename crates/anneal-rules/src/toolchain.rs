@@ -93,20 +93,6 @@ pub(crate) fn nix_lib_toolchain(name: &str) -> Result<Toolchain, RuleError> {
     manifest_toolchain_from_manifest(manifest, name, &tools)
 }
 
-/// Build a PATH containing only declared toolchain bin directories.
-pub(crate) fn toolchain_path_env(toolchains: &[&Toolchain]) -> String {
-    let mut dirs = Vec::new();
-    for toolchain in toolchains {
-        for dir in toolchain.bin_dirs() {
-            push_unique(&mut dirs, dir.clone());
-        }
-    }
-    dirs.iter()
-        .map(|d| d.to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join(":")
-}
-
 fn manifest_toolchain_from_manifest(
     manifest: &ToolchainManifest,
     name: &str,
@@ -280,10 +266,8 @@ fn push_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
 mod tests {
     use super::{
         manifest_toolchain_from_manifest, missing_toolchain_manifest_message, nix_store_root,
-        nix_store_toolchain, toolchain_path_env, ManifestToolchain, ToolchainManifest,
-        TOOLCHAIN_MANIFEST_ENV,
+        nix_store_toolchain, ManifestToolchain, ToolchainManifest, TOOLCHAIN_MANIFEST_ENV,
     };
-    use anneal_exec::Toolchain;
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
 
@@ -294,32 +278,6 @@ mod tests {
             Some(PathBuf::from("/nix/store/abc-rust"))
         );
         assert_eq!(nix_store_root(Path::new("/usr/bin/cargo")), None);
-    }
-
-    #[test]
-    fn toolchain_path_env_deduplicates_bin_dirs_in_order() {
-        let first = Toolchain::new(
-            "first",
-            "first-id",
-            vec![PathBuf::from("/nix/store/a/bin")],
-            vec![PathBuf::from("/nix/store/a")],
-        )
-        .unwrap();
-        let second = Toolchain::new(
-            "second",
-            "second-id",
-            vec![
-                PathBuf::from("/nix/store/a/bin"),
-                PathBuf::from("/nix/store/b/bin"),
-            ],
-            vec![PathBuf::from("/nix/store/b")],
-        )
-        .unwrap();
-
-        assert_eq!(
-            toolchain_path_env(&[&first, &second]),
-            "/nix/store/a/bin:/nix/store/b/bin"
-        );
     }
 
     #[test]

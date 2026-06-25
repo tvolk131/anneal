@@ -9,7 +9,7 @@ use crate::context::RuleContext;
 use crate::providers::{route_data_inputs, Artifact, ArtifactSource, FileSet, ProviderSet};
 use crate::rule::{Analysis, Rule, RuleError};
 use crate::schema::{AttrSchema, AttrType};
-use crate::toolchain::{nix_base_runtime, toolchain_path_env};
+use crate::toolchain::nix_base_runtime;
 
 const FILEGROUP_SCHEMA: &[AttrSchema] = &[AttrSchema::required("srcs", AttrType::StringList)];
 const ALIAS_SCHEMA: &[AttrSchema] = &[AttrSchema::required("actual", AttrType::Label)];
@@ -128,15 +128,13 @@ impl Rule for GenRule {
             .replace("$(OUTS)", &outs.join(" "));
 
         let runtime = nix_base_runtime()?;
-        let path_env = toolchain_path_env(&[&runtime]);
 
         // The action's name doubles as its graph id; outputs are referenced as
         // `(action_id, output_name)` by any consumer.
         let action_id = format!("genrule {}", ctx.label());
         let command = vec!["sh".to_owned(), "-c".to_owned(), expanded];
-        let mut builder = Action::builder(action_id.clone(), command)
-            .toolchain(runtime)
-            .env("PATH", path_env);
+        // PATH composes from the runtime toolchain's bin dirs at build (see ActionBuilder).
+        let mut builder = Action::builder(action_id.clone(), command).toolchain(runtime);
         // Direct srcs flow in as plain source inputs; dep-provided generated files are this
         // target's routed data (genrule's only Output inputs are dep-provided). Both via the
         // shared routed-data dispatch.

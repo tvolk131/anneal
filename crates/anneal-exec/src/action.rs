@@ -301,6 +301,7 @@ impl Action {
                 network: false,
                 fetch_url: None,
             },
+            toolchain_order: Vec::new(),
         }
     }
 
@@ -558,6 +559,11 @@ fn default_host_config() -> Configuration {
 #[derive(Debug, Clone)]
 pub struct ActionBuilder {
     action: Action,
+    /// Toolchain names in the order they were added. `Action::toolchains` is a
+    /// name-keyed `BTreeMap` (canonical for the cache key), which loses add order — but
+    /// PATH composition is order-sensitive (precedence), so we track insertion order here
+    /// to compose PATH deterministically at build (see `compose_path_from_toolchains`).
+    toolchain_order: Vec<String>,
 }
 
 impl ActionBuilder {
@@ -690,10 +696,15 @@ impl ActionBuilder {
 
     /// Declare a toolchain dependency. Its identity enters the action key and its
     /// read-only roots are mount hints for sandbox backends.
+    /// Declare a toolchain: its roots mount read-only, and its `bin_dirs` compose into
+    /// the action's PATH automatically (see [`try_build`](Self::try_build)). A rule names
+    /// the toolchains it needs; it never hand-writes PATH.
     pub fn toolchain(mut self, toolchain: Toolchain) -> Self {
-        self.action
-            .toolchains
-            .insert(toolchain.name().to_owned(), toolchain);
+        let name = toolchain.name().to_owned();
+        if !self.toolchain_order.contains(&name) {
+            self.toolchain_order.push(name.clone());
+        }
+        self.action.toolchains.insert(name, toolchain);
         self
     }
 
@@ -708,6 +719,14 @@ impl ActionBuilder {
         self
     }
 
+    /// Raw cache-policy escape hatch — **not for rules.** A rule never asserts a policy;
+    /// it is *derived from the action's shape*: [`fetch`](Self::fetch) ⇒ `FixedOutput`,
+    /// `produce_state` ⇒ `SnapshotBased`, `consume_state` ⇒ `SnapshotConsuming`, else the
+    /// `Deterministic` default — so a rule cannot claim a policy its shape doesn't justify
+    /// (no production rule calls this; the shape methods cover every real case). It stays
+    /// `pub` only because executor tests construct actions with explicit policies directly,
+    /// and Rust visibility can't admit those while excluding downstream rule crates.
+    #[doc(hidden)]
     pub fn cache_policy(mut self, policy: CachePolicy) -> Self {
         self.action.cache_policy = policy;
         self
@@ -813,9 +832,41 @@ impl ActionBuilder {
         self
     }
 
-    pub fn try_build(self) -> Result<Action, ActionError> {
+    pub fn try_build(mut self) -> Result<Action, ActionError> {
+        self.compose_path_from_toolchains();
         self.action.validate()?;
         Ok(self.action)
+    }
+
+    /// Derive PATH from the declared toolchains' `bin_dirs` — in insertion order, with
+    /// duplicate dirs dropped — unless the rule set PATH explicitly. PATH is a pure
+    /// function of the toolchain set, so a rule declares its toolchains and the engine
+    /// composes their PATH; it never restates it. An explicit `.env("PATH", …)` (e.g. a
+    /// test running real system commands with the host PATH, or any custom need) is left
+    /// untouched, and an action with no toolchains gets no PATH (unchanged).
+    fn compose_path_from_toolchains(&mut self) {
+        if self.action.env.contains_key("PATH") {
+            return;
+        }
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        for name in &self.toolchain_order {
+            if let Some(toolchain) = self.action.toolchains.get(name) {
+                for dir in toolchain.bin_dirs() {
+                    if !dirs.contains(dir) {
+                        dirs.push(dir.clone());
+                    }
+                }
+            }
+        }
+        if dirs.is_empty() {
+            return;
+        }
+        let path = dirs
+            .iter()
+            .map(|d| d.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(":");
+        self.action.env.insert("PATH".to_owned(), path);
     }
 
     pub fn build(self) -> Action {
@@ -995,6 +1046,59 @@ mod tests {
     }
 
     #[test]
+    fn path_composes_from_toolchains_in_insertion_order_deduped() {
+        // `b` shares a bin dir with `a`; PATH follows the order toolchains were *added*
+        // (not the name-keyed map order), with duplicate dirs dropped. This is the byte-
+        // for-byte composition rules used to hand-write, so the change is cache-neutral.
+        let a = Toolchain::new(
+            "a",
+            "a-id",
+            vec![PathBuf::from("/nix/store/a/bin")],
+            vec![PathBuf::from("/nix/store/a")],
+        )
+        .unwrap();
+        let b = Toolchain::new(
+            "b",
+            "b-id",
+            vec![
+                PathBuf::from("/nix/store/b/bin"),
+                PathBuf::from("/nix/store/a/bin"),
+            ],
+            vec![PathBuf::from("/nix/store/b"), PathBuf::from("/nix/store/a")],
+        )
+        .unwrap();
+        // Added b, then a — composition honors that order, not the b-tree (a < b) order.
+        let action = Action::builder("t", ["./tool"])
+            .toolchain(b)
+            .toolchain(a)
+            .build();
+        assert_eq!(
+            action.env().get("PATH").map(String::as_str),
+            Some("/nix/store/b/bin:/nix/store/a/bin"),
+        );
+    }
+
+    #[test]
+    fn explicit_path_is_not_overridden_by_toolchain_composition() {
+        // A rule (or test) that sets PATH explicitly — e.g. the host PATH for real system
+        // commands — keeps it; toolchain composition only fills PATH when it is absent.
+        let action = Action::builder("t", ["./tool"])
+            .toolchain(runtime())
+            .env("PATH", "/custom/bin")
+            .build();
+        assert_eq!(
+            action.env().get("PATH").map(String::as_str),
+            Some("/custom/bin"),
+        );
+    }
+
+    #[test]
+    fn no_toolchains_means_no_derived_path() {
+        let action = Action::builder("t", ["./tool"]).build();
+        assert!(action.env().get("PATH").is_none());
+    }
+
+    #[test]
     fn rejects_paths_that_can_escape_the_sandbox() {
         let bad_abs = Action::builder("a", ["./tool"])
             .source_input("in", "/tmp/in", Digest::of(b"in"))
@@ -1085,16 +1189,20 @@ mod tests {
     }
 
     #[test]
-    fn sealed_bare_command_requires_declared_runtime_and_path() {
+    fn sealed_bare_command_requires_a_toolchain_then_derives_path() {
+        // A bare (PATH-resolved) command with no toolchain can't resolve — error.
         let no_toolchain = Action::builder("a", ["sh"]).try_build().unwrap_err();
         assert!(no_toolchain.to_string().contains("declares no toolchain"));
 
-        let no_path = Action::builder("a", ["sh"])
-            .toolchain(runtime())
-            .try_build()
-            .unwrap_err();
-        assert!(no_path.to_string().contains("does not declare PATH"));
+        // Declaring a toolchain now suffices: PATH is derived from its bin dirs, so the
+        // rule needn't restate it (the boilerplate the derivation removes).
+        let derived = Action::builder("a", ["sh"]).toolchain(runtime()).build();
+        assert_eq!(
+            derived.env().get("PATH").map(String::as_str),
+            Some("/nix/store/runtime/bin"),
+        );
 
+        // An explicit PATH still works and is left untouched.
         Action::builder("a", ["sh"])
             .toolchain(runtime())
             .env("PATH", "/nix/store/runtime/bin")
