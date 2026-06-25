@@ -354,7 +354,7 @@ impl Rule for CargoWorkspace {
                             run_id,
                             vec!["sh".to_owned(), "-c".to_owned(), run_script],
                         )
-                        .input_from_output("test-bin", "test-bin", compile_id, "test-bin")
+                        .dependency_input("test-bin", "test-bin", compile_id, "test-bin")
                         .output("results.txt", results_path)
                         .toolchain(toolchain.clone())
                         .toolchain(runtime.clone())
@@ -585,7 +585,7 @@ fn with_sources(mut builder: ActionBuilder, sources: &[Artifact]) -> ActionBuild
     for artifact in sources {
         if let ArtifactSource::Source(digest) = &artifact.source {
             let name = artifact.path.to_string_lossy().into_owned();
-            builder = builder.input(name, artifact.path.clone(), *digest);
+            builder = builder.source_input(name, artifact.path.clone(), *digest);
         }
     }
     builder
@@ -753,7 +753,7 @@ fn fetch_action(dep: &LockDep) -> Result<Action, RuleError> {
 fn with_crates(mut builder: ActionBuilder, deps: &[LockDep]) -> ActionBuilder {
     for dep in deps {
         let base = dep.base();
-        builder = builder.input_from_output(
+        builder = builder.dependency_input(
             format!("crate:{base}"),
             format!(".anneal-crates/{base}.crate"),
             format!("cargo_workspace fetch {base}"),

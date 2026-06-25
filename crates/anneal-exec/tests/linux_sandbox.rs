@@ -640,7 +640,7 @@ fn declared_inputs_are_read_only_and_do_not_corrupt_the_cas() {
     )
     .toolchain(runtime)
     .env("PATH", path_env)
-    .input("input", "input.txt", digest)
+    .source_input("input", "input.txt", digest)
     .output("write", "write.txt")
     .output("unlink", "unlink.txt")
     .build();
@@ -682,7 +682,7 @@ fn writable_inputs_are_private_copies_and_do_not_corrupt_the_cas() {
     )
     .toolchain(runtime)
     .env("PATH", path_env)
-    .writable_input("input", "input.txt", digest)
+    .writable_source_input("input", "input.txt", digest)
     .output("out", "out.txt")
     .build();
 

@@ -165,7 +165,7 @@ fn builder_rejects_malformed_fetch_actions() {
     assert!(two_outputs.is_err(), "a fetch pins exactly one output");
 
     let with_input = Action::builder("bad", Vec::<String>::new())
-        .input("src", PathBuf::from("src"), expected)
+        .source_input("src", PathBuf::from("src"), expected)
         .output("crate", PathBuf::from("out"))
         .fetch("http://localhost/x", expected)
         .try_build();

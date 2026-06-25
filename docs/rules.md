@@ -53,19 +53,31 @@ Two consequences fall directly out of "pure function, run in the analysis phase"
 input view into the developer's working tree so native tools (`cargo run`, rust-analyzer) see the
 same generated files the build does. The map it needs — *which generated inputs land at which
 working-tree paths* — is **not new information**: every such input already lives in `actions` as
-an input edge. So instead of a third field a rule maintains in parallel, a rule flags the relevant
-inputs at the input site (`ActionBuilder::routed_input_from_output`, which sets `Input.mirror_to_tree`),
-and the analyzer *derives* the routed view by walking each action's flagged inputs and re-homing
-each into its declaring package. One source of truth, projected — a rule can't list a routed file
-it doesn't actually consume, and the path is computed the same way the input's is.
+an input edge. So instead of a third field a rule maintains in parallel, a rule declares each
+input's **role**, and the engine derives the rest. The input vocabulary is role-named, not
+mechanism-named:
+
+- `source_input` — a blob already in the tree (never mirrored).
+- `dependency_input` — a build-internal output edge the developer never sees, e.g. a fetched
+  `.crate` or an internal test binary (never mirrored).
+- `data_input` — content routed for the inner tool to read at a tree path. `mirror_to_tree` is
+  **derived, never passed**: a produced output is generated content the dev tools should also see
+  (mirrored); a source blob is already in the tree (plain). `data_input` is the *sole* writer of
+  the flag.
+
+The analyzer then *derives* the routed view by walking each action's `mirror_to_tree` inputs and
+re-homing each into its declaring package. One source of truth, projected — a rule can't list a
+routed file it doesn't actually consume, and the path is computed the same way the input's is. And
+because the rule declares a role rather than setting a flag, it cannot mint a nonsensical state (a
+mirrored source, an unmirrored data output).
 
 `mirror_to_tree` is deliberately **excluded from the action cache key**: two actions differing only
 in that flag hash identically (guarded by `cache.rs::mirror_to_tree_is_excluded_from_the_key`). The
 flag changes what `materialize` *shows*, never what the build *does*. Drop the whole view and the
 build is byte-identical — only `materialize` loses its map. It naturally excludes sources (already
-in the tree) and sandbox plumbing (fetched `.crate` blobs are inputs but not `mirror_to_tree`); a
-target with no actions — `filegroup`, `alias` — routes nothing, structurally (no actions ⇒ no
-flagged inputs ⇒ empty view), with no special case.
+in the tree) and sandbox plumbing (a fetched `.crate` is a `dependency_input`, not data); a target
+with no actions — `filegroup`, `alias` — routes nothing, structurally (no actions ⇒ no data inputs
+⇒ empty view), with no special case.
 
 The asymmetry is the point. `actions` + `providers` define the build; the derived view only lets a
 tooling command reconstruct what a build *sees*. A rule that flags the wrong input yields a worse

@@ -329,13 +329,13 @@ fn resolve_data(ctx: &RuleContext) -> Result<Vec<Artifact>, RuleError> {
 /// Add a single resolved source artifact as a content-addressed input at its own path.
 fn add_source(builder: ActionBuilder, artifact: &Artifact) -> ActionBuilder {
     let name = artifact.path.to_string_lossy().into_owned();
-    builder.input(name, artifact.path.clone(), source_digest(artifact))
+    builder.source_input(name, artifact.path.clone(), source_digest(artifact))
 }
 
 /// Add a source artifact as a private writable input while preserving its digest identity.
 fn add_writable_source(builder: ActionBuilder, artifact: &Artifact) -> ActionBuilder {
     let name = artifact.path.to_string_lossy().into_owned();
-    builder.writable_input(name, artifact.path.clone(), source_digest(artifact))
+    builder.writable_source_input(name, artifact.path.clone(), source_digest(artifact))
 }
 
 fn is_pnpm_lockfile(path: &Path) -> bool {

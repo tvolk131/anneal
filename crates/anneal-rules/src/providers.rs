@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 
 use anneal_core::Digest;
-use anneal_exec::ActionBuilder;
+use anneal_exec::{ActionBuilder, InputSource};
 
 /// Where an artifact's content comes from — mirroring [`anneal_exec::InputSource`],
 /// so a provider can carry both resolved sources and not-yet-produced outputs.
@@ -21,6 +21,22 @@ pub enum ArtifactSource {
     /// (its [`anneal_exec::Action::name`]) and output name. Resolved to content at
     /// execution time.
     Output { action: String, name: String },
+}
+
+impl ArtifactSource {
+    /// Lower this provider-level source to the action-level [`InputSource`] an
+    /// [`ActionBuilder`] consumes. A blanket `From` can't live in either crate (orphan
+    /// rule: in `anneal-rules` neither `From` nor `InputSource` is local; `anneal-exec`
+    /// can't see `ArtifactSource`), so it's an inherent method here, where the type is local.
+    pub(crate) fn to_input_source(&self) -> InputSource {
+        match self {
+            ArtifactSource::Source(digest) => InputSource::Blob(*digest),
+            ArtifactSource::Output { action, name } => InputSource::Output {
+                action: action.clone(),
+                name: name.clone(),
+            },
+        }
+    }
 }
 
 /// A file exposed by a target, with a logical (relative) path.
@@ -64,18 +80,13 @@ pub(crate) fn route_data_inputs(
 ) -> ActionBuilder {
     for artifact in artifacts {
         let name = artifact.path.to_string_lossy().into_owned();
-        match &artifact.source {
-            ArtifactSource::Source(digest) => {
-                builder = builder.input(name, artifact.path.clone(), *digest);
-            }
-            ArtifactSource::Output {
-                action,
-                name: output,
-            } => {
-                builder =
-                    builder.routed_input_from_output(name, artifact.path.clone(), action, output);
-            }
-        }
+        // Declare the *role* ("this is data"); `data_input` derives `mirror_to_tree` from
+        // the source kind — a produced output is mirrored, a source blob is not.
+        builder = builder.data_input(
+            name,
+            artifact.path.clone(),
+            artifact.source.to_input_source(),
+        );
     }
     builder
 }

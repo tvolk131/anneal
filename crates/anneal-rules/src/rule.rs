@@ -14,9 +14,10 @@ use crate::schema::AttrSchema;
 /// build graph — `actions` (the work; their *inputs* are this target's imports) and
 /// `providers` (the interface it exports upward to dependents). There is no third
 /// field: the routed-data view that `anneal materialize` mirrors into the working
-/// tree is *derived* from the action inputs a rule flags `mirror_to_tree`
-/// (`ActionBuilder::routed_input_from_output`), so it stays a single source of truth
-/// on the imports it projects rather than a parallel list.
+/// tree is *derived* from the inputs a rule declares as data
+/// (`ActionBuilder::data_input`, which derives `mirror_to_tree` for generated content),
+/// so it stays a single source of truth on the imports it projects rather than a
+/// parallel list.
 #[derive(Debug)]
 pub struct Analysis {
     pub actions: Vec<Action>,

@@ -303,14 +303,22 @@ mod tests {
 
     #[test]
     fn mirror_to_tree_is_excluded_from_the_key() {
-        // The routed-data flag is a `materialize` affordance, not build identity:
-        // two actions differing only in mirror_to_tree MUST hash identically, or a
-        // rule flagging a routed input would spuriously bust the action cache.
+        // The routed-data flag is a `materialize` affordance, not build identity: two
+        // actions differing only in mirror_to_tree MUST hash identically, or routing a
+        // data input would spuriously bust the action cache. `dependency_input` leaves it
+        // false; `data_input` on an Output derives it true — same edge otherwise.
         let plain = Action::builder("a", ["./cargo"])
-            .input_from_output("data", "config.json", "gen", "config.json")
+            .dependency_input("data", "config.json", "gen", "config.json")
             .build();
         let routed = Action::builder("a", ["./cargo"])
-            .routed_input_from_output("data", "config.json", "gen", "config.json")
+            .data_input(
+                "data",
+                "config.json",
+                InputSource::Output {
+                    action: "gen".into(),
+                    name: "config.json".into(),
+                },
+            )
             .build();
         assert_eq!(action_digest(&plain), action_digest(&routed));
     }
@@ -319,10 +327,10 @@ mod tests {
     fn writable_inputs_change_the_key() {
         let d = Digest::of(b"manifest");
         let readonly = Action::builder("a", ["./tool"])
-            .input("manifest", "manifest.txt", d)
+            .source_input("manifest", "manifest.txt", d)
             .build();
         let writable = Action::builder("a", ["./tool"])
-            .writable_input("manifest", "manifest.txt", d)
+            .writable_source_input("manifest", "manifest.txt", d)
             .build();
         assert_ne!(action_digest(&readonly), action_digest(&writable));
     }

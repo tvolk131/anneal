@@ -80,7 +80,7 @@ impl QueryBuilder {
     /// Declare an input blob at `path` (relative to the working directory).
     pub fn input(self, name: impl Into<String>, path: impl Into<PathBuf>, digest: Digest) -> Self {
         QueryBuilder {
-            inner: self.inner.input(name, path, digest),
+            inner: self.inner.source_input(name, path, digest),
         }
     }
 

@@ -86,7 +86,7 @@ impl Rule for NickelEval {
             action_id.clone(),
             vec!["sh".to_owned(), "-c".to_owned(), script],
         )
-        .input(src.clone(), PathBuf::from(&src), *src_digest)
+        .source_input(src.clone(), PathBuf::from(&src), *src_digest)
         .output(out.clone(), PathBuf::from(&out))
         .toolchain(toolchain)
         .toolchain(runtime)

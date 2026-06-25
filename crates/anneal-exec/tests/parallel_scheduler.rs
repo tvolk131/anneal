@@ -31,16 +31,16 @@ fn input_order_need_not_be_topological() {
 
     let a = writes("A", "a.txt", "A\n");
     let b = shell("B", "cat a.txt > b.txt; printf 'B\\n' >> b.txt")
-        .input_from_output("a", "a.txt", "A", "a.txt")
+        .dependency_input("a", "a.txt", "A", "a.txt")
         .output("b.txt", "b.txt")
         .build();
     let c = shell("C", "cat a.txt > c.txt; printf 'C\\n' >> c.txt")
-        .input_from_output("a", "a.txt", "A", "a.txt")
+        .dependency_input("a", "a.txt", "A", "a.txt")
         .output("c.txt", "c.txt")
         .build();
     let d = shell("D", "cat b.txt c.txt > d.txt")
-        .input_from_output("b", "b.txt", "B", "b.txt")
-        .input_from_output("c", "c.txt", "C", "c.txt")
+        .dependency_input("b", "b.txt", "B", "b.txt")
+        .dependency_input("c", "c.txt", "C", "c.txt")
         .output("d.txt", "d.txt")
         .build();
 
@@ -104,7 +104,7 @@ fn a_failed_dependency_skips_its_dependents() {
 
     let producer = shell("p", "exit 1").output("out", "out.txt").build();
     let consumer = shell("c", "cat got.txt > final.txt")
-        .input_from_output("g", "got.txt", "p", "out")
+        .dependency_input("g", "got.txt", "p", "out")
         .output("final", "final.txt")
         .build();
 
@@ -125,11 +125,11 @@ fn skips_cascade_to_the_root_cause_while_independent_work_completes() {
 
     let root = shell("root", "exit 3").output("r", "r.txt").build();
     let mid = shell("mid", "cat r.txt > m.txt")
-        .input_from_output("r", "r.txt", "root", "r")
+        .dependency_input("r", "r.txt", "root", "r")
         .output("m", "m.txt")
         .build();
     let leaf = shell("leaf", "cat m.txt > l.txt")
-        .input_from_output("m", "m.txt", "mid", "m")
+        .dependency_input("m", "m.txt", "mid", "m")
         .output("l", "l.txt")
         .build();
     let unrelated = writes("unrelated", "u.txt", "fine");
@@ -158,8 +158,8 @@ fn a_join_with_one_failed_parent_is_skipped() {
     let ok = writes("ok", "a.txt", "fine");
     let bad = shell("bad", "exit 1").output("b", "b.txt").build();
     let join = shell("join", "cat a.txt b.txt > j.txt")
-        .input_from_output("a", "a.txt", "ok", "a.txt")
-        .input_from_output("b", "b.txt", "bad", "b")
+        .dependency_input("a", "a.txt", "ok", "a.txt")
+        .dependency_input("b", "b.txt", "bad", "b")
         .output("j", "j.txt")
         .build();
 
@@ -196,11 +196,11 @@ fn a_dependency_cycle_is_detected() {
     let exec = LocalExecutor::new(dir.path()).unwrap();
 
     let x = shell("x", "true")
-        .input_from_output("from_y", "y.txt", "y", "o")
+        .dependency_input("from_y", "y.txt", "y", "o")
         .output("ox", "x.txt")
         .build();
     let y = shell("y", "true")
-        .input_from_output("from_x", "x.txt", "x", "ox")
+        .dependency_input("from_x", "x.txt", "x", "ox")
         .output("o", "y.txt")
         .build();
 
@@ -268,7 +268,7 @@ fn execute_graph_observed_streams_every_finished_action_including_skips() {
     let good = writes("good", "g.txt", "ok");
     let bad = shell("bad", "exit 1").output("b", "b.txt").build();
     let consumer = shell("consumer", "cat b.txt > c.txt")
-        .input_from_output("b", "b.txt", "bad", "b")
+        .dependency_input("b", "b.txt", "bad", "b")
         .output("c", "c.txt")
         .build();
 

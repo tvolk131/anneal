@@ -16,7 +16,7 @@ fn copy_upper_action(input_digest: Digest) -> Action {
         // Read the materialized input, uppercase it, write the declared output.
         "tr a-z A-Z < in.txt > out.txt",
     )
-    .input("src", "in.txt", input_digest)
+    .source_input("src", "in.txt", input_digest)
     .output("result", "out.txt")
     .build()
 }
@@ -75,7 +75,7 @@ fn non_cacheable_action_always_reruns() {
 
     let input = exec.cas().put(b"data").unwrap();
     let action = support::shell_action("echo", "cat in.txt > out.txt")
-        .input("src", "in.txt", input)
+        .source_input("src", "in.txt", input)
         .output("result", "out.txt")
         .cache_policy(CachePolicy::NonCacheable)
         .build();
@@ -141,7 +141,7 @@ fn execute_graph_threads_outputs_between_actions() {
 
     // Producer uppercases its source into the output "produced.txt".
     let producer = support::shell_action("producer", "tr a-z A-Z < in.txt > produced.txt")
-        .input("src", "in.txt", seed)
+        .source_input("src", "in.txt", seed)
         .output("produced.txt", "produced.txt")
         .build();
 
@@ -151,7 +151,7 @@ fn execute_graph_threads_outputs_between_actions() {
         "consumer",
         "cat from_producer.txt > final.txt; echo done >> final.txt",
     )
-    .input_from_output("p", "from_producer.txt", "producer", "produced.txt")
+    .dependency_input("p", "from_producer.txt", "producer", "produced.txt")
     .output("final.txt", "final.txt")
     .build();
 
@@ -171,7 +171,7 @@ fn executing_an_unresolved_action_directly_errors() {
     let dir = tempfile::tempdir().unwrap();
     let exec = LocalExecutor::new(dir.path()).unwrap();
     let action = support::shell_action("c", "true")
-        .input_from_output("p", "x.txt", "no_such_producer", "out")
+        .dependency_input("p", "x.txt", "no_such_producer", "out")
         .output("o", "o.txt")
         .build();
     let err = exec.execute(&action).unwrap_err();

@@ -42,9 +42,16 @@ pub struct Input {
     /// path** that `anneal materialize` should mirror into the developer's working tree
     /// (so native tools — `cargo run`, rust-analyzer — see what the sandbox sees). The
     /// analyzer derives a target's routed-data view from the inputs carrying this flag;
-    /// there is no separate `Analysis.routed_data` field. It marks the rule's declaration
-    /// that this edge is contract-visible generated data, NOT sandbox plumbing (a fetched
-    /// `.crate`, a vendored tree) — a distinction the engine cannot infer structurally.
+    /// there is no separate `Analysis.routed_data` field.
+    ///
+    /// **Derived, never hand-set.** A rule does not write this flag — it declares an
+    /// input's *role* and the engine derives the affordance. [`ActionBuilder::data_input`]
+    /// (the sole writer) sets it iff the data's source is a produced output: generated
+    /// data the dev tools should also see is mirrored; a source blob is already in the
+    /// tree, so it is not. The role-named doors enforce the one distinction the engine
+    /// cannot infer structurally — contract-visible generated data vs sandbox plumbing
+    /// (a fetched `.crate`, an internal test binary), which use
+    /// [`ActionBuilder::dependency_input`] and never mirror.
     ///
     /// It is a **materialize affordance, not build identity**: deliberately EXCLUDED from
     /// the action cache key (`cache.rs::action_digest` writes inputs field-by-field and
@@ -561,9 +568,20 @@ impl ActionBuilder {
         self.action.snapshot_key.is_some()
     }
 
-    /// Declare an input from a concrete CAS blob: materialize `digest` at `path`
-    /// (relative to the working directory) under the logical `name`.
-    pub fn input(
+    // --- Inputs: a role-named vocabulary -------------------------------------------
+    //
+    // A rule declares *what an input is* (its role); the engine derives the mechanical
+    // consequences. Three roles cover every edge: a `source_input` (a blob already in the
+    // tree), a `dependency_input` (a build-internal output edge the developer never sees),
+    // and a `data_input` (content routed for the inner tool to read at a tree path). Only
+    // `data_input` ever sets `mirror_to_tree`, and it *derives* it — the flag is never a
+    // parameter, so a rule cannot mint a nonsensical state (a mirrored source, an
+    // unmirrored data output).
+
+    /// Declare a **source input**: a concrete CAS blob (a source file, a `filegroup`
+    /// member) materialized at `path` (relative to the working directory) under the
+    /// logical `name`. Already in the tree, so never mirrored.
+    pub fn source_input(
         mut self,
         name: impl Into<String>,
         path: impl Into<PathBuf>,
@@ -581,13 +599,13 @@ impl ActionBuilder {
         self
     }
 
-    /// Declare an input from a concrete CAS blob that the action may mutate privately.
+    /// A [`source_input`](Self::source_input) the action may mutate privately.
     ///
     /// Use this for tools that rewrite input manifests in-place as part of otherwise
     /// deterministic operation (for example pnpm's atomic lockfile refresh). The input
     /// digest remains part of the action key; mutations are not captured unless the path
     /// is separately declared as an output.
-    pub fn writable_input(
+    pub fn writable_source_input(
         mut self,
         name: impl Into<String>,
         path: impl Into<PathBuf>,
@@ -605,10 +623,12 @@ impl ActionBuilder {
         self
     }
 
-    /// Declare an input from another action's output: at execution time the producer
-    /// `action_id`'s output `output_name` is resolved to a blob and materialized at
-    /// `path`. This is the inter-action edge of the action graph.
-    pub fn input_from_output(
+    /// Declare a **dependency input**: another action's named output, resolved to a blob
+    /// at execution time and materialized at `path`. This is the build-internal
+    /// inter-action edge — sandbox plumbing the developer never sees (a fetched `.crate`,
+    /// an internal test binary), so it is never mirrored. For generated content the inner
+    /// tool reads at a tree path, use [`data_input`](Self::data_input).
+    pub fn dependency_input(
         mut self,
         name: impl Into<String>,
         path: impl Into<PathBuf>,
@@ -630,54 +650,27 @@ impl ActionBuilder {
         self
     }
 
-    /// Declare an input from another action's output that the action may mutate privately.
-    pub fn writable_input_from_output(
+    /// Declare a **data input**: content a rule routes for the inner tool to read at a
+    /// tree-shaped `path` (a generated `config.json`, a routed file, or a source-backed
+    /// `data` file). `mirror_to_tree` is **derived, never passed**: a produced output is
+    /// generated content the developer's tools should also see → mirrored; a blob is
+    /// already a source in the tree → plain. This is the sole writer of `mirror_to_tree`,
+    /// so a rule states the role and the engine owns the affordance. Build-internal output
+    /// edges that must stay out of the dev tree use [`dependency_input`](Self::dependency_input).
+    pub fn data_input(
         mut self,
         name: impl Into<String>,
         path: impl Into<PathBuf>,
-        action_id: impl Into<String>,
-        output_name: impl Into<String>,
+        source: InputSource,
     ) -> Self {
+        let mirror_to_tree = matches!(source, InputSource::Output { .. });
         self.action.inputs.insert(
             name.into(),
             Input {
                 path: path.into(),
-                source: InputSource::Output {
-                    action: action_id.into(),
-                    name: output_name.into(),
-                },
-                writable: true,
-                mirror_to_tree: false,
-            },
-        );
-        self
-    }
-
-    /// Declare an input from another action's output that is **dev-tree-visible
-    /// generated data** (`mirror_to_tree`): identical to [`input_from_output`] but flags
-    /// the input so `anneal materialize` mirrors it into the working tree. Use this for a
-    /// rule's consumed `data`/routed edges (a generated `config.json`, a routed file) —
-    /// NOT for sandbox plumbing (a fetched `.crate`, an internal test binary), which use
-    /// the plain [`input_from_output`].
-    ///
-    /// [`input_from_output`]: Self::input_from_output
-    pub fn routed_input_from_output(
-        mut self,
-        name: impl Into<String>,
-        path: impl Into<PathBuf>,
-        action_id: impl Into<String>,
-        output_name: impl Into<String>,
-    ) -> Self {
-        self.action.inputs.insert(
-            name.into(),
-            Input {
-                path: path.into(),
-                source: InputSource::Output {
-                    action: action_id.into(),
-                    name: output_name.into(),
-                },
+                source,
                 writable: false,
-                mirror_to_tree: true,
+                mirror_to_tree,
             },
         );
         self
@@ -1004,7 +997,7 @@ mod tests {
     #[test]
     fn rejects_paths_that_can_escape_the_sandbox() {
         let bad_abs = Action::builder("a", ["./tool"])
-            .input("in", "/tmp/in", Digest::of(b"in"))
+            .source_input("in", "/tmp/in", Digest::of(b"in"))
             .try_build()
             .unwrap_err();
         assert!(bad_abs.to_string().contains("must be relative"));
@@ -1058,7 +1051,7 @@ mod tests {
     #[test]
     fn rejects_input_output_path_collision() {
         let err = Action::builder("a", ["./tool"])
-            .input("in", "same", Digest::of(b"in"))
+            .source_input("in", "same", Digest::of(b"in"))
             .output("out", "same")
             .try_build()
             .unwrap_err();
