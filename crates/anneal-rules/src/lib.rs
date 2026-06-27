@@ -23,6 +23,7 @@
 //! is also deferred — `genrule` is configuration-invariant for now.
 
 mod attrs;
+mod axis;
 mod cargo_workspace;
 mod context;
 mod diagnostics;
@@ -38,6 +39,7 @@ mod state;
 mod toolchain;
 
 pub use attrs::{AttrError, AttrValue, Attrs};
+pub use axis::{configure_axis_action, AxisFlagMap, AxisLowering, FlagSink};
 pub use cargo_workspace::CargoWorkspace;
 pub use context::{ResolvedDep, RuleContext, SourcePathRecorder, StateRegistry, TestContext};
 pub use diagnostics::{start_rule_timings, take_rule_timings, RuleTiming};

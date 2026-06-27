@@ -1,10 +1,12 @@
 //! ExecMode through the rule layer (DESIGN.md §4.1/§4.4, increment A): the same
 //! cargo target analyzed under `Incremental` takes a `mutate_state` grant on its
 //! warm `target/`; under `Hermetic` it emits the same actions with **no state
-//! grant** — cold, deterministic, promotable under full enforcement. The two
-//! variants are different configured artifacts by construction (cargo consumes
-//! the `exec_mode` axis), while pnpm-style rules that consume no axes keep
-//! identical keys across modes.
+//! grant** — cold, deterministic, promotable under full enforcement. Under axis-mapping
+//! (§13.6) exec_mode is NOT in cargo's consumed axes (it maps to no flag and is
+//! correctness-neutral), so it no longer enters the key *as an axis value*. The two
+//! variants' action keys still differ — but via their **execution contract**
+//! (`cache_policy` + `snapshot_paths`: SnapshotBased-with-`target/` vs Deterministic),
+//! not via exec_mode. The snapshot's *identity* key stays out of the action key (§8.2).
 
 use anneal_analysis::{ActionGraph, Analyzer};
 use anneal_core::{AxisValues, Configuration, ExecMode, Label, Platform};
@@ -88,7 +90,13 @@ fn hermetic_arm_takes_no_state_grant() {
         "hermetic cargo takes no state grant — cold and promotable"
     );
 
-    // The two variants are different configured artifacts (§4.1): cargo
-    // consumes exec_mode, so the keys differ even with identical sources.
+    // exec_mode is no longer in `consumed_axes` (it maps to no flag — §13.6), so it does
+    // NOT enter the key as an axis value. The two variants' keys still differ, but for a
+    // different, legitimate reason: the Incremental arm is `SnapshotBased` with a `target/`
+    // snapshot path and the Hermetic arm is `Deterministic` with none — that execution-
+    // contract difference (`cache_policy` + `snapshot_paths`) is part of the action key,
+    // even though the snapshot's *identity* key is not (§8.2). So warm and cold builds
+    // remain distinct actions; dropping exec_mode from `consumed` does not, by itself,
+    // collapse them.
     assert_ne!(action_digest(&incremental), action_digest(&hermetic));
 }

@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use anneal_exec::Action;
 
 use crate::attrs::AttrError;
+use crate::axis::AxisFlagMap;
 use crate::context::RuleContext;
 use crate::providers::ProviderSet;
 use crate::schema::AttrSchema;
@@ -37,6 +38,16 @@ pub trait Rule {
 
     /// Analyze one configured target.
     fn analyze(&self, ctx: &RuleContext) -> Result<Analysis, RuleError>;
+
+    /// The configuration axes this rule maps to its inner tool's flags (§13.6). Default:
+    /// none — most rules are config-invariant (`nickel_eval`, `filegroup`, `alias`,
+    /// `pnpm_workspace`). The framework reads the returned [`AxisFlagMap`] to render flags
+    /// for a node and to **derive** each action's consumed axes (so the two can't drift);
+    /// see [`crate::axis`]. Returning a non-empty map opts the rule's compiling actions
+    /// into [`configure_axis_action`](crate::configure_axis_action).
+    fn axis_flags(&self) -> AxisFlagMap {
+        AxisFlagMap::empty()
+    }
 }
 
 /// A failure while analyzing a target.

@@ -59,10 +59,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anneal_core::{
-    AxisValues, Coverage, DebugInfo, Digest, ExecMode, Lto, OptLevel, Sanitizer, ALL_AXES,
+    Axis, Coverage, DebugInfo, Digest, ExecMode, Lto, OptLevel, Sanitizer, ALL_AXES,
 };
 use anneal_exec::{Action, ActionBuilder, Toolchain};
 
+use crate::axis::{configure_axis_action, AxisFlagMap, FlagSink};
 use crate::context::RuleContext;
 use crate::diagnostics;
 use crate::providers::{route_data_inputs, Artifact, ArtifactSource, ProviderSet};
@@ -113,6 +114,41 @@ impl Rule for CargoWorkspace {
 
     fn schema(&self) -> &'static [AttrSchema] {
         SCHEMA
+    }
+
+    /// cargo maps four axes into `RUSTFLAGS` (§13.6). The framework derives `consumed_axes`
+    /// from this map (∪ the explicit non-flag `OptLevel` at each call site) and renders the
+    /// flags per node — replacing the hand-written `rustflags_for` + `ALL_AXES`-consumed
+    /// pair, and dropping `exec_mode` (correctness-neutral; it gates a state grant, not a
+    /// flag) from the output key. Each renderer takes only its own axis's value, so it
+    /// cannot read another field — the consumed set and the real flag dependencies are
+    /// guaranteed equal. The match arms are the rustc spellings (the rule's knowledge).
+    fn axis_flags(&self) -> AxisFlagMap {
+        AxisFlagMap::empty()
+            .lto(FlagSink::EnvVar("RUSTFLAGS"), |lto| match lto {
+                Lto::Off => None,
+                Lto::Thin => Some("-Clto=thin".to_owned()),
+                Lto::Full => Some("-Clto=fat".to_owned()),
+            })
+            .debug_info(
+                FlagSink::EnvVar("RUSTFLAGS"),
+                |debug_info| match debug_info {
+                    DebugInfo::Full => None,
+                    DebugInfo::LineTablesOnly => Some("-Cdebuginfo=1".to_owned()),
+                    DebugInfo::None => Some("-Cdebuginfo=0".to_owned()),
+                },
+            )
+            .sanitizer(FlagSink::EnvVar("RUSTFLAGS"), |sanitizer| match sanitizer {
+                Sanitizer::None => None,
+                Sanitizer::Address => Some("-Zsanitizer=address".to_owned()),
+                Sanitizer::Thread => Some("-Zsanitizer=thread".to_owned()),
+                Sanitizer::Memory => Some("-Zsanitizer=memory".to_owned()),
+                Sanitizer::Undefined => Some("-Zsanitizer=undefined".to_owned()),
+            })
+            .coverage(FlagSink::EnvVar("RUSTFLAGS"), |coverage| match coverage {
+                Coverage::On => Some("-Cinstrument-coverage".to_owned()),
+                Coverage::Off => None,
+            })
     }
 
     fn analyze(&self, ctx: &RuleContext) -> Result<Analysis, RuleError> {
@@ -172,15 +208,16 @@ impl Rule for CargoWorkspace {
             merge_toolchain_env(&mut env, nix_toolchain_env(name)?, name)?;
         }
 
-        // cargo_workspace interprets all five axes (§13.6), so it consumes all five —
-        // each enters the cache key, and the snapshot key, at its current value.
-        let rustflags = rustflags_for(ctx.config().axes());
-        let consumed = ALL_AXES.to_vec();
+        // Axis→flag mapping (§13.6): the framework renders RUSTFLAGS from this map and
+        // derives each compiling action's consumed_axes from it (∪ OptLevel — a non-flag
+        // axis that still changes the binary, see `configure_axis_action` calls below).
+        // exec_mode is deliberately absent: it gates a state grant, not a flag, and is
+        // correctness-neutral, so it must not enter the output cache key.
+        let axis_map = self.axis_flags();
 
         // The shared environment every compiling/linking cargo action runs with.
         // Built once; only the action name and command vary per action.
         let setup = CargoActionEnv {
-            rustflags: &rustflags,
             toolchain: &toolchain,
             runtime: &runtime,
             native_libs: &native_libs,
@@ -278,8 +315,7 @@ impl Rule for CargoWorkspace {
                     build = build.output(out.to_string_lossy().into_owned(), out);
                 }
                 actions.push(
-                    build
-                        .configured(ctx.config().clone(), consumed.clone())
+                    configure_axis_action(build, ctx.config(), &axis_map, &[Axis::OptLevel])
                         .mutate_state_opt(target_state.as_ref())?
                         .try_build()?,
                 );
@@ -321,8 +357,13 @@ impl Rule for CargoWorkspace {
                             ),
                             crate_deps,
                         )
-                        .output("test-bin", test_bin_path)
-                        .configured(ctx.config().clone(), consumed.clone())
+                        .output("test-bin", test_bin_path);
+                        let compile = configure_axis_action(
+                            compile,
+                            ctx.config(),
+                            &axis_map,
+                            &[Axis::OptLevel],
+                        )
                         .mutate_state_opt(target_state.as_ref())?;
                         actions.push(compile.try_build()?);
 
@@ -385,9 +426,10 @@ impl Rule for CargoWorkspace {
                                 &data,
                             ),
                             crate_deps,
-                        )
-                        .configured(ctx.config().clone(), consumed.clone())
-                        .mutate_state_opt(target_state.as_ref())?;
+                        );
+                        let doc =
+                            configure_axis_action(doc, ctx.config(), &axis_map, &[Axis::OptLevel])
+                                .mutate_state_opt(target_state.as_ref())?;
                         actions.push(doc.try_build()?);
                     }
 
@@ -417,8 +459,13 @@ impl Rule for CargoWorkspace {
                                 &data,
                             ),
                             crate_deps,
+                        );
+                        let integ = configure_axis_action(
+                            integ,
+                            ctx.config(),
+                            &axis_map,
+                            &[Axis::OptLevel],
                         )
-                        .configured(ctx.config().clone(), consumed.clone())
                         .mutate_state_opt(target_state.as_ref())?;
                         actions.push(integ.try_build()?);
                     }
@@ -470,11 +517,11 @@ impl CrateInfo {
 
 /// The shared environment every `cargo` compiling/linking action runs with:
 /// the toolchains whose roots mount into the build (rust + posix runtime + any
-/// workspace `native_libs`) — their bin dirs compose into PATH at build — their merged
-/// env, and the axis-derived `RUSTFLAGS`. Built once per analysis; only the action name
-/// and command vary across the build/compile/doc/integration actions.
+/// workspace `native_libs`) — their bin dirs compose into PATH at build — and their merged
+/// env. The axis-derived `RUSTFLAGS` is *not* here; `configure_axis_action` adds it per
+/// action. Built once per analysis; only the action name and command vary across the
+/// build/compile/doc/integration actions.
 struct CargoActionEnv<'a> {
-    rustflags: &'a str,
     toolchain: &'a Toolchain,
     runtime: &'a Toolchain,
     native_libs: &'a [Toolchain],
@@ -502,11 +549,9 @@ fn cargo_builder(name: String, command: Vec<String>, setup: &CargoActionEnv) -> 
     for (key, value) in setup.env {
         builder = builder.env(key, value);
     }
-    // Only set RUSTFLAGS when an axis actually changes a flag, so a default-config
-    // build is byte-for-byte what plain `cargo` produces.
-    if !setup.rustflags.is_empty() {
-        builder = builder.env("RUSTFLAGS", setup.rustflags);
-    }
+    // RUSTFLAGS is NOT set here — `configure_axis_action` renders it from the axis map at
+    // each call site (and only when an axis actually changes a flag, so a default-config
+    // build is byte-for-byte what plain `cargo` produces).
     builder
 }
 
@@ -536,41 +581,6 @@ fn merge_toolchain_env(
         }
     }
     Ok(())
-}
-
-/// Translate the `lto`, `debug_info`, `sanitizer`, and `coverage` axes into a
-/// `RUSTFLAGS` string (§13.6). `opt_level` is handled separately as the Cargo
-/// profile. Each axis emits a flag only for non-default values, so the default
-/// configuration yields an empty string (no override of the profile's own choices).
-///
-/// `sanitizer` maps to `-Z sanitizer=…`, which requires a nightly toolchain; on
-/// stable a sanitized build will fail at compile time. The mapping is still applied
-/// so the configuration is honest and enters the cache key.
-fn rustflags_for(axes: &AxisValues) -> String {
-    let mut flags: Vec<String> = Vec::new();
-
-    match axes.lto {
-        Lto::Off => {}
-        Lto::Thin => flags.push("-Clto=thin".to_owned()),
-        Lto::Full => flags.push("-Clto=fat".to_owned()),
-    }
-    match axes.debug_info {
-        DebugInfo::Full => {} // profile default
-        DebugInfo::LineTablesOnly => flags.push("-Cdebuginfo=1".to_owned()),
-        DebugInfo::None => flags.push("-Cdebuginfo=0".to_owned()),
-    }
-    match axes.sanitizer {
-        Sanitizer::None => {}
-        Sanitizer::Address => flags.push("-Zsanitizer=address".to_owned()),
-        Sanitizer::Thread => flags.push("-Zsanitizer=thread".to_owned()),
-        Sanitizer::Memory => flags.push("-Zsanitizer=memory".to_owned()),
-        Sanitizer::Undefined => flags.push("-Zsanitizer=undefined".to_owned()),
-    }
-    if axes.coverage == Coverage::On {
-        flags.push("-Cinstrument-coverage".to_owned());
-    }
-
-    flags.join(" ")
 }
 
 /// Add every source file as a content-addressed input.
@@ -832,6 +842,12 @@ fn target_state_shard(
         },
     );
     shard.push(ctx.config().platform().target_triple().to_owned());
+    // The warm-tree shard deliberately uses ALL_AXES — not the action's derived
+    // consumed set. State identity is **per-configuration** (a debug, a release, and an
+    // Incremental vs Hermetic build each want their own `target/` tree so they don't
+    // thrash one another), whereas output identity is per-content (the action key). So
+    // exec_mode is excluded from the action key but kept here: the two are different keys
+    // with different jobs.
     let all_axes = BTreeSet::from(ALL_AXES);
     for (name, value) in ctx.config().axes().consumed(&all_axes) {
         shard.push(format!("{name}={value}"));
@@ -930,13 +946,46 @@ fn workspace_crates(ctx: &RuleContext) -> Result<Vec<CrateInfo>, RuleError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{merge_toolchain_env, rustflags_for};
-    use anneal_core::{AxisValues, Coverage, DebugInfo, Lto, Sanitizer};
+    use super::{merge_toolchain_env, CargoWorkspace};
+    use crate::Rule;
+    use anneal_core::{Axis, AxisValues, Coverage, DebugInfo, Lto, Sanitizer};
     use std::collections::BTreeMap;
+
+    /// The RUSTFLAGS cargo's axis map renders for `axes` (empty string if no axis
+    /// contributes) — the through-the-map equivalent of the old `rustflags_for`.
+    fn rustflags(axes: &AxisValues) -> String {
+        CargoWorkspace
+            .axis_flags()
+            .lower(axes)
+            .env
+            .get("RUSTFLAGS")
+            .cloned()
+            .unwrap_or_default()
+    }
 
     #[test]
     fn default_config_emits_no_rustflags() {
-        assert_eq!(rustflags_for(&AxisValues::default()), "");
+        assert_eq!(rustflags(&AxisValues::default()), "");
+    }
+
+    #[test]
+    fn consumed_axes_are_derived_from_the_map_and_exclude_exec_mode() {
+        // The desync closure: the consumed set IS the map's key set. cargo maps the four
+        // RUSTFLAGS axes; exec_mode (a state-grant gate, correctness-neutral) and opt_level
+        // (a profile/CLI axis, declared explicitly at the call site) are NOT in the map.
+        let mapped = CargoWorkspace.axis_flags().mapped_axes();
+        assert!(mapped.contains(&Axis::Lto));
+        assert!(mapped.contains(&Axis::DebugInfo));
+        assert!(mapped.contains(&Axis::Sanitizer));
+        assert!(mapped.contains(&Axis::Coverage));
+        assert!(
+            !mapped.contains(&Axis::ExecMode),
+            "exec_mode is correctness-neutral and maps to no flag — must not be consumed"
+        );
+        assert!(
+            !mapped.contains(&Axis::OptLevel),
+            "opt_level is a profile/CLI axis, consumed via the explicit call-site list"
+        );
     }
 
     #[test]
@@ -982,7 +1031,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            rustflags_for(&axes),
+            rustflags(&axes),
             "-Clto=thin -Cdebuginfo=0 -Cinstrument-coverage"
         );
     }
@@ -994,7 +1043,7 @@ mod tests {
             debug_info: DebugInfo::LineTablesOnly,
             ..Default::default()
         };
-        assert_eq!(rustflags_for(&axes), "-Clto=fat -Cdebuginfo=1");
+        assert_eq!(rustflags(&axes), "-Clto=fat -Cdebuginfo=1");
     }
 
     #[test]
@@ -1003,6 +1052,6 @@ mod tests {
             sanitizer: Sanitizer::Address,
             ..Default::default()
         };
-        assert_eq!(rustflags_for(&axes), "-Zsanitizer=address");
+        assert_eq!(rustflags(&axes), "-Zsanitizer=address");
     }
 }
