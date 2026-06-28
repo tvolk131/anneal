@@ -50,8 +50,12 @@
 //! auto-mapping of `-sys` crates to nixpkgs attrs (§Q3). Bundled-C crates (`ring`)
 //! need none of this; they compile their own C with the toolchain.
 //!
-//! Deferred: `RUSTFLAGS`/sanitizer/coverage axes (§13.6), binary/bin-unit test targets,
-//! integration multi-binary split, separately-addressable test targets; in fetch mode,
+//! The `lto`/`debug_info`/`sanitizer`/`coverage` axes map into `RUSTFLAGS` via
+//! [`CargoWorkspace::axis_flags`] (§13.6); `opt_level` rides the Cargo profile.
+//!
+//! Deferred: binary/bin-unit test targets, integration multi-binary split,
+//! separately-addressable test targets; `opt_level` as a typed map entry rather than the
+//! explicit `extra_consumed` (a `FlagSink::CliArg` for `--release`); in fetch mode,
 //! git/`path`-registry deps and non-crates.io registries (vendor those), and a generated
 //! lockfile (needs the staged-graph pass).
 
