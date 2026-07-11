@@ -24,14 +24,18 @@ is *derived* from the action inputs a rule flags `mirror_to_tree` (broken down b
 parallel list a rule maintains by hand. Everything else in this document is an *obligation* or
 a *freedom* of that function — not a separate mechanism.
 
-Two consequences fall directly out of "pure function, run in the analysis phase":
+Two consequences fall directly out of "deterministic function, run in the analysis phase":
 
-- It **cannot execute anything.** It emits actions to be run later; it does not run them.
-- It **cannot see generated content.** It runs in analysis, before execution, so any
-  artifact a downstream action will produce does not exist yet. A rule reads *source* and
-  *static declared structure* only. (This is the §14.6 phase wall — the reason a generated
-  `Cargo.toml` / `pnpm-workspace.yaml` is impossible to consume as an edge, but a generated
-  `config.json` is fine.)
+- It **cannot execute arbitrary build work.** It emits actions to be run later; it does not
+  run those actions. A rule may issue a deliberately narrower, content-addressed `QuerySpec`
+  through `RuleContext::query` to obtain deterministic tool-reported analysis facts. That
+  experimental door is sealed, network-denied, stdout-only, and currently source/toolchain-only;
+  no production rule uses it yet.
+- It **cannot see ordinary generated artifacts.** A downstream action's output does not exist
+  during analysis and cannot currently be a query input. A rule reads source/static declared
+  structure plus the stdout of the constrained query mechanism above. This is the §14.6 phase
+  wall: consuming a generated `Cargo.toml` / `pnpm-workspace.yaml` needs the deferred staged-graph
+  mechanism, while routing a generated `config.json` into an execution action is fine.
 
 ### What `analyze` returns
 
@@ -98,9 +102,10 @@ The function signature is small; the obligations it carries are not. A rule:
    configuration flows down — §5.4). Routing a generated artifact across a language
    boundary is entirely a provider/consumer story; no action "knows" about the consumer.
 
-3. **Is a pure analysis-phase function** — see §1. The phase wall is not a limitation to
-   work around; it is what *distinguishes a rule from a build step*. A rule decides the
-   shape of the graph; it does not participate in running it.
+3. **Is a deterministic analysis-phase function** — see §1. The phase wall is not a limitation
+   to work around; it is what *distinguishes a rule from a build step*. A rule decides the shape
+   of the graph and may request keyed analysis facts through the constrained query mechanism; it
+   does not participate in running the build actions it emits.
 
 4. **Claims an ownership territory.** A workspace rule stakes an *exclusive* claim over a
    package subtree — `owner(path)` is the nearest enclosing package (§1.5). A rule is not

@@ -2,7 +2,12 @@
 
 **Anneal is a build system that wraps the tools you already use — cargo, pnpm, go — instead of replacing them, and makes their caching actually trustworthy by enforcing, not just declaring, what every build step is allowed to read.**
 
-> **Status:** Anneal is in active development (pre-1.0). This document describes the system as designed and being built; the [design document](../DESIGN.md) is the engineering-level companion. Where a feature is roadmap rather than current, this doc says so.
+> **Status:** Anneal is in active development (pre-1.0). This is a product-thesis and
+> target-experience document: some transcripts intentionally show the intended end state,
+> including commands and shared-cache behavior that have not shipped. The
+> [README feature matrix](../README.md#current-implementation-status) is the authoritative
+> account of what works today; the [design document](../DESIGN.md) is the engineering-level
+> companion.
 
 This page is for you if you work in a monorepo at a small-to-mid-sized team and some of the following sounds familiar.
 

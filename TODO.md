@@ -1,21 +1,21 @@
 # Anneal — open work / TODO
 
-> Running list of what's not yet built, beyond what's already in `build-system-design.md` §21.
-> Status as of 2026-06-04: cargo_workspace, nickel_eval, pnpm_workspace M1, Nickel→Rust,
-> Nickel→TS, CLI build/test/affected/why, warm reuse, input-digest caching, Linux/macOS
-> sealed sandbox hardening, and mandatory Nix toolchain manifests are done. Section refs (§)
-> point at `build-system-design.md`.
+> Detailed implementation backlog and engineering record, beyond what's already in
+> `build-system-design.md` §21. The [README feature matrix](README.md#current-implementation-status)
+> is the authoritative current-availability summary; this file carries the granular follow-ons,
+> rationale, and historical measurements. Section refs (§) point at `build-system-design.md`
+> unless stated otherwise.
 
 ## Current priority queue
 
-1. **Clean correctness edges:** generated-path collision enforcement, one owning workspace per
-   package directory, and CI wiring for correctness-neutral verification.
+1. **Clean correctness edges:** one owning workspace per package directory, derived source
+   footprints, read-tracking diagnostics, and broader correctness-neutral verification.
 2. **Next performance lever:** treat `vendor/` / `.cargo/` as one lockfile-keyed unit instead
    of enumerating/stat-ing thousands of vendored files every build.
 3. **Store lifecycle:** CAS/action-cache/snapshot GC and eviction, then snapshot-on-evict.
 4. **Rule completeness:** cargo metadata/staged graph, cargo test target split/selection, and
    pnpm external-dependency/offline-store work.
-5. **CLI/product surface:** `materialize`, `run`/`check`, cache commands, `status`, and richer
+5. **CLI/product surface:** `run`/`check`, cache commands, `status`, input sensing, and richer
    structured test output.
 
 ## Correctness & enforcement (do alongside the relevant feature)
@@ -36,14 +36,12 @@
       generators interact / multi-package loading lands.
 - [ ] **One owning workspace per package directory.** Reject two workspace targets sweeping the same dir
       (the degenerate exclusive-ownership violation, §1.5).
-- [ ] **Explicit `exclude` on sweeping rules** (input-scoping; future). `cargo_workspace`/`pnpm_workspace`
-      sweep `source_tree(".")` wholesale; an opt-in `exclude = [...]` would carve out files the rule shouldn't
-      claim (e.g. a sibling `.ncl` owned by another rule), removing spurious cross-rule cache deps. This is the
-      **local, explicit** alternative to auto-partitioning a residual rule by its siblings' claims — considered
-      and **rejected for non-locality** (a sibling rule silently changing the sweep's inputs/cache; against the
-      "explicit inputs" grain Bazel chose). Most of the same effect is already available via **package
-      boundaries** (put the carved-out file in its own package). Related, semantics-free: an `anneal owners
-      //pkg` **diagnostic** that prints the file→rule mapping — the inspectability benefit without the coupling.
+- [ ] **Derived source footprints + explicit additions** (`DESIGN.md` §11). Replace the current
+      whole-package `source_tree(".")` sweep in `cargo_workspace`/`pnpm_workspace` with ecosystem-derived
+      member trees plus explicit cross-boundary inputs. Follow with `anneal sense`/audit tooling that proposes
+      declarations from observed reads without making traces execution-time truth. The previously proposed
+      `exclude` surface was rejected: exclusions make ordinary repo accretion silently erode cache precision,
+      whereas a missing explicit input fails loudly under the seal.
 - [ ] **Read-tracking to *enforce* declared inputs** (`docs/sandboxing.md`). Fail on undeclared reads —
       defensive, catches under-declaration. Most valuable on macOS (where it's otherwise silent); on Linux
       it's mostly a better diagnostic (isolation already guarantees it). NOT for relaxing invalidation.
@@ -152,10 +150,11 @@
         an edited state vs a clean build of it, path-matched at the per-key warm dir → isolates the sync); a real
         cargo two-crate test (`warm_reuse_build_is_correctness_neutral`) is the mtime-hazard backstop. (b) **the
         cross-process workspace lock** + sandbox-name `pid` token — done (`WorkspaceLock`).
-    - [ ] **Run the neutrality gate in CI** — `verify_warm_neutral`/`verify_correctness_neutral` exist and have
-          representative cargo tests (incl. a content-revert: `warm_reuse_is_neutral_across_a_revert`, the
-          mtime-hazard backstop on the real tool); wire them as a routine CI gate over more rules/actions (it's a
-          sampling detector, so breadth matters), and add a triage note for tool-nondeterminism false-positives.
+    - [ ] **Broaden the neutrality gate in CI** — `verify_warm_neutral`/`verify_correctness_neutral` already run
+          through representative cargo tests (incl. a content-revert:
+          `warm_reuse_is_neutral_across_a_revert`, the mtime-hazard backstop on the real tool). Extend the routine
+          gate over more rules/actions (it's a sampling detector, so breadth matters), and add a triage note for
+          tool-nondeterminism false-positives.
     - [ ] **pnpm neutrality (deferred — vacuous in M1 scope).** A pnpm *warm*-neutral test doesn't fit: the only
           warm owner (`install`) declares no file outputs (its product is the node_modules snapshot) and has no
           incremental-reuse shape (its key tracks the lockfile, not source → unchanged = action-cache hit,
@@ -256,10 +255,10 @@
 ## CLI
 
 - [x] **`anneal` binary** (§18) — crate `anneal-cli`, thin orchestration over
-      `load_package → Analyzer → execute_graph`. **Done so far:** `build` and `test` (single package;
-      `test` summarizes via the rule-agnostic `ANNEAL_TEST_EXIT` marker), `--version`, clean exit codes
-      (0 ok / 1 failed / 2 usage), and **config-selection flags** (§6.6): `--platform`, `--opt-level`,
-      `--lto`, `--debug-info`, `--sanitizer`, `--coverage`.
+      `load_closure → Analyzer → execute_graph`. **Done so far:** `build` and `test` over transitive
+      multi-package closures (`test` summarizes via the rule-agnostic `ANNEAL_TEST_EXIT` marker), `--version`,
+      clean exit codes (0 ok / 1 failed / 2 usage), and configuration flags for platform, build axes,
+      `ExecMode`, jobs, and the enforcement floor.
   - [x] **`affected` / `why`** are wired through `anneal-cli`.
   - [ ] **`run` / `check`**; `query` / `aquery`; `cache` push/info/clean; `status`.
   - [ ] **Structured per-test output** in `test` (libtest/JSON parse via `anneal-test`) — currently
@@ -276,8 +275,8 @@
   - [x] **Multi-package targets** — the CLI now loads the target's transitive package closure
         (`load_closure`), so cross-package deps build.
   - [x] **`materialize`** (§14.4) — make a consuming target's tree view match its sandbox: build the
-        generated files its actions consume at tree-shaped paths (the rule-declared
-        `Analysis::routed_data`, re-homed workspace-relative by the analyzer) and park them in the
+        generated files its actions consume at tree-shaped paths (derived by the analyzer from
+        role-marked action inputs, then re-homed workspace-relative) and park them in the
         working tree for IDEs and native tooling (`cargo run` over routed `data` inputs). Executes only
         the **producing subgraph**, so it works precisely when the consumer's own build is broken (the
         debug-natively case). Manifest-tracked (`.anneal/materialized`): digest-compare skips identical
@@ -285,10 +284,11 @@
         `--force`; `--check` / `--list` / `--clean` round it out. Tree copies are excluded from source
         discovery (`RuleContext::with_materialized`), so they can't shadow the producer's declared
         output or perturb cache/snapshot keys (asserted byte-identical in `materialize_exclusion.rs`).
-    - [ ] `alias` does not forward routed data (a dest is package-relative to the consuming target;
-          forwarding would re-home it) — materialize the actual target. Output-export ("give me the
-          built artifact") is deliberately not this verb: it belongs with `run`/`outputs` and a stable
-          out-dir. The §14.6 **staged pass** (generated `Cargo.toml`, etc.) remains separate.
+    - **Known limitation (intentional):** `alias` does not forward routed data (a destination is
+      package-relative to the consuming target; forwarding would re-home it). Materialize the actual target.
+      Output export ("give me the built artifact") is deliberately not this verb: it belongs with
+      `run`/`outputs` and a stable out-dir. The §14.6 **staged pass** (generated `Cargo.toml`, etc.) remains
+      separate.
   - [ ] **`exec`** escape hatch (§7.6) — run an arbitrary command in a sandbox (permissive by default;
         `--hermetic`/`--no-network` opt-in).
   - [ ] **`init` / `init --detect`** (§15.2) — interactive setup / scaffold config without touching native files.
@@ -540,8 +540,9 @@ shape is shared across every package ecosystem.
 - [x] **macOS sandbox hardening** — implemented with generated `sandbox-exec` profiles, scrubbed env,
       network deny/allow by capability, fd/stdio hardening, declared toolchain read-only policy, and tests that
       document both enforced guarantees and unavoidable metadata/runtime visibility gaps.
-- [ ] **Wire Linux sandbox Docker tests into CI** so the Linux hermeticity suite runs routinely even when
-      developers are on macOS.
+- [x] **Linux sandbox Docker tests run in CI.** The Ubuntu lane executes the Rust suite inside the privileged
+      sandbox container with the Nix toolchain manifest, and the dedicated `linux-sandbox-docker` job exercises
+      the hermeticity harness directly.
 
 ## Diagnostics
 
