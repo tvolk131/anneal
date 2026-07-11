@@ -38,6 +38,26 @@ pub struct Input {
     /// the materializer uses a distinct writable copy rather than a CAS hardlink/clone,
     /// and the Linux sandbox does not overmount this path read-only.
     pub writable: bool,
+    /// Whether this input is a **generated file the inner tool reads at a tree-shaped
+    /// path** that `anneal materialize` should mirror into the developer's working tree
+    /// (so native tools — `cargo run`, rust-analyzer — see what the sandbox sees). The
+    /// analyzer derives a target's routed-data view from the inputs carrying this flag;
+    /// there is no separate `Analysis.routed_data` field.
+    ///
+    /// **Derived, never hand-set.** A rule does not write this flag — it declares an
+    /// input's *role* and the engine derives the affordance. [`ActionBuilder::data_input`]
+    /// (the sole writer) sets it iff the data's source is a produced output: generated
+    /// data the dev tools should also see is mirrored; a source blob is already in the
+    /// tree, so it is not. The role-named doors enforce the one distinction the engine
+    /// cannot infer structurally — contract-visible generated data vs sandbox plumbing
+    /// (a fetched `.crate`, an internal test binary), which use
+    /// [`ActionBuilder::dependency_input`] and never mirror.
+    ///
+    /// It is a **materialize affordance, not build identity**: deliberately EXCLUDED from
+    /// the action cache key (`cache.rs::action_digest` writes inputs field-by-field and
+    /// never folds this in — like `writable` is folded but this is not). Two actions
+    /// differing only in `mirror_to_tree` MUST hash identically.
+    pub mirror_to_tree: bool,
 }
 
 /// A host toolchain made visible to an action.
@@ -241,8 +261,17 @@ pub struct Action {
     /// hash fences the impurity) and the `exec` escape hatch. Kept orthogonal to
     /// [`CachePolicy`] so the capability is reusable; Linux sealed actions enforce the
     /// default with a private network namespace, and macOS sealed actions enforce it via
-    /// `sandbox-exec`.
+    /// `sandbox-exec`. (A **native** fetch — `fetch_url` set — does its I/O in the
+    /// executor process, so no sandbox enforcement applies; the flag stays set as the
+    /// honest capability declaration.)
     pub(crate) network: bool,
+    /// For a **native fixed-output fetch** (§FOD): the URL the executor
+    /// downloads in-process (pure-Rust TLS, Mozilla roots compiled in) instead
+    /// of spawning a sandboxed command. Set via [`ActionBuilder::fetch`];
+    /// always paired with [`CachePolicy::FixedOutput`] and an empty `command`
+    /// — there is no inner tool. The pin carries the integrity guarantee, so
+    /// the embedded root store is availability-only configuration.
+    pub(crate) fetch_url: Option<String>,
 }
 
 impl Action {
@@ -270,7 +299,9 @@ impl Action {
                 snapshot_shared: true,
                 platform_sensitive: true,
                 network: false,
+                fetch_url: None,
             },
+            toolchain_order: Vec::new(),
         }
     }
 
@@ -281,12 +312,34 @@ impl Action {
         &self.name
     }
 
+    /// Declared inputs, keyed by logical input name.
+    pub fn inputs(&self) -> &BTreeMap<String, Input> {
+        &self.inputs
+    }
+
+    /// Additional environment variables for this action (names and values both
+    /// enter the cache key, §7.4).
+    pub fn env(&self) -> &BTreeMap<String, String> {
+        &self.env
+    }
+
+    /// Toolchains attached to this action, keyed by name. Their `read_only_roots`
+    /// are mounted read-only in the sandbox and their identities enter the cache key.
+    pub fn toolchains(&self) -> &BTreeMap<String, Toolchain> {
+        &self.toolchains
+    }
+
     /// Declared outputs, keyed by logical output name.
     pub fn outputs(&self) -> &BTreeMap<String, PathBuf> {
         &self.outputs
     }
 
     /// The action working directory relative to the sandbox root.
+    /// The snapshot key, if this action uses a persistent state tree.
+    pub fn snapshot_key(&self) -> Option<Digest> {
+        self.snapshot_key
+    }
+
     pub fn working_directory(&self) -> &Path {
         &self.working_directory
     }
@@ -298,11 +351,19 @@ impl Action {
         self.network
     }
 
+    /// The URL of a native fixed-output fetch, if this action is one.
+    pub fn fetch_url(&self) -> Option<&str> {
+        self.fetch_url.as_deref()
+    }
+
     /// Validate the action contract before materialization or keying. This is the
     /// central path-safety check: action paths are relative to the action working
     /// directory and must not contain absolute roots or parent components.
     pub fn validate(&self) -> Result<(), ActionError> {
         validate_action_name(&self.name)?;
+        if self.fetch_url.is_some() {
+            return self.validate_fetch_contract();
+        }
         if self.command.is_empty() {
             return Err(ActionError::new(format!(
                 "action {:?} has an empty command",
@@ -311,6 +372,24 @@ impl Action {
         }
         self.validate_command_contract()?;
         validate_relative_path("working directory", &self.working_directory, true)?;
+
+        // DESIGN.md §4.4: Hermetic is enforced, not conventional. A private
+        // snapshot owner is a mutator of interleaved tool state (the typed
+        // `mutate_state` grant lowers to exactly this shape), and Hermetic
+        // means "no interleaved mutation." Shared snapshots (phase-separated
+        // producers) and restores (consumers) remain legal — CI must populate
+        // phase-separated state.
+        if self.config.axes().exec_mode == anneal_core::ExecMode::Hermetic
+            && matches!(self.cache_policy, CachePolicy::SnapshotBased)
+            && !self.snapshot_shared
+        {
+            return Err(ActionError::new(format!(
+                "action {:?} mutates interleaved state under ExecMode::Hermetic — \
+                 hermetic actions may not take mutate_state grants (DESIGN.md §4.4); \
+                 emit the warm variant only under Incremental",
+                self.name
+            )));
+        }
 
         for (key, value) in &self.env {
             if key.is_empty() || key.contains('=') || key.contains('\0') {
@@ -399,6 +478,34 @@ impl Action {
         Ok(())
     }
 
+    /// A native fetch runs no inner tool: nothing that only matters inside a
+    /// sandbox may be declared, and the §FOD single-pin shape is enforced at
+    /// build time rather than first execution.
+    fn validate_fetch_contract(&self) -> Result<(), ActionError> {
+        let problem = if !self.command.is_empty() {
+            Some("declares a command (a native fetch runs no inner tool)")
+        } else if !self.inputs.is_empty() {
+            Some("declares inputs (a native fetch has none)")
+        } else if !self.toolchains.is_empty() {
+            Some("declares toolchains (a native fetch consults none)")
+        } else if !self.snapshot_paths.is_empty() {
+            Some("declares snapshot paths (a native fetch has no tool state)")
+        } else if self.outputs.len() != 1 {
+            Some("must declare exactly one output (the pin is a single digest)")
+        } else if !matches!(self.cache_policy, CachePolicy::FixedOutput { .. }) {
+            Some("must be FixedOutput (use ActionBuilder::fetch)")
+        } else {
+            None
+        };
+        match problem {
+            Some(problem) => Err(ActionError::new(format!(
+                "native fetch action {:?} {problem}",
+                self.name
+            ))),
+            None => Ok(()),
+        }
+    }
+
     fn validate_command_contract(&self) -> Result<(), ActionError> {
         if self.execution_mode != ExecutionMode::Sealed {
             return Ok(());
@@ -452,12 +559,35 @@ fn default_host_config() -> Configuration {
 #[derive(Debug, Clone)]
 pub struct ActionBuilder {
     action: Action,
+    /// Toolchain names in the order they were added. `Action::toolchains` is a
+    /// name-keyed `BTreeMap` (canonical for the cache key), which loses add order — but
+    /// PATH composition is order-sensitive (precedence), so we track insertion order here
+    /// to compose PATH deterministically at build (see `compose_path_from_toolchains`).
+    toolchain_order: Vec<String>,
 }
 
 impl ActionBuilder {
-    /// Declare an input from a concrete CAS blob: materialize `digest` at `path`
-    /// (relative to the working directory) under the logical `name`.
-    pub fn input(
+    /// Whether a snapshot (persistent state tree) is already attached. The
+    /// action model carries at most one; the typed state layer in
+    /// `anneal-rules` uses this to reject a second grant at analysis time.
+    pub fn snapshot_is_set(&self) -> bool {
+        self.action.snapshot_key.is_some()
+    }
+
+    // --- Inputs: a role-named vocabulary -------------------------------------------
+    //
+    // A rule declares *what an input is* (its role); the engine derives the mechanical
+    // consequences. Three roles cover every edge: a `source_input` (a blob already in the
+    // tree), a `dependency_input` (a build-internal output edge the developer never sees),
+    // and a `data_input` (content routed for the inner tool to read at a tree path). Only
+    // `data_input` ever sets `mirror_to_tree`, and it *derives* it — the flag is never a
+    // parameter, so a rule cannot mint a nonsensical state (a mirrored source, an
+    // unmirrored data output).
+
+    /// Declare a **source input**: a concrete CAS blob (a source file, a `filegroup`
+    /// member) materialized at `path` (relative to the working directory) under the
+    /// logical `name`. Already in the tree, so never mirrored.
+    pub fn source_input(
         mut self,
         name: impl Into<String>,
         path: impl Into<PathBuf>,
@@ -469,18 +599,19 @@ impl ActionBuilder {
                 path: path.into(),
                 source: InputSource::Blob(digest),
                 writable: false,
+                mirror_to_tree: false,
             },
         );
         self
     }
 
-    /// Declare an input from a concrete CAS blob that the action may mutate privately.
+    /// A [`source_input`](Self::source_input) the action may mutate privately.
     ///
     /// Use this for tools that rewrite input manifests in-place as part of otherwise
     /// deterministic operation (for example pnpm's atomic lockfile refresh). The input
     /// digest remains part of the action key; mutations are not captured unless the path
     /// is separately declared as an output.
-    pub fn writable_input(
+    pub fn writable_source_input(
         mut self,
         name: impl Into<String>,
         path: impl Into<PathBuf>,
@@ -492,15 +623,18 @@ impl ActionBuilder {
                 path: path.into(),
                 source: InputSource::Blob(digest),
                 writable: true,
+                mirror_to_tree: false,
             },
         );
         self
     }
 
-    /// Declare an input from another action's output: at execution time the producer
-    /// `action_id`'s output `output_name` is resolved to a blob and materialized at
-    /// `path`. This is the inter-action edge of the action graph.
-    pub fn input_from_output(
+    /// Declare a **dependency input**: another action's named output, resolved to a blob
+    /// at execution time and materialized at `path`. This is the build-internal
+    /// inter-action edge — sandbox plumbing the developer never sees (a fetched `.crate`,
+    /// an internal test binary), so it is never mirrored. For generated content the inner
+    /// tool reads at a tree path, use [`data_input`](Self::data_input).
+    pub fn dependency_input(
         mut self,
         name: impl Into<String>,
         path: impl Into<PathBuf>,
@@ -516,28 +650,33 @@ impl ActionBuilder {
                     name: output_name.into(),
                 },
                 writable: false,
+                mirror_to_tree: false,
             },
         );
         self
     }
 
-    /// Declare an input from another action's output that the action may mutate privately.
-    pub fn writable_input_from_output(
+    /// Declare a **data input**: content a rule routes for the inner tool to read at a
+    /// tree-shaped `path` (a generated `config.json`, a routed file, or a source-backed
+    /// `data` file). `mirror_to_tree` is **derived, never passed**: a produced output is
+    /// generated content the developer's tools should also see → mirrored; a blob is
+    /// already a source in the tree → plain. This is the sole writer of `mirror_to_tree`,
+    /// so a rule states the role and the engine owns the affordance. Build-internal output
+    /// edges that must stay out of the dev tree use [`dependency_input`](Self::dependency_input).
+    pub fn data_input(
         mut self,
         name: impl Into<String>,
         path: impl Into<PathBuf>,
-        action_id: impl Into<String>,
-        output_name: impl Into<String>,
+        source: InputSource,
     ) -> Self {
+        let mirror_to_tree = matches!(source, InputSource::Output { .. });
         self.action.inputs.insert(
             name.into(),
             Input {
                 path: path.into(),
-                source: InputSource::Output {
-                    action: action_id.into(),
-                    name: output_name.into(),
-                },
-                writable: true,
+                source,
+                writable: false,
+                mirror_to_tree,
             },
         );
         self
@@ -557,10 +696,15 @@ impl ActionBuilder {
 
     /// Declare a toolchain dependency. Its identity enters the action key and its
     /// read-only roots are mount hints for sandbox backends.
+    /// Declare a toolchain: its roots mount read-only, and its `bin_dirs` compose into
+    /// the action's PATH automatically (see [`try_build`](Self::try_build)). A rule names
+    /// the toolchains it needs; it never hand-writes PATH.
     pub fn toolchain(mut self, toolchain: Toolchain) -> Self {
-        self.action
-            .toolchains
-            .insert(toolchain.name().to_owned(), toolchain);
+        let name = toolchain.name().to_owned();
+        if !self.toolchain_order.contains(&name) {
+            self.toolchain_order.push(name.clone());
+        }
+        self.action.toolchains.insert(name, toolchain);
         self
     }
 
@@ -575,6 +719,14 @@ impl ActionBuilder {
         self
     }
 
+    /// Raw cache-policy escape hatch — **not for rules.** A rule never asserts a policy;
+    /// it is *derived from the action's shape*: [`fetch`](Self::fetch) ⇒ `FixedOutput`,
+    /// `produce_state` ⇒ `SnapshotBased`, `consume_state` ⇒ `SnapshotConsuming`, else the
+    /// `Deterministic` default — so a rule cannot claim a policy its shape doesn't justify
+    /// (no production rule calls this; the shape methods cover every real case). It stays
+    /// `pub` only because executor tests construct actions with explicit policies directly,
+    /// and Rust visibility can't admit those while excluding downstream rule crates.
+    #[doc(hidden)]
     pub fn cache_policy(mut self, policy: CachePolicy) -> Self {
         self.action.cache_policy = policy;
         self
@@ -663,9 +815,58 @@ impl ActionBuilder {
         self
     }
 
-    pub fn try_build(self) -> Result<Action, ActionError> {
+    /// Declare a **native fixed-output fetch** (§FOD): the executor downloads
+    /// `url` in-process — pure-Rust TLS with Mozilla's root store compiled in
+    /// — and verifies the bytes against `expected` before admitting them to
+    /// the CAS. No sandbox is spawned and no toolchain is consulted, so the
+    /// action must carry an empty `command`, no inputs, no toolchains, and
+    /// exactly one output (validated by [`try_build`]). The `network`
+    /// capability is set for honesty: this action reaches the network, just
+    /// from the executor process rather than a sandbox.
+    ///
+    /// [`try_build`]: ActionBuilder::try_build
+    pub fn fetch(mut self, url: impl Into<String>, expected: Digest) -> Self {
+        self.action.fetch_url = Some(url.into());
+        self.action.cache_policy = CachePolicy::FixedOutput { expected };
+        self.action.network = true;
+        self
+    }
+
+    pub fn try_build(mut self) -> Result<Action, ActionError> {
+        self.compose_path_from_toolchains();
         self.action.validate()?;
         Ok(self.action)
+    }
+
+    /// Derive PATH from the declared toolchains' `bin_dirs` — in insertion order, with
+    /// duplicate dirs dropped — unless the rule set PATH explicitly. PATH is a pure
+    /// function of the toolchain set, so a rule declares its toolchains and the engine
+    /// composes their PATH; it never restates it. An explicit `.env("PATH", …)` (e.g. a
+    /// test running real system commands with the host PATH, or any custom need) is left
+    /// untouched, and an action with no toolchains gets no PATH (unchanged).
+    fn compose_path_from_toolchains(&mut self) {
+        if self.action.env.contains_key("PATH") {
+            return;
+        }
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        for name in &self.toolchain_order {
+            if let Some(toolchain) = self.action.toolchains.get(name) {
+                for dir in toolchain.bin_dirs() {
+                    if !dirs.contains(dir) {
+                        dirs.push(dir.clone());
+                    }
+                }
+            }
+        }
+        if dirs.is_empty() {
+            return;
+        }
+        let path = dirs
+            .iter()
+            .map(|d| d.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(":");
+        self.action.env.insert("PATH".to_owned(), path);
     }
 
     pub fn build(self) -> Action {
@@ -845,9 +1046,62 @@ mod tests {
     }
 
     #[test]
+    fn path_composes_from_toolchains_in_insertion_order_deduped() {
+        // `b` shares a bin dir with `a`; PATH follows the order toolchains were *added*
+        // (not the name-keyed map order), with duplicate dirs dropped. This is the byte-
+        // for-byte composition rules used to hand-write, so the change is cache-neutral.
+        let a = Toolchain::new(
+            "a",
+            "a-id",
+            vec![PathBuf::from("/nix/store/a/bin")],
+            vec![PathBuf::from("/nix/store/a")],
+        )
+        .unwrap();
+        let b = Toolchain::new(
+            "b",
+            "b-id",
+            vec![
+                PathBuf::from("/nix/store/b/bin"),
+                PathBuf::from("/nix/store/a/bin"),
+            ],
+            vec![PathBuf::from("/nix/store/b"), PathBuf::from("/nix/store/a")],
+        )
+        .unwrap();
+        // Added b, then a — composition honors that order, not the b-tree (a < b) order.
+        let action = Action::builder("t", ["./tool"])
+            .toolchain(b)
+            .toolchain(a)
+            .build();
+        assert_eq!(
+            action.env().get("PATH").map(String::as_str),
+            Some("/nix/store/b/bin:/nix/store/a/bin"),
+        );
+    }
+
+    #[test]
+    fn explicit_path_is_not_overridden_by_toolchain_composition() {
+        // A rule (or test) that sets PATH explicitly — e.g. the host PATH for real system
+        // commands — keeps it; toolchain composition only fills PATH when it is absent.
+        let action = Action::builder("t", ["./tool"])
+            .toolchain(runtime())
+            .env("PATH", "/custom/bin")
+            .build();
+        assert_eq!(
+            action.env().get("PATH").map(String::as_str),
+            Some("/custom/bin"),
+        );
+    }
+
+    #[test]
+    fn no_toolchains_means_no_derived_path() {
+        let action = Action::builder("t", ["./tool"]).build();
+        assert!(action.env().get("PATH").is_none());
+    }
+
+    #[test]
     fn rejects_paths_that_can_escape_the_sandbox() {
         let bad_abs = Action::builder("a", ["./tool"])
-            .input("in", "/tmp/in", Digest::of(b"in"))
+            .source_input("in", "/tmp/in", Digest::of(b"in"))
             .try_build()
             .unwrap_err();
         assert!(bad_abs.to_string().contains("must be relative"));
@@ -860,9 +1114,48 @@ mod tests {
     }
 
     #[test]
+    fn hermetic_rejects_interleaved_mutation() {
+        use anneal_core::{AxisValues, Configuration, ExecMode, Platform};
+        let hermetic = Configuration::new(
+            Platform::new("host", "host"),
+            AxisValues {
+                exec_mode: ExecMode::Hermetic,
+                ..Default::default()
+            },
+        );
+
+        // A private snapshot owner is a mutate_state grant: rejected (§4.4).
+        let err = Action::builder("a", ["./tool"])
+            .configured(hermetic.clone(), vec![])
+            .snapshot_private(Digest::of(b"k"), vec!["target".into()])
+            .try_build()
+            .unwrap_err();
+        assert!(err.to_string().contains("Hermetic"));
+
+        // Shared snapshots (phase-separated producers) and restores
+        // (consumers) remain legal: Hermetic forbids mutation, not state.
+        assert!(Action::builder("a", ["./tool"])
+            .configured(hermetic.clone(), vec![])
+            .snapshot(Digest::of(b"k"), vec!["node_modules".into()])
+            .try_build()
+            .is_ok());
+        assert!(Action::builder("a", ["./tool"])
+            .configured(hermetic, vec![])
+            .snapshot_restore(Digest::of(b"k"), vec!["node_modules".into()])
+            .try_build()
+            .is_ok());
+
+        // And the same mutator is fine under the default (Incremental) config.
+        assert!(Action::builder("a", ["./tool"])
+            .snapshot_private(Digest::of(b"k"), vec!["target".into()])
+            .try_build()
+            .is_ok());
+    }
+
+    #[test]
     fn rejects_input_output_path_collision() {
         let err = Action::builder("a", ["./tool"])
-            .input("in", "same", Digest::of(b"in"))
+            .source_input("in", "same", Digest::of(b"in"))
             .output("out", "same")
             .try_build()
             .unwrap_err();
@@ -896,16 +1189,20 @@ mod tests {
     }
 
     #[test]
-    fn sealed_bare_command_requires_declared_runtime_and_path() {
+    fn sealed_bare_command_requires_a_toolchain_then_derives_path() {
+        // A bare (PATH-resolved) command with no toolchain can't resolve — error.
         let no_toolchain = Action::builder("a", ["sh"]).try_build().unwrap_err();
         assert!(no_toolchain.to_string().contains("declares no toolchain"));
 
-        let no_path = Action::builder("a", ["sh"])
-            .toolchain(runtime())
-            .try_build()
-            .unwrap_err();
-        assert!(no_path.to_string().contains("does not declare PATH"));
+        // Declaring a toolchain now suffices: PATH is derived from its bin dirs, so the
+        // rule needn't restate it (the boilerplate the derivation removes).
+        let derived = Action::builder("a", ["sh"]).toolchain(runtime()).build();
+        assert_eq!(
+            derived.env().get("PATH").map(String::as_str),
+            Some("/nix/store/runtime/bin"),
+        );
 
+        // An explicit PATH still works and is left untouched.
         Action::builder("a", ["sh"])
             .toolchain(runtime())
             .env("PATH", "/nix/store/runtime/bin")

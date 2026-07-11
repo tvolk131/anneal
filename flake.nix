@@ -7,6 +7,28 @@
   };
 
   outputs = { self, nixpkgs, flake-utils }:
+    let
+      # A native-library toolchain (the `cargo_workspace` `native_libs` target):
+      # a library a workspace links, exposed by manifest key. Bundles the lib's
+      # closure (mounted read-only into the build) + `pkg-config` (so a `-sys`
+      # crate's build script can discover it) + `PKG_CONFIG_PATH` env pointing at
+      # the lib's `.pc` files. Consumers call this to add libpq / openssl / etc.
+      # to their own manifest; `zlib` below is the worked example. Exposed as a
+      # system-independent `lib` output (it takes `pkgs`).
+      mkNativeLibToolchain = pkgs: libPkg:
+        let dev = libPkg.dev or libPkg;
+        in rec {
+          packages = [ pkgs.pkg-config libPkg dev ];
+          toolNames = [ "pkg-config" ];
+          closure = pkgs.closureInfo { rootPaths = packages; };
+          # Both conventions: nixpkgs packages ship `<dev>/lib/pkgconfig`
+          # (most) or `<dev>/share/pkgconfig` (zlib, …). pkg-config skips a
+          # nonexistent dir, so listing both is safe and portable.
+          env = {
+            PKG_CONFIG_PATH = "${dev}/lib/pkgconfig:${dev}/share/pkgconfig";
+          };
+        };
+    in
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
@@ -18,9 +40,77 @@
           stdenv.cc
         ] ++ lib.optionals pkgs.stdenv.isDarwin (with pkgs; [
           xcbuild.xcrun
+          # The macOS SDK as a pinned /nix/store input. rustc/cc resolve it via
+          # DEVELOPER_DIR (set per cargo action from the manifest below); listing
+          # it here makes its store path a declared rust-toolchain closure root,
+          # so the sandbox mounts it read-only — no host SDK, fully hermetic.
+          apple-sdk
         ]);
         rustToolNames = [ "cargo" "rustc" "cc" ]
           ++ lib.optionals pkgs.stdenv.isDarwin [ "xcrun" ];
+
+        # The rust toolchain's per-action environment the manifest carries for the
+        # `cargo_workspace` rule to apply (NOT general sandbox env). On macOS the
+        # Nix clang-wrapper is *passive* until its salted `NIX_CC_WRAPPER_TARGET_HOST`
+        # flag + `NIX_LDFLAGS` are present, and the scrubbed sandbox strips them —
+        # so a crate linking a system/nixpkgs lib (libiconv, …) fails with
+        # `library not found`. We re-supply exactly the wrapper's link/compile
+        # environment, captured in a real CC-stdenv build context (a plain
+        # `runCommand` sees empty/build-suffixed vars — this must be `runCommandCC`),
+        # filtered to a curated allowlist. Every value is a `/nix/store` path already
+        # covered by the rust roots above (closure-complete), so it stays hermetic and
+        # enters the action+snapshot key honestly. Linux's gcc-wrapper *bakes* these
+        # paths into itself, so Linux needs nothing — its rust.env is empty (probe-
+        # confirmed). Bisection showed `NIX_LDFLAGS` + the two salted `*_TARGET_HOST`
+        # flags are the minimal link set; we capture the full set so the sandbox `cc`
+        # matches a normal Nix build. Excludes build-instance noise (`NIX_BUILD_TOP`,
+        # `NIX_SSL_CERT_FILE=/no-cert-file.crt` which would break TLS, the `_FOR_BUILD`
+        # twins, `PATH`) that would poison the cache key or misbehave at run time.
+        rustLinkEnvAllow = [
+          "DEVELOPER_DIR"
+          "SDKROOT"
+          "NIX_APPLE_SDK_VERSION"
+          "NIX_CFLAGS_COMPILE"
+          "NIX_LDFLAGS"
+          "NIX_HARDENING_ENABLE"
+          "NIX_DONT_SET_RPATH"
+          "NIX_IGNORE_LD_THROUGH_GCC"
+          "NIX_NO_SELF_RPATH"
+        ];
+        # Capture is split in two so the capture tool can't contaminate the capture:
+        #
+        #   1. `rustLinkRawEnv` — a CC-stdenv build with **no extra inputs** dumps its
+        #      raw environment. Any package added here (even just to run a tool) would
+        #      have the cc-wrapper setup hook fold *its* dev/lib paths into
+        #      NIX_CFLAGS_COMPILE/NIX_LDFLAGS — so it stays bare. The dumped vars we
+        #      keep are all single-line, so a newline-delimited `env` dump is safe.
+        #   2. `rustLinkEnv` — a plain build (jq here is fine; it only reads the file,
+        #      its own env is irrelevant) filters that dump to the allowlist and emits
+        #      JSON, which the manifest folds into `rust.env`.
+        #
+        # On Linux the gcc-wrapper bakes its paths in, so rust.env is empty — no capture.
+        rustLinkRawEnv = pkgs.runCommandCC "anneal-rust-link-rawenv" { } ''env > "$out"'';
+        rustLinkEnv =
+          if pkgs.stdenv.isDarwin then
+            pkgs.runCommand "anneal-rust-link-env.json"
+              { nativeBuildInputs = [ pkgs.jq ]; }
+              ''
+                jq -Rn --argjson allow ${
+                  lib.escapeShellArg (builtins.toJSON rustLinkEnvAllow)
+                } '
+                  reduce inputs as $line ({};
+                    ($line | index("=")) as $i
+                    | if $i == null then . else
+                        ($line[0:$i]) as $k | ($line[$i + 1:]) as $v
+                        | if ($allow | index($k))
+                             or ($k | startswith("NIX_CC_WRAPPER_TARGET_HOST_"))
+                             or ($k | startswith("NIX_BINTOOLS_WRAPPER_TARGET_HOST_"))
+                          then . + { ($k): $v } else . end
+                      end)
+                ' < ${rustLinkRawEnv} > "$out"
+              ''
+          else
+            pkgs.runCommand "anneal-rust-link-env.json" { } ''printf '{}' > "$out"'';
 
         runtimeToolPackages = with pkgs; [
           bash
@@ -29,6 +119,9 @@
           gnugrep
           gnused
           gnutar
+          # GNU tar's `z` shells out to an external gzip — without it in the
+          # closure, `tar xzf` of a fetched .crate dies inside the sandbox.
+          gzip
         ];
         runtimeToolNames = [
           "sh"
@@ -37,6 +130,7 @@
           "cp"
           "curl"
           "grep"
+          "gzip"
           "head"
           "mkdir"
           "sed"
@@ -54,6 +148,11 @@
         ];
         nickelToolNames = [ "nickel" ];
 
+        # zlib: a real, broadly-useful native lib (libz-sys / flate2's zlib backend)
+        # and the worked example exercised by the cargo_workspace native_libs tests.
+        # Uses the `mkNativeLibToolchain` helper from the outer `let` (also exported).
+        zlibLib = mkNativeLibToolchain pkgs pkgs.zlib;
+
         rustClosure = pkgs.closureInfo { rootPaths = rustToolPackages; };
         runtimeClosure = pkgs.closureInfo { rootPaths = runtimeToolPackages; };
         nodeClosure = pkgs.closureInfo { rootPaths = nodeToolPackages; };
@@ -68,6 +167,7 @@
               ++ runtimeToolPackages
               ++ nodeToolPackages
               ++ nickelToolPackages
+              ++ zlibLib.packages
               ++ [ pkgs.jq ];
           }
           ''
@@ -120,38 +220,69 @@
             node_roots="$(json_roots ${nodeClosure}/store-paths ${shellWordList nodeToolNames})"
             nickel_tools="$(json_tools ${shellWordList nickelToolNames})"
             nickel_roots="$(json_roots ${nickelClosure}/store-paths ${shellWordList nickelToolNames})"
+            rust_env="$(cat ${rustLinkEnv})"
+            zlib_tools="$(json_tools ${shellWordList zlibLib.toolNames})"
+            zlib_roots="$(json_roots ${zlibLib.closure}/store-paths ${shellWordList zlibLib.toolNames})"
+            zlib_env='${builtins.toJSON zlibLib.env}'
 
             jq -n \
               --argjson rust_tools "$rust_tools" \
               --argjson rust_roots "$rust_roots" \
+              --argjson rust_env "$rust_env" \
               --argjson runtime_tools "$runtime_tools" \
               --argjson runtime_roots "$runtime_roots" \
               --argjson node_tools "$node_tools" \
               --argjson node_roots "$node_roots" \
               --argjson nickel_tools "$nickel_tools" \
               --argjson nickel_roots "$nickel_roots" \
+              --argjson zlib_tools "$zlib_tools" \
+              --argjson zlib_roots "$zlib_roots" \
+              --argjson zlib_env "$zlib_env" \
               '{
                 version: 1,
                 toolchains: {
                   rust: {
                     tools: $rust_tools,
-                    read_only_roots: $rust_roots
+                    read_only_roots: $rust_roots,
+                    env: $rust_env
                   },
                   "posix-runtime": {
                     tools: $runtime_tools,
-                    read_only_roots: $runtime_roots
+                    read_only_roots: $runtime_roots,
+                    env: {}
                   },
                   node: {
                     tools: $node_tools,
-                    read_only_roots: $node_roots
+                    read_only_roots: $node_roots,
+                    env: {}
                   },
                   nickel: {
                     tools: $nickel_tools,
-                    read_only_roots: $nickel_roots
+                    read_only_roots: $nickel_roots,
+                    env: {}
+                  },
+                  zlib: {
+                    tools: $zlib_tools,
+                    read_only_roots: $zlib_roots,
+                    env: $zlib_env
                   }
                 }
               }' > "$out"
           '';
+
+        # The `anneal` CLI as an installable package, so another repo can take
+        # this flake as an input and get the binary plus the toolchain manifest
+        # (the two things a consumer needs — see packages below). Tests are
+        # skipped: they exercise real cargo/pnpm against the network and the
+        # sandbox, which the Nix build sandbox forbids.
+        annealPackage = pkgs.rustPlatform.buildRustPackage {
+          pname = "anneal";
+          version = "0.0.0";
+          src = self;
+          cargoLock.lockFile = ./Cargo.lock;
+          cargoBuildFlags = [ "-p" "anneal-cli" ];
+          doCheck = false;
+        };
 
         devShellPackages =
           rustToolPackages
@@ -173,7 +304,11 @@
           ]);
       in
       {
-        packages.toolchain-manifest = toolchainManifest;
+        packages = {
+          toolchain-manifest = toolchainManifest;
+          anneal = annealPackage;
+          default = annealPackage;
+        };
 
         # `nix develop` / `nix develop --command <cmd>` gives a complete
         # contributor environment. The toolset is scoped to what the
@@ -189,5 +324,10 @@
             echo "anneal dev shell — rustc $(rustc --version | cut -d' ' -f2), nickel $(nickel --version 2>/dev/null | cut -d' ' -f2), node $(node --version), pnpm $(pnpm --version)"
           '';
         };
-      });
+      }) // {
+        # System-independent: the helper a consumer flake uses to add a native
+        # library to its toolchain manifest (`mkNativeLibToolchain pkgs pkgs.postgresql`),
+        # then references from a BUILD `cargo_workspace(native_libs = [...])`.
+        lib.mkNativeLibToolchain = mkNativeLibToolchain;
+      };
 }

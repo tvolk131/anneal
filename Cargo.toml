@@ -20,3 +20,11 @@ members = [
 [workspace.package]
 version = "0.0.0"
 edition = "2021"
+
+# Lints shared across every member (each opts in with `[lints] workspace = true`).
+# CI gates on `clippy -- -D warnings`, so anything not allowed here is a hard error.
+[workspace.lints.clippy]
+# Several result types (e.g. AnalysisError) carry large-by-design variants. Boxing
+# the Err solely to satisfy this lint trades real ergonomics for a cosmetic win;
+# not worth it yet. Revisit if a variant grows materially.
+result_large_err = "allow"

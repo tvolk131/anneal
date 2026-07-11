@@ -23,6 +23,7 @@
 //! is also deferred — `genrule` is configuration-invariant for now.
 
 mod attrs;
+mod axis;
 mod cargo_workspace;
 mod context;
 mod diagnostics;
@@ -32,11 +33,15 @@ mod providers;
 mod rule;
 mod rules;
 mod schema;
+/// Typed persistent state (DESIGN.md §2.1/§2.5/§2.6, Appendix A ruling 4): the
+/// state taxonomy grown in place out of the snapshot mechanics.
+mod state;
 mod toolchain;
 
 pub use attrs::{AttrError, AttrValue, Attrs};
+pub use axis::{configure_axis_action, AxisFlagMap, AxisLowering, FlagSink};
 pub use cargo_workspace::CargoWorkspace;
-pub use context::{ResolvedDep, RuleContext, SourcePathRecorder};
+pub use context::{ResolvedDep, RuleContext, SourcePathRecorder, StateRegistry, TestContext};
 pub use diagnostics::{start_rule_timings, take_rule_timings, RuleTiming};
 pub use nickel_eval::NickelEval;
 pub use pnpm_workspace::PnpmWorkspace;
@@ -44,3 +49,6 @@ pub use providers::{Artifact, ArtifactSource, FileSet, ProviderSet};
 pub use rule::{Analysis, Rule, RuleError};
 pub use rules::{builtin_rules, Alias, FileGroup, GenRule, RuleRegistry};
 pub use schema::{AttrSchema, AttrType};
+pub use state::{
+    Attestation, Concurrency, PersistentStateDecl, StateActionExt, StateHandle, StateKind,
+};

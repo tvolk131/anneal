@@ -33,6 +33,11 @@ fn config(opt: OptLevel) -> Configuration {
 /// Create a dependency-free Cargo workspace under `<tmp>/ws` with a `BUILD` file,
 /// and generate its `Cargo.lock` (so `--locked` is satisfied).
 fn cargo_fixture() -> tempfile::TempDir {
+    cargo_fixture_build("cargo_workspace(name = \"ws\")\n")
+}
+
+/// A dependency-free Cargo workspace under `<tmp>/ws` with the given `BUILD` body.
+fn cargo_fixture_build(build: &str) -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(ws.join("mylib/src")).unwrap();
@@ -51,7 +56,7 @@ fn cargo_fixture() -> tempfile::TempDir {
         "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
     )
     .unwrap();
-    std::fs::write(ws.join("BUILD"), "cargo_workspace(name = \"ws\")\n").unwrap();
+    std::fs::write(ws.join("BUILD"), build).unwrap();
 
     let status = std::process::Command::new("cargo")
         .arg("generate-lockfile")
@@ -60,6 +65,95 @@ fn cargo_fixture() -> tempfile::TempDir {
         .expect("cargo must be available to set up the fixture");
     assert!(status.success(), "cargo generate-lockfile failed");
     tmp
+}
+
+/// macOS regression for the SDK groundwork: the rust toolchain's declared env
+/// (`DEVELOPER_DIR`, the pinned apple-sdk store path) must be threaded onto the
+/// cargo **compiling** action — without it, `xcrun`/rustc can't resolve the SDK
+/// in the scrubbed sandbox. Analysis-only (no execution), so it needs neither
+/// network nor a working linker; it pins that the manifest env reaches the
+/// action, the link most likely to regress in a `cargo_builder` refactor.
+#[test]
+#[cfg(target_os = "macos")]
+fn cargo_compiling_actions_carry_the_rust_toolchain_developer_dir() {
+    let tmp = cargo_fixture();
+    let root = tmp.path();
+    let registry = builtin_rules();
+    let graph = load_package(root, "ws", &registry).unwrap();
+    let cfg = config(OptLevel::Debug);
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
+    let g = Analyzer::new(&graph, &registry, &cfg, root, exec.cas())
+        .analyze(&anneal_core::Label::parse("//ws:ws").unwrap())
+        .unwrap();
+
+    let action = build_action(&g);
+    assert!(
+        action
+            .env()
+            .get("DEVELOPER_DIR")
+            .is_some_and(|d| d.starts_with("/nix/store/")),
+        "cargo build action must carry DEVELOPER_DIR (a /nix/store SDK path) on macOS; got env {:?}",
+        action.env()
+    );
+}
+
+/// `native_libs = ["zlib"]` attaches the zlib native-lib toolchain (declared in
+/// the flake's manifest) to the cargo actions: its `PKG_CONFIG_PATH` env and its
+/// bin dir merge onto the *compiling* action, its closure mounts read-only on both
+/// the compiling **and** run actions (so a dynamically-linked test binary finds the
+/// lib at runtime). Analysis-only (no network, no execution) — pins the attachment
+/// wiring, the link most likely to regress. Runs on every platform (zlib is in the
+/// manifest unconditionally, unlike the macOS-only DEVELOPER_DIR).
+#[test]
+fn native_libs_attach_toolchain_roots_and_env_to_cargo_actions() {
+    let tmp = cargo_fixture_build("cargo_workspace(name = \"ws\", native_libs = [\"zlib\"])\n");
+    let root = tmp.path();
+    let registry = builtin_rules();
+    let graph = load_package(root, "ws", &registry).unwrap();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
+    let g = Analyzer::new(
+        &graph,
+        &registry,
+        &config(OptLevel::Debug),
+        root,
+        exec.cas(),
+    )
+    .analyze(&anneal_core::Label::parse("//ws:ws").unwrap())
+    .unwrap();
+
+    let build = build_action(&g);
+    // Env merged in: zlib's PKG_CONFIG_PATH so a `-sys` build script can discover it.
+    assert!(
+        build
+            .env()
+            .get("PKG_CONFIG_PATH")
+            .is_some_and(|p| p.contains("zlib")),
+        "compile action should carry zlib's PKG_CONFIG_PATH; got {:?}",
+        build.env().get("PKG_CONFIG_PATH")
+    );
+    // Roots mounted: the zlib toolchain (its closure) is a declared input.
+    let zlib_root_mounted = |action: &anneal_exec::Action| {
+        action.toolchains().get("zlib").is_some_and(|t| {
+            t.read_only_roots()
+                .iter()
+                .any(|r| r.to_string_lossy().contains("zlib"))
+        })
+    };
+    assert!(
+        zlib_root_mounted(&build),
+        "compile action mounts zlib's closure"
+    );
+
+    // The run action mounts zlib's roots too (dynamic lib needed at test runtime),
+    // even though it carries none of the compile env.
+    let run = g
+        .actions()
+        .find(|a| a.name().starts_with("cargo_workspace test-run"))
+        .expect("a unit test-run action");
+    assert!(
+        zlib_root_mounted(run),
+        "run action must mount zlib's closure for a dynamically-linked test binary"
+    );
 }
 
 #[test]

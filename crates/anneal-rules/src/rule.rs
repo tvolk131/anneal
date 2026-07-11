@@ -6,12 +6,19 @@ use std::path::PathBuf;
 use anneal_exec::Action;
 
 use crate::attrs::AttrError;
+use crate::axis::AxisFlagMap;
 use crate::context::RuleContext;
 use crate::providers::ProviderSet;
 use crate::schema::AttrSchema;
 
-/// What a rule produces from one configured target: the actions to run and the
-/// providers it exposes to dependents.
+/// What a rule produces from one configured target: the **two directions** of the
+/// build graph — `actions` (the work; their *inputs* are this target's imports) and
+/// `providers` (the interface it exports upward to dependents). There is no third
+/// field: the routed-data view that `anneal materialize` mirrors into the working
+/// tree is *derived* from the inputs a rule declares as data
+/// (`ActionBuilder::data_input`, which derives `mirror_to_tree` for generated content),
+/// so it stays a single source of truth on the imports it projects rather than a
+/// parallel list.
 #[derive(Debug)]
 pub struct Analysis {
     pub actions: Vec<Action>,
@@ -31,6 +38,16 @@ pub trait Rule {
 
     /// Analyze one configured target.
     fn analyze(&self, ctx: &RuleContext) -> Result<Analysis, RuleError>;
+
+    /// The configuration axes this rule maps to its inner tool's flags (§13.6). Default:
+    /// none — most rules are config-invariant (`nickel_eval`, `filegroup`, `alias`,
+    /// `pnpm_workspace`). The framework reads the returned [`AxisFlagMap`] to render flags
+    /// for a node and to **derive** each action's consumed axes (so the two can't drift);
+    /// see [`crate::axis`]. Returning a non-empty map opts the rule's compiling actions
+    /// into [`configure_axis_action`](crate::configure_axis_action).
+    fn axis_flags(&self) -> AxisFlagMap {
+        AxisFlagMap::empty()
+    }
 }
 
 /// A failure while analyzing a target.

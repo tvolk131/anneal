@@ -23,6 +23,12 @@ struct ToolchainManifest {
 struct ManifestToolchain {
     tools: BTreeMap<String, PathBuf>,
     read_only_roots: Vec<PathBuf>,
+    /// Environment variables a rule sets on actions that use this toolchain —
+    /// e.g. the `rust` toolchain's `DEVELOPER_DIR` (the pinned macOS SDK store
+    /// path) so `xcrun`/rustc/cc resolve the SDK in the scrubbed sandbox.
+    /// Optional: empty for every toolchain on Linux, and most on macOS.
+    #[serde(default)]
+    env: BTreeMap<String, String>,
 }
 
 /// The minimal shell/runtime surface used by first-party shell fragments.
@@ -34,7 +40,9 @@ pub(crate) fn nix_base_runtime() -> Result<Toolchain, RuleError> {
     nix_store_toolchain(
         "posix-runtime",
         &[
-            "sh", "cat", "chmod", "cp", "curl", "grep", "head", "mkdir", "sed", "tar",
+            // `gzip` is not invoked directly by any rule script, but GNU tar's
+            // `z` flag execs it from PATH (the §FOD vendor assembly).
+            "sh", "cat", "chmod", "cp", "curl", "grep", "gzip", "head", "mkdir", "sed", "tar",
         ],
     )
 }
@@ -54,18 +62,35 @@ pub(crate) fn nix_store_toolchain(name: &str, tools: &[&str]) -> Result<Toolchai
     manifest_toolchain_from_manifest(toolchain_manifest()?, name, tools)
 }
 
-/// Build a PATH containing only declared toolchain bin directories.
-pub(crate) fn toolchain_path_env(toolchains: &[&Toolchain]) -> String {
-    let mut dirs = Vec::new();
-    for toolchain in toolchains {
-        for dir in toolchain.bin_dirs() {
-            push_unique(&mut dirs, dir.clone());
-        }
-    }
-    dirs.iter()
-        .map(|d| d.to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join(":")
+/// The environment variables a toolchain declares for its consuming rule to set
+/// on actions (e.g. `rust` → `DEVELOPER_DIR` on macOS). A rule applies these
+/// itself — they are deliberately **not** part of the canonical sandbox env, so
+/// only actions of rules that opt in carry them. Empty (and absent) toolchains
+/// yield an empty map.
+pub(crate) fn nix_toolchain_env(name: &str) -> Result<BTreeMap<String, String>, RuleError> {
+    Ok(toolchain_manifest()?
+        .toolchains
+        .get(name)
+        .map(|t| t.env.clone())
+        .unwrap_or_default())
+}
+
+/// Resolve a **native-library toolchain** from the manifest by name (the value of a
+/// `cargo_workspace` `native_libs` entry): a toolchain that contributes read-only
+/// roots (the library's closure) and env, and that may declare *zero* tools (a pure
+/// library) or some (e.g. `pkg-config`). Unlike [`nix_store_toolchain`], the caller
+/// doesn't pre-name the tools — every tool the manifest declares for the entry is
+/// resolved. An unknown name is a clean analysis error.
+pub(crate) fn nix_lib_toolchain(name: &str) -> Result<Toolchain, RuleError> {
+    let manifest = toolchain_manifest()?;
+    let declared = manifest.toolchains.get(name).ok_or_else(|| {
+        RuleError::Message(format!(
+            "native_libs references {name:?}, which the toolchain manifest does not declare; \
+             add it to your flake's manifest (e.g. via `mkNativeLibToolchain`)"
+        ))
+    })?;
+    let tools: Vec<&str> = declared.tools.keys().map(String::as_str).collect();
+    manifest_toolchain_from_manifest(manifest, name, &tools)
 }
 
 fn manifest_toolchain_from_manifest(
@@ -241,10 +266,8 @@ fn push_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
 mod tests {
     use super::{
         manifest_toolchain_from_manifest, missing_toolchain_manifest_message, nix_store_root,
-        nix_store_toolchain, toolchain_path_env, ManifestToolchain, ToolchainManifest,
-        TOOLCHAIN_MANIFEST_ENV,
+        nix_store_toolchain, ManifestToolchain, ToolchainManifest, TOOLCHAIN_MANIFEST_ENV,
     };
-    use anneal_exec::Toolchain;
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
 
@@ -255,32 +278,6 @@ mod tests {
             Some(PathBuf::from("/nix/store/abc-rust"))
         );
         assert_eq!(nix_store_root(Path::new("/usr/bin/cargo")), None);
-    }
-
-    #[test]
-    fn toolchain_path_env_deduplicates_bin_dirs_in_order() {
-        let first = Toolchain::new(
-            "first",
-            "first-id",
-            vec![PathBuf::from("/nix/store/a/bin")],
-            vec![PathBuf::from("/nix/store/a")],
-        )
-        .unwrap();
-        let second = Toolchain::new(
-            "second",
-            "second-id",
-            vec![
-                PathBuf::from("/nix/store/a/bin"),
-                PathBuf::from("/nix/store/b/bin"),
-            ],
-            vec![PathBuf::from("/nix/store/b")],
-        )
-        .unwrap();
-
-        assert_eq!(
-            toolchain_path_env(&[&first, &second]),
-            "/nix/store/a/bin:/nix/store/b/bin"
-        );
     }
 
     #[test]
@@ -298,6 +295,59 @@ mod tests {
     }
 
     #[test]
+    fn toolchain_env_round_trips_and_defaults_empty() {
+        // The `env` field carries per-toolchain action env (e.g. the rust
+        // toolchain's DEVELOPER_DIR). It must parse when present...
+        let with_env: ToolchainManifest = serde_json::from_str(
+            r#"{"version":1,"toolchains":{"rust":{"tools":{},"read_only_roots":[],
+               "env":{"DEVELOPER_DIR":"/nix/store/abc-apple-sdk"}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            with_env.toolchains["rust"]
+                .env
+                .get("DEVELOPER_DIR")
+                .map(String::as_str),
+            Some("/nix/store/abc-apple-sdk")
+        );
+
+        // ...and default to empty when absent, so a manifest written before
+        // this field existed (or any env-less toolchain) still parses.
+        let without_env: ToolchainManifest = serde_json::from_str(
+            r#"{"version":1,"toolchains":{"nickel":{"tools":{},"read_only_roots":[]}}}"#,
+        )
+        .unwrap();
+        assert!(without_env.toolchains["nickel"].env.is_empty());
+    }
+
+    #[test]
+    fn tool_less_lib_toolchain_resolves_to_roots_only() {
+        // A `native_libs` entry can declare zero tools — just roots (a pure
+        // library). It must still resolve to a Toolchain carrying those roots,
+        // with no bin dirs. (`nix_lib_toolchain` passes the entry's declared
+        // tools, which may be empty, straight to this resolver.)
+        let mut toolchains = BTreeMap::new();
+        toolchains.insert(
+            "zlib".to_owned(),
+            ManifestToolchain {
+                tools: BTreeMap::new(),
+                read_only_roots: vec![PathBuf::from("/nix/store/abc-zlib")],
+                env: BTreeMap::new(),
+            },
+        );
+        let manifest = ToolchainManifest {
+            version: 1,
+            toolchains,
+        };
+        let tc = manifest_toolchain_from_manifest(&manifest, "zlib", &[]).unwrap();
+        assert_eq!(
+            tc.read_only_roots().to_vec(),
+            vec![PathBuf::from("/nix/store/abc-zlib")]
+        );
+        assert!(tc.bin_dirs().is_empty());
+    }
+
+    #[test]
     fn manifest_toolchain_requires_all_tools() {
         let mut toolchains = BTreeMap::new();
         toolchains.insert(
@@ -305,6 +355,7 @@ mod tests {
             ManifestToolchain {
                 tools: BTreeMap::new(),
                 read_only_roots: vec![PathBuf::from("/nix/store/abc-rust")],
+                env: BTreeMap::new(),
             },
         );
         let manifest = ToolchainManifest {

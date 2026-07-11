@@ -7,6 +7,23 @@ on:
   workflow_dispatch:
 
 jobs:
+  lint:
+    name: lint (fmt + clippy)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/determinate-nix-action@v3
+
+      # Formatting and clippy lint anneal's own Rust — no sandbox or toolchain
+      # manifest needed (these don't run anneal actions). `-D warnings` makes the
+      # gate real; the workspace allows `result_large_err` (see root Cargo.toml).
+      - name: rustfmt
+        run: nix develop --command cargo fmt --check
+
+      - name: clippy
+        run: nix develop --command cargo clippy --workspace --all-targets -- -D warnings
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -22,8 +39,15 @@ jobs:
 
       - uses: DeterminateSystems/determinate-nix-action@v3
 
+      # The macOS host has direct network, so it carries the network-gated
+      # tests (fetch mode + native_libs, against static.crates.io) — set
+      # ANNEAL_NETWORK_TESTS so they actually run instead of silently skipping
+      # (the gate that kept fetch mode's regressions invisible). #[ignore]d
+      # tests still need --ignored and stay opt-in.
       - name: Rust tests (macOS host)
         if: matrix.os == 'macos-15'
+        env:
+          ANNEAL_NETWORK_TESTS: "1"
         run: nix develop --command cargo test
 
       - name: Resolve toolchain manifest

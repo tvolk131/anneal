@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anneal_core::Digest;
 
 use crate::action::{Action, InputSource};
+use crate::trust::{CacheTier, EnforcementGrade, Provenance};
 use crate::SANDBOX_VERSION;
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -40,6 +41,15 @@ pub fn action_digest(action: &Action) -> Digest {
     write_count(&mut buf, action.command.len());
     for arg in &action.command {
         write_str(&mut buf, arg);
+    }
+
+    // native fetch URL. Written only when present, so the digests of ordinary
+    // (command) actions are unchanged by the field's introduction. (FixedOutput
+    // results are cached by output, not by this digest — included for the
+    // totality of action identity, not for cache correctness.)
+    if let Some(url) = &action.fetch_url {
+        write_str(&mut buf, "fetch-url");
+        write_str(&mut buf, url);
     }
 
     // inputs (BTreeMap → sorted by name). The source is tagged so a Blob digest can
@@ -132,12 +142,16 @@ fn write_str(buf: &mut Vec<u8>, s: &str) {
     write_bytes(buf, s.as_bytes());
 }
 
-/// The persisted result of a successful action: exit code and output digests.
+/// The persisted result of a successful action: exit code, output digests, and
+/// the provenance of the run that produced it (DESIGN.md §2.8 — producing
+/// platform, enforcement grade, computed tier). Provenance is `Option` only to
+/// tolerate entries written before it existed; new inserts always carry it.
 /// (Only successful actions are stored — "save on success only", §8.5.)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredResult {
     pub exit_code: i32,
     pub outputs: BTreeMap<String, Digest>,
+    pub provenance: Option<Provenance>,
 }
 
 /// A persistent map from action digest to [`StoredResult`], stored as small
@@ -187,10 +201,19 @@ impl ActionCache {
     }
 }
 
-/// Serialize as one `exit <code>` line followed by `out <name> <hex>` lines. Output
-/// names are logical identifiers (no whitespace), so the format is unambiguous.
+/// Serialize as one `exit <code>` line, an optional `prov <platform> <grade>
+/// <tier>` line, then `out <name> <hex>` lines. Output names are logical
+/// identifiers (no whitespace), so the format is unambiguous.
 fn serialize_entry(result: &StoredResult) -> String {
     let mut s = format!("exit {}\n", result.exit_code);
+    if let Some(prov) = &result.provenance {
+        s.push_str(&format!(
+            "prov {} {} {}\n",
+            prov.platform,
+            prov.grade.as_str(),
+            prov.tier.as_str()
+        ));
+    }
     for (name, digest) in &result.outputs {
         s.push_str(&format!("out {} {}\n", name, digest.to_hex()));
     }
@@ -210,8 +233,23 @@ fn parse_entry(text: &str) -> io::Result<StoredResult> {
         .map_err(|_| invalid("bad exit code"))?;
 
     let mut outputs = BTreeMap::new();
+    let mut provenance = None;
     for line in lines {
         if line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("prov ") {
+            let mut parts = rest.split(' ');
+            let (platform, grade, tier) = (parts.next(), parts.next(), parts.next());
+            let (Some(platform), Some(grade), Some(tier)) = (platform, grade, tier) else {
+                return Err(invalid("malformed `prov` line"));
+            };
+            provenance = Some(Provenance {
+                platform: platform.to_owned(),
+                grade: EnforcementGrade::parse(grade)
+                    .ok_or_else(|| invalid("bad provenance grade"))?,
+                tier: CacheTier::parse(tier).ok_or_else(|| invalid("bad provenance tier"))?,
+            });
             continue;
         }
         let rest = line
@@ -224,7 +262,11 @@ fn parse_entry(text: &str) -> io::Result<StoredResult> {
         outputs.insert(name.to_owned(), digest);
     }
 
-    Ok(StoredResult { exit_code, outputs })
+    Ok(StoredResult {
+        exit_code,
+        outputs,
+        provenance,
+    })
 }
 
 #[cfg(test)]
@@ -260,13 +302,35 @@ mod tests {
     }
 
     #[test]
+    fn mirror_to_tree_is_excluded_from_the_key() {
+        // The routed-data flag is a `materialize` affordance, not build identity: two
+        // actions differing only in mirror_to_tree MUST hash identically, or routing a
+        // data input would spuriously bust the action cache. `dependency_input` leaves it
+        // false; `data_input` on an Output derives it true — same edge otherwise.
+        let plain = Action::builder("a", ["./cargo"])
+            .dependency_input("data", "config.json", "gen", "config.json")
+            .build();
+        let routed = Action::builder("a", ["./cargo"])
+            .data_input(
+                "data",
+                "config.json",
+                InputSource::Output {
+                    action: "gen".into(),
+                    name: "config.json".into(),
+                },
+            )
+            .build();
+        assert_eq!(action_digest(&plain), action_digest(&routed));
+    }
+
+    #[test]
     fn writable_inputs_change_the_key() {
         let d = Digest::of(b"manifest");
         let readonly = Action::builder("a", ["./tool"])
-            .input("manifest", "manifest.txt", d)
+            .source_input("manifest", "manifest.txt", d)
             .build();
         let writable = Action::builder("a", ["./tool"])
-            .writable_input("manifest", "manifest.txt", d)
+            .writable_source_input("manifest", "manifest.txt", d)
             .build();
         assert_ne!(action_digest(&readonly), action_digest(&writable));
     }
@@ -316,11 +380,29 @@ mod tests {
         let stored = StoredResult {
             exit_code: 0,
             outputs,
+            provenance: Some(Provenance {
+                platform: "testos-testarch".to_owned(),
+                grade: EnforcementGrade::Enforced,
+                tier: CacheTier::Promotable,
+            }),
         };
 
         assert_eq!(cache.lookup(&key).unwrap(), None);
         cache.insert(&key, &stored).unwrap();
         assert_eq!(cache.lookup(&key).unwrap(), Some(stored));
+    }
+
+    #[test]
+    fn pre_provenance_entries_still_parse() {
+        // Entries written before the `prov` line existed must remain readable;
+        // they surface as `provenance: None`.
+        let parsed = parse_entry(
+            "exit 0\nout bin 2222222222222222222222222222222222222222222222222222222222222222\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.exit_code, 0);
+        assert_eq!(parsed.provenance, None);
+        assert_eq!(parsed.outputs.len(), 1);
     }
 
     #[test]

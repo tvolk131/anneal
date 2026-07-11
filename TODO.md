@@ -1,21 +1,21 @@
 # Anneal — open work / TODO
 
-> Running list of what's not yet built, beyond what's already in `build-system-design.md` §21.
-> Status as of 2026-06-04: cargo_workspace, nickel_eval, pnpm_workspace M1, Nickel→Rust,
-> Nickel→TS, CLI build/test/affected/why, warm reuse, input-digest caching, Linux/macOS
-> sealed sandbox hardening, and mandatory Nix toolchain manifests are done. Section refs (§)
-> point at `build-system-design.md`.
+> Detailed implementation backlog and engineering record, beyond what's already in
+> `build-system-design.md` §21. The [README feature matrix](README.md#current-implementation-status)
+> is the authoritative current-availability summary; this file carries the granular follow-ons,
+> rationale, and historical measurements. Section refs (§) point at `build-system-design.md`
+> unless stated otherwise.
 
 ## Current priority queue
 
-1. **Clean correctness edges:** generated-path collision enforcement, one owning workspace per
-   package directory, and CI wiring for correctness-neutral verification.
+1. **Clean correctness edges:** one owning workspace per package directory, derived source
+   footprints, read-tracking diagnostics, and broader correctness-neutral verification.
 2. **Next performance lever:** treat `vendor/` / `.cargo/` as one lockfile-keyed unit instead
    of enumerating/stat-ing thousands of vendored files every build.
 3. **Store lifecycle:** CAS/action-cache/snapshot GC and eviction, then snapshot-on-evict.
 4. **Rule completeness:** cargo metadata/staged graph, cargo test target split/selection, and
    pnpm external-dependency/offline-store work.
-5. **CLI/product surface:** `materialize`, `run`/`check`, cache commands, `status`, and richer
+5. **CLI/product surface:** `run`/`check`, cache commands, `status`, input sensing, and richer
    structured test output.
 
 ## Correctness & enforcement (do alongside the relevant feature)
@@ -36,19 +36,25 @@
       generators interact / multi-package loading lands.
 - [ ] **One owning workspace per package directory.** Reject two workspace targets sweeping the same dir
       (the degenerate exclusive-ownership violation, §1.5).
-- [ ] **Explicit `exclude` on sweeping rules** (input-scoping; future). `cargo_workspace`/`pnpm_workspace`
-      sweep `source_tree(".")` wholesale; an opt-in `exclude = [...]` would carve out files the rule shouldn't
-      claim (e.g. a sibling `.ncl` owned by another rule), removing spurious cross-rule cache deps. This is the
-      **local, explicit** alternative to auto-partitioning a residual rule by its siblings' claims — considered
-      and **rejected for non-locality** (a sibling rule silently changing the sweep's inputs/cache; against the
-      "explicit inputs" grain Bazel chose). Most of the same effect is already available via **package
-      boundaries** (put the carved-out file in its own package). Related, semantics-free: an `anneal owners
-      //pkg` **diagnostic** that prints the file→rule mapping — the inspectability benefit without the coupling.
+- [ ] **Derived source footprints + explicit additions** (`DESIGN.md` §11). Replace the current
+      whole-package `source_tree(".")` sweep in `cargo_workspace`/`pnpm_workspace` with ecosystem-derived
+      member trees plus explicit cross-boundary inputs. Follow with `anneal sense`/audit tooling that proposes
+      declarations from observed reads without making traces execution-time truth. The previously proposed
+      `exclude` surface was rejected: exclusions make ordinary repo accretion silently erode cache precision,
+      whereas a missing explicit input fails loudly under the seal.
 - [ ] **Read-tracking to *enforce* declared inputs** (`docs/sandboxing.md`). Fail on undeclared reads —
       defensive, catches under-declaration. Most valuable on macOS (where it's otherwise silent); on Linux
       it's mostly a better diagnostic (isolation already guarantees it). NOT for relaxing invalidation.
-- [ ] **Wire the correctness-neutral verification gate into CI per-PR** (§22). Harness exists
-      (`verify_correctness_neutral`); it isn't run automatically yet.
+- [x] **CI gates: fmt, clippy, network tests.** `cargo fmt --check` + `cargo clippy --workspace
+      --all-targets -- -D warnings` run per-PR (a `lint` job); the workspace allows only
+      `result_large_err`. The macOS lane sets `ANNEAL_NETWORK_TESTS=1` so fetch mode is actually
+      exercised in CI.
+- [x] **Correctness-neutral verification runs in CI.** `verify_correctness_neutral` /
+      `verify_warm_neutral` are exercised by `crates/anneal-analysis/tests/snapshot_neutrality.rs`
+      under `cargo test`, which CI runs on both platforms. (Earlier note that it "isn't run
+      automatically yet" was stale.)
+  - [ ] A *broader* neutrality gate over real built targets (not just the unit harness) is still
+        worthwhile — run cold-vs-warm on the demo workspaces per-PR and diff outputs.
 
 ## Phase 4 — cross-language routing (M1 done; deferred enhancements remain)
 
@@ -144,10 +150,11 @@
         an edited state vs a clean build of it, path-matched at the per-key warm dir → isolates the sync); a real
         cargo two-crate test (`warm_reuse_build_is_correctness_neutral`) is the mtime-hazard backstop. (b) **the
         cross-process workspace lock** + sandbox-name `pid` token — done (`WorkspaceLock`).
-    - [ ] **Run the neutrality gate in CI** — `verify_warm_neutral`/`verify_correctness_neutral` exist and have
-          representative cargo tests (incl. a content-revert: `warm_reuse_is_neutral_across_a_revert`, the
-          mtime-hazard backstop on the real tool); wire them as a routine CI gate over more rules/actions (it's a
-          sampling detector, so breadth matters), and add a triage note for tool-nondeterminism false-positives.
+    - [ ] **Broaden the neutrality gate in CI** — `verify_warm_neutral`/`verify_correctness_neutral` already run
+          through representative cargo tests (incl. a content-revert:
+          `warm_reuse_is_neutral_across_a_revert`, the mtime-hazard backstop on the real tool). Extend the routine
+          gate over more rules/actions (it's a sampling detector, so breadth matters), and add a triage note for
+          tool-nondeterminism false-positives.
     - [ ] **pnpm neutrality (deferred — vacuous in M1 scope).** A pnpm *warm*-neutral test doesn't fit: the only
           warm owner (`install`) declares no file outputs (its product is the node_modules snapshot) and has no
           incremental-reuse shape (its key tracks the lockfile, not source → unchanged = action-cache hit,
@@ -248,18 +255,40 @@
 ## CLI
 
 - [x] **`anneal` binary** (§18) — crate `anneal-cli`, thin orchestration over
-      `load_package → Analyzer → execute_graph`. **Done so far:** `build` and `test` (single package;
-      `test` summarizes via the rule-agnostic `ANNEAL_TEST_EXIT` marker), `--version`, clean exit codes
-      (0 ok / 1 failed / 2 usage), and **config-selection flags** (§6.6): `--platform`, `--opt-level`,
-      `--lto`, `--debug-info`, `--sanitizer`, `--coverage`.
+      `load_closure → Analyzer → execute_graph`. **Done so far:** `build` and `test` over transitive
+      multi-package closures (`test` summarizes via the rule-agnostic `ANNEAL_TEST_EXIT` marker), `--version`,
+      clean exit codes (0 ok / 1 failed / 2 usage), and configuration flags for platform, build axes,
+      `ExecMode`, jobs, and the enforcement floor.
   - [x] **`affected` / `why`** are wired through `anneal-cli`.
   - [ ] **`run` / `check`**; `query` / `aquery`; `cache` push/info/clean; `status`.
   - [ ] **Structured per-test output** in `test` (libtest/JSON parse via `anneal-test`) — currently
         pass/fail per test action only.
+  - [x] **Failure-aware scheduling + reporting.** A failed action no longer aborts the run with an
+        opaque `UnresolvedInput` (edge plumbing on the *consumer*) that discarded every result and
+        exited 2. `execute_graph` now treats failure as per-action data: a failed action's transitive
+        dependents complete as **skipped** (carrying the *root* failure's name), independent subgraphs
+        run to completion, and the call returns `Ok` with every slot filled. `Err` is reserved for
+        infrastructure (spawn/IO, cycles, malformed graphs). The CLI reports `FAIL`/`skip` lines and
+        a `N/M failed (K skipped)` summary at exit 1. Failed actions also **capture a stderr/stdout
+        tail** (was fully nulled — diagnosing the CA/gzip bugs needed hand-built probes), printed
+        inline under each `FAIL`; a pure diagnostic side channel, never an output or cache-key input.
   - [x] **Multi-package targets** — the CLI now loads the target's transitive package closure
         (`load_closure`), so cross-package deps build.
-  - [ ] **`materialize`** (§14.4) — write generated native packages/files to stable on-disk paths for IDEs and
-        native tooling. Also the mechanism for the §14.6 **staged pass** (generated `Cargo.toml`, etc.).
+  - [x] **`materialize`** (§14.4) — make a consuming target's tree view match its sandbox: build the
+        generated files its actions consume at tree-shaped paths (derived by the analyzer from
+        role-marked action inputs, then re-homed workspace-relative) and park them in the
+        working tree for IDEs and native tooling (`cargo run` over routed `data` inputs). Executes only
+        the **producing subgraph**, so it works precisely when the consumer's own build is broken (the
+        debug-natively case). Manifest-tracked (`.anneal/materialized`): digest-compare skips identical
+        rewrites (no mtime churn), orphans are pruned, edits are never clobbered or deleted without
+        `--force`; `--check` / `--list` / `--clean` round it out. Tree copies are excluded from source
+        discovery (`RuleContext::with_materialized`), so they can't shadow the producer's declared
+        output or perturb cache/snapshot keys (asserted byte-identical in `materialize_exclusion.rs`).
+    - **Known limitation (intentional):** `alias` does not forward routed data (a destination is
+      package-relative to the consuming target; forwarding would re-home it). Materialize the actual target.
+      Output export ("give me the built artifact") is deliberately not this verb: it belongs with
+      `run`/`outputs` and a stable out-dir. The §14.6 **staged pass** (generated `Cargo.toml`, etc.) remains
+      separate.
   - [ ] **`exec`** escape hatch (§7.6) — run an arbitrary command in a sandbox (permissive by default;
         `--hermetic`/`--no-network` opt-in).
   - [ ] **`init` / `init --detect`** (§15.2) — interactive setup / scaffold config without touching native files.
@@ -375,6 +404,58 @@ shape is shared across every package ecosystem.
       network by default, while fixed-output/network-capable actions get the allow-network profile/namespace.
       Deferred optimization: graph-level dedup of identical-`expected` nodes (the `cas.has` short-circuit already
       makes the duplicate a no-op).
+  - [x] **Native fetch (no curl, no sandbox, no host trust).** A FOD action may carry a declarative
+        `fetch_url` (`ActionBuilder::fetch(url, expected)`: empty command, no inputs/toolchains, one output —
+        validated at build time); `run_fixed_output` downloads it **in the executor process** over ureq →
+        rustls/ring with Mozilla's roots compiled in (`webpki-roots`). Kills the curl CA failure class
+        outright (Nix curl → Nix OpenSSL whose baked OPENSSLDIR ships no CA bundle; the scrubbed sandbox env
+        has no `SSL_CERT_FILE` → exit 60 on every fetch) and the per-fetch sandbox spawn; proxies work again
+        (the executor keeps the user's env). The pin still carries integrity — embedded roots are
+        availability-only. This is the Buck2/Bazel shape: pinned downloads are kernel infrastructure, not an
+        inner tool. `cargo_workspace::fetch_action` flipped over; hermetic local-server tests
+        (`anneal-exec/tests/native_fetch.rs`: verify, CAS admit, output-keyed hit without network, 5xx retry,
+        4xx no-retry, contract validation). Found+fixed en route: `gzip` was missing from the posix-runtime
+        toolchain (GNU tar's `z` execs it — vendor assembly died in-sandbox), and
+        `fetch_mode_builds_a_registry_dep_offline` is now **gated on `ANNEAL_NETWORK_TESTS=1` instead of
+        `#[ignore]`d** so a networked CI lane actually exercises fetch mode (it rotted silently twice behind
+        the ignore). The sandboxed-command FOD form remains for user-authored fetch actions.
+- [x] **Hermetic native (C/system) linking on macOS — the cc-wrapper environment.** Same root pattern as
+      the CA/gzip fetch bugs: the scrubbed sealed sandbox drops host toolchain context the Nix Darwin
+      clang-wrapper needs to link. **Probe (Linux, in a fresh Nix container) settled scope:** a plain Rust
+      binary links scrubbed on Linux because the gcc-wrapper *bakes* its lib paths (closure = mounted roots →
+      hermetic by construction); the macOS clang-wrapper does **not** — it stays passive until its *salted*
+      `NIX_CC_WRAPPER_TARGET_HOST_<arch>=1` flag + `NIX_LDFLAGS` are present (libiconv et al. live in nixpkgs,
+      not the SDK). **Bisection** pinned the minimal link set to `NIX_LDFLAGS` + the two salted
+      `*_WRAPPER_TARGET_HOST` flags (dropping either fails); we capture the *full* curated set so the sandbox
+      `cc` matches a normal Nix build. **Fix:** a Darwin-only `runCommandCC` derivation captures its build-context
+      wrapper env (a plain `runCommand` sees empty/build-suffixed vars — must be CC-stdenv), filtered to an
+      allowlist via `jq $ENV`, folded into the manifest's `rust.env` (Option A — reuses the groundwork's
+      `rust.env`→`cargo_builder` path, *zero* Rust change). Excludes build-instance noise that would poison the
+      cache key or misbehave (`NIX_BUILD_TOP`, `NIX_BUILD_CORES`, `NIX_SSL_CERT_FILE=/no-cert-file.crt` (!),
+      `NIX_ENFORCE_*`, the `_FOR_BUILD` twins, `PATH`). Closure-complete: every `-L` path is already a mounted
+      rust root (via `stdenv.cc`). Linux's `rust.env` stays `{}` (probe-confirmed). Composes with `native_libs`
+      (same `cargo_builder` env merge, hard-error on conflict). *Deferred refinement:* carry it as an env-file
+      root keyed by content-digest (Option B) instead of spraying values into the key — marginal, not worth it
+      yet since the values are store paths already in the toolchain identity.
+- [x] **`cargo_workspace` `native_libs` (workspace native libraries, Shape 2).** A workspace links a prebuilt
+      native lib (`libpq`/`openssl`/`zlib` via a `-sys` crate) by naming a manifest toolchain key:
+      `cargo_workspace(native_libs = ["zlib"])`. Each resolves (`nix_lib_toolchain`, tool-optional) to a
+      toolchain whose closure mounts read-only and whose env (`PKG_CONFIG_PATH`) + `pkg-config` bin dir join the
+      **compiling** actions; its roots also mount on the **run** action (dynamic libs needed at test runtime).
+      Env across libs (and the rust toolchain) is merged with a **hard error on conflict** (`merge_toolchain_env`
+      — compose path-vars into one toolchain in the flake). Native-lib identity folds into the `target/`
+      snapshot shard (else a lib bump could restore a stale, wrong-linked tree — §8.2). Declared, not inferred
+      (no `-sys`→nixpkgs auto-mapping). Flake exports `lib.mkNativeLibToolchain pkgs <pkg>` and ships `zlib` as
+      the worked example. Tests: tool-less resolution, env-merge conflict, analysis-level attachment of
+      roots+env to compile and run actions, and a **network-gated execution test** (`tests/native_libs.rs`,
+      `ANNEAL_NETWORK_TESTS=1`, runs on the macOS CI lane) that builds a workspace linking zlib via
+      `pkg-config`, **runs** its unit test calling a zlib symbol (proving the link *and* runtime-mount), and
+      asserts the build *fails* without `native_libs` (load-bearing). That execution test caught a real
+      `mkNativeLibToolchain` bug the analysis test couldn't — zlib's `.pc` is under `share/pkgconfig`, not
+      `lib/pkgconfig`; `PKG_CONFIG_PATH` now lists both. **Deferred:** promote to a first-class `native_lib`
+      *target* (graph visibility via `why`, reuse) if/when monorepo precision is wanted — accepting a BUILD-file
+      migration; a reusable "consumer builds its own manifest" helper so `mkNativeLibToolchain` is usable
+      end-to-end off-the-shelf; the same attach mechanism for `pnpm_workspace` (node-gyp).
 - [ ] **The per-ecosystem acquisition pattern (one shape everywhere).** Every modern ecosystem converged on the
       same two things — a lockfile with per-artifact hashes + an internal content-addressed store — which *is* the
       FOD shape: `lockfile {(coord, hash)} → one FOD fetch per artifact → assemble blobs into the tool's offline
@@ -459,8 +540,9 @@ shape is shared across every package ecosystem.
 - [x] **macOS sandbox hardening** — implemented with generated `sandbox-exec` profiles, scrubbed env,
       network deny/allow by capability, fd/stdio hardening, declared toolchain read-only policy, and tests that
       document both enforced guarantees and unavoidable metadata/runtime visibility gaps.
-- [ ] **Wire Linux sandbox Docker tests into CI** so the Linux hermeticity suite runs routinely even when
-      developers are on macOS.
+- [x] **Linux sandbox Docker tests run in CI.** The Ubuntu lane executes the Rust suite inside the privileged
+      sandbox container with the Nix toolchain manifest, and the dedicated `linux-sandbox-docker` job exercises
+      the hermeticity harness directly.
 
 ## Diagnostics
 

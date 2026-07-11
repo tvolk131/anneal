@@ -11,7 +11,7 @@ use std::fs;
 use std::io;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
-use std::process::{Child, ExitStatus};
+use std::process::{Child, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -23,8 +23,11 @@ use anneal_snapshot::SnapshotStore;
 
 use crate::action::{Action, ActionError, CachePolicy, ExecutionMode, InputSource};
 use crate::cache::{action_digest, ActionCache, StoredResult};
+use crate::fetch;
 use crate::materializer;
+use crate::query::{query_identity, query_key, QueryResult, QuerySpec, QUERY_STDOUT};
 use crate::sandbox::{self, SandboxSpec};
+use crate::trust::{self, EnforcementGrade, Provenance};
 use crate::warm::{self, InputManifest};
 
 /// Disambiguates per-run sandbox directories for normal (non-snapshot) actions.
@@ -39,12 +42,40 @@ pub struct ActionResult {
     pub outputs: BTreeMap<String, Digest>,
     /// Whether this result was served from the action cache (no re-execution).
     pub cache_hit: bool,
+    /// Producing platform, enforcement grade, and computed tier (§2.8). Present
+    /// on successful runs and on cache hits whose entry recorded it; `None` on
+    /// failures and pre-provenance cache entries.
+    pub provenance: Option<Provenance>,
+    /// When this action **never ran** because a dependency failed: the *root*
+    /// failed action's name (the original failure, not the nearest skipped
+    /// link). The result then carries exit code -1, no outputs, and no
+    /// provenance. `None` for actions that actually executed (or cache-hit).
+    pub skipped_dependency: Option<String>,
+    /// A bounded tail of the action's stderr (stdout when stderr was empty —
+    /// some tools report errors there), captured **only on failure** so the
+    /// report can show *why*. A diagnostic side channel: never an output,
+    /// never part of any cache key, absent on success/cache hits/skips, and
+    /// absent for `Native` actions (which keep inherited stdio, §7.2).
+    pub failure_output: Option<String>,
 }
 
 impl ActionResult {
-    /// Whether the action succeeded (exit code 0).
+    /// Whether the action succeeded (exit code 0). A skipped action did not.
     pub fn success(&self) -> bool {
         self.exit_code == 0
+    }
+
+    /// A synthesized "never ran" result for an action whose dependency chain
+    /// failed at `root`.
+    fn skipped(root: String) -> Self {
+        ActionResult {
+            exit_code: -1,
+            outputs: BTreeMap::new(),
+            cache_hit: false,
+            provenance: None,
+            skipped_dependency: Some(root),
+            failure_output: None,
+        }
     }
 }
 
@@ -70,6 +101,13 @@ pub struct PhaseTimings {
     /// Whole-action wall-clock (the sum of all phases).
     pub total: Duration,
 }
+
+/// The callback [`LocalExecutor::execute_graph_observed`] invokes as each action
+/// finishes. Shared across the worker threads (hence `Sync`); see that method.
+/// The `'a` lets the observer borrow non-`'static` state (e.g. accumulate into
+/// a local `Mutex<Vec<_>>`), which a bare `dyn Fn` (implicitly `'static`) would
+/// forbid.
+pub type ProgressFn<'a> = dyn Fn(&Action, &ActionResult) + Sync + 'a;
 
 /// Runs actions. Local and (future) remote executors share this interface so callers
 /// never branch on where work runs (§7.1).
@@ -103,6 +141,15 @@ pub struct LocalExecutor {
     /// Per-snapshot-key locks: same-key owners share one warm dir and serialize on it
     /// (§5.3.1), while different keys run concurrently.
     warm_locks: Mutex<HashMap<Digest, Arc<Mutex<()>>>>,
+    /// Stable per-identity sandbox roots for tool queries (`query.rs` module docs:
+    /// tools embed absolute paths in stdout, so query byte-determinism requires a
+    /// root that survives input edits).
+    queries: PathBuf,
+    /// The §2.8 enforcement floor: when set, sealed execution on a platform whose
+    /// grade is below `Enforced` **fails rather than silently degrades** — the
+    /// mandatory CI posture, since a weakly-enforced run quietly populating even
+    /// the local cache undermines what its entries can later be promoted as.
+    require_enforced: bool,
 }
 
 impl LocalExecutor {
@@ -116,11 +163,14 @@ impl LocalExecutor {
         let snapshots = SnapshotStore::open(root.join("snapshots"))?;
         let sandboxes = root.join("sandboxes");
         fs::create_dir_all(&sandboxes)?;
+        let queries = root.join("queries");
+        fs::create_dir_all(&queries)?;
         Ok(LocalExecutor {
             cas,
             cache,
             snapshots,
             sandboxes,
+            queries,
             retain_sandboxes: false,
             parallelism: default_parallelism(),
             timings: None,
@@ -128,7 +178,41 @@ impl LocalExecutor {
             warm: root.join("warm"),
             warm_meta: root.join("warm-meta"),
             warm_locks: Mutex::new(HashMap::new()),
+            require_enforced: false,
         })
+    }
+
+    /// Enable the §2.8 enforcement floor: sealed execution fails on any platform
+    /// whose grade is below [`EnforcementGrade::Enforced`], instead of silently
+    /// producing weakly-enforced results. Scoped to sealed actions — permeable
+    /// and native modes are explicit non-hermetic escapes and are never cached,
+    /// so they cannot poison what the floor protects.
+    pub fn require_enforced(mut self, enabled: bool) -> Self {
+        self.require_enforced = enabled;
+        self
+    }
+
+    /// The provenance of a run executed here, now: host platform, the sealed
+    /// enforcement grade this host delivers, and the action's computed tier.
+    fn provenance_for(&self, action: &Action) -> Provenance {
+        let grade = sandbox::sealed_enforcement_grade();
+        Provenance {
+            platform: trust::host_platform(),
+            grade,
+            tier: trust::compute_tier(action, grade),
+        }
+    }
+
+    /// Fail sealed execution when the platform grade is below the configured floor.
+    fn check_enforcement_floor(&self, action: &Action) -> Result<(), ExecError> {
+        if !self.require_enforced || !matches!(action.execution_mode, ExecutionMode::Sealed) {
+            return Ok(());
+        }
+        let grade = sandbox::sealed_enforcement_grade();
+        if grade < EnforcementGrade::Enforced {
+            return Err(ExecError::EnforcementBelowFloor { grade });
+        }
+        Ok(())
     }
 
     /// The CAS, so callers can stage inputs and read outputs by digest.
@@ -187,6 +271,30 @@ impl LocalExecutor {
     /// merely non-zero exit, which is a normal result) the scheduler stops dispatching
     /// new work, lets in-flight actions drain, and returns that error.
     pub fn execute_graph(&self, actions: &[Action]) -> Result<Vec<ActionResult>, ExecError> {
+        self.run_graph(actions, None)
+    }
+
+    /// Like [`execute_graph`](Self::execute_graph), but `observe` is called once
+    /// as each action **finishes** — ran, failed, or was skipped — in completion
+    /// order (nondeterministic under parallelism), so a caller can stream
+    /// progress instead of waiting for the whole graph. A failure and the skips
+    /// it cascades are reported back-to-back. The callback is `Sync` (shared
+    /// across workers) and runs **outside** the scheduler lock, so a slow or
+    /// blocked writer never stalls dispatch; it does its own output
+    /// synchronization (a plain `println!` is line-atomic and sufficient).
+    pub fn execute_graph_observed(
+        &self,
+        actions: &[Action],
+        observe: &ProgressFn<'_>,
+    ) -> Result<Vec<ActionResult>, ExecError> {
+        self.run_graph(actions, Some(observe))
+    }
+
+    fn run_graph(
+        &self,
+        actions: &[Action],
+        observer: Option<&ProgressFn<'_>>,
+    ) -> Result<Vec<ActionResult>, ExecError> {
         if actions.is_empty() {
             return Ok(Vec::new());
         }
@@ -204,7 +312,24 @@ impl LocalExecutor {
                 scope.spawn(|| {
                     while let Some((idx, resolved)) = next_task(&state, &progress, actions) {
                         let outcome = self.execute(&resolved);
-                        complete(&state, &progress, &edges, idx, actions[idx].name(), outcome);
+                        let finished = complete(&state, &progress, &edges, actions, idx, outcome);
+                        // Report off-lock: snapshot the just-finalized results
+                        // (the executed action plus any skips it cascaded) under
+                        // a brief lock, then invoke the observer without holding
+                        // it. Cloning is gated behind an actual observer, so the
+                        // unobserved path (tests, bench) pays nothing.
+                        if let Some(observe) = observer {
+                            let snapshots: Vec<(usize, ActionResult)> = {
+                                let st = state.lock().unwrap();
+                                finished
+                                    .iter()
+                                    .map(|&i| (i, st.results[i].clone().expect("finalized")))
+                                    .collect()
+                            };
+                            for (i, result) in snapshots {
+                                observe(&actions[i], &result);
+                            }
+                        }
                     }
                 });
             }
@@ -214,7 +339,8 @@ impl LocalExecutor {
         if let Some(err) = state.failed.take() {
             return Err(err);
         }
-        // Every action completed successfully → every slot is filled.
+        // Every action finished — ran, failed, or was skipped → every slot is
+        // filled. Failure is per-action data, not an `Err`.
         Ok(state.results.into_iter().map(Option::unwrap).collect())
     }
 }
@@ -310,6 +436,11 @@ struct SchedState {
     running: usize,
     /// First execution error; once set, no new work is dispatched.
     failed: Option<ExecError>,
+    /// Per-action doom marker: the *root* failed action whose failure makes
+    /// this action unrunnable (its inputs can never resolve). Set on the
+    /// dependents of every failed or skipped action; when a doomed action's
+    /// last dependency finishes it is completed as skipped instead of run.
+    doomed: Vec<Option<String>>,
 }
 
 impl SchedState {
@@ -325,6 +456,7 @@ impl SchedState {
             remaining: n,
             running: 0,
             failed: None,
+            doomed: vec![None; n],
         }
     }
 }
@@ -350,8 +482,9 @@ fn next_task(
                     return Some((idx, resolved));
                 }
                 Err(e) => {
-                    // A dependency finished without producing the referenced output
-                    // (e.g. it exited non-zero). Treat as a graph error and stop.
+                    // A *successful* dependency lacks the referenced output name —
+                    // a malformed graph (failed dependencies never get here; their
+                    // dependents are completed as skipped). Abort the run.
                     st.failed.get_or_insert(e);
                     progress.notify_all();
                     return None;
@@ -369,41 +502,83 @@ fn next_task(
     }
 }
 
-/// Record an action's outcome under the lock and unblock its dependents. A non-zero
-/// exit is a normal result (its empty output set surfaces later as an `UnresolvedInput`
-/// for any consumer that needed it); only an `Err` aborts the run.
+/// Record an action's outcome under the lock and settle its dependents. A non-zero
+/// exit is a normal result: the action's transitive dependents are completed as
+/// **skipped** (their inputs can never resolve), independent subgraphs keep
+/// running, and the whole run still returns `Ok` — failure is data, reported
+/// per action. Only an `Err` (an infrastructure error: spawn, I/O, a malformed
+/// graph) aborts the run. Returns the indices finalized by this call — the
+/// executed action plus any it cascaded into skips — for streamed reporting.
 fn complete(
     state: &Mutex<SchedState>,
     progress: &Condvar,
     edges: &Edges,
+    actions: &[Action],
     idx: usize,
-    name: &str,
     outcome: Result<ActionResult, ExecError>,
-) {
+) -> Vec<usize> {
     let mut st = state.lock().unwrap();
     st.running -= 1;
-    match outcome {
+    let finished = match outcome {
         Err(e) => {
             st.failed.get_or_insert(e);
+            Vec::new()
         }
-        Ok(result) => {
-            for (output_name, digest) in &result.outputs {
-                st.produced
-                    .insert((name.to_owned(), output_name.clone()), *digest);
+        Ok(result) => finish(&mut st, edges, actions, idx, result),
+    };
+    progress.notify_all();
+    finished
+}
+
+/// Record a finished action — a real result or a synthesized skip — and settle
+/// its dependents. Iterative, because a failure cascades: each dependent whose
+/// dependencies have now all finished either becomes ready (clean) or is itself
+/// finished as skipped (doomed), which in turn settles *its* dependents. Skips
+/// carry the **root** failed action's name, not the nearest skipped link, so
+/// every skip in a chain points at the one action worth reading.
+fn finish(
+    st: &mut SchedState,
+    edges: &Edges,
+    actions: &[Action],
+    idx: usize,
+    result: ActionResult,
+) -> Vec<usize> {
+    let mut finished = Vec::new();
+    let mut stack = vec![(idx, result)];
+    while let Some((i, result)) = stack.pop() {
+        for (output_name, digest) in &result.outputs {
+            st.produced
+                .insert((actions[i].name().to_owned(), output_name.clone()), *digest);
+        }
+        // What this action's dependents inherit: a skip propagates its root;
+        // a fresh failure starts one.
+        let doom = if result.success() {
+            None
+        } else {
+            Some(
+                result
+                    .skipped_dependency
+                    .clone()
+                    .unwrap_or_else(|| actions[i].name().to_owned()),
+            )
+        };
+        st.results[i] = Some(result);
+        st.remaining -= 1;
+        finished.push(i);
+        for &dep in &edges.dependents[i] {
+            if let Some(root) = &doom {
+                st.doomed[dep].get_or_insert_with(|| root.clone());
             }
-            if st.failed.is_none() {
-                for &dep in &edges.dependents[idx] {
-                    st.pending[dep] -= 1;
-                    if st.pending[dep] == 0 {
-                        st.ready.push(dep);
-                    }
+            st.pending[dep] -= 1;
+            if st.pending[dep] == 0 {
+                match st.doomed[dep].clone() {
+                    Some(root) => stack.push((dep, ActionResult::skipped(root))),
+                    None => st.ready.push(dep),
                 }
             }
-            st.results[idx] = Some(result);
-            st.remaining -= 1;
         }
     }
-    progress.notify_all();
+    finished
 }
 
 /// The machine's available parallelism, or 1 if it cannot be determined.
@@ -449,11 +624,14 @@ impl LocalExecutor {
     /// Cached by **output**, not inputs: if `expected` is already a CAS blob — from any
     /// prior build, any project on this machine, or a future remote-cache pull — the
     /// fetch is skipped entirely (content-addressed dedup; the fetch command never runs).
-    /// On a miss we fetch in a sandbox with the network capability, then verify the
-    /// produced bytes against the pin: a mismatch (corrupt download, compromised mirror,
-    /// moved artifact) fails *closed*. Verification makes the result trivially §1.4
-    /// correctness-neutral — the hash is the sole arbiter, so a bad network can fail the
-    /// build but never corrupt it.
+    /// On a miss we fetch — **natively in-process** when the action carries a
+    /// `fetch_url` (pure-Rust TLS, Mozilla roots compiled in: no curl, no sandbox,
+    /// no host trust configuration), otherwise by running the command in a sandbox
+    /// with the network capability — then verify the produced bytes against the
+    /// pin: a mismatch (corrupt download, compromised mirror, moved artifact)
+    /// fails *closed*. Verification makes the result trivially §1.4
+    /// correctness-neutral — the hash is the sole arbiter, so a bad network can
+    /// fail the build but never corrupt it.
     fn run_fixed_output(
         &self,
         action: &Action,
@@ -474,13 +652,39 @@ impl LocalExecutor {
                 exit_code: 0,
                 outputs: BTreeMap::from([(out_name, expected)]),
                 cache_hit: true,
+                provenance: Some(self.provenance_for(action)),
+                skipped_dependency: None,
+                failure_output: None,
             });
         }
 
-        // Miss: fetch in a sandbox (network permitted by the capability; no snapshot
-        // restore/save). `capture` already stored the produced bytes in the CAS under
-        // their *actual* digest — a wrong-hash blob there is harmless, it simply isn't
-        // `expected` — so we only need to check that digest against the pin.
+        // Miss, native fetch (§FOD): the executor downloads in-process — no
+        // sandbox, no toolchain, embedded Mozilla roots — and the pin is the
+        // sole arbiter of what enters the CAS. `put` returns the actual digest;
+        // a wrong-hash blob in the CAS is harmless (it simply isn't `expected`).
+        if let Some(url) = &action.fetch_url {
+            let bytes = fetch::download(url).map_err(|error| ExecError::Fetch {
+                action: action.name().to_owned(),
+                error,
+            })?;
+            let actual = self.cas.put(&bytes)?;
+            if actual != expected {
+                return Err(ExecError::FixedOutputMismatch { expected, actual });
+            }
+            return Ok(ActionResult {
+                exit_code: 0,
+                outputs: BTreeMap::from([(out_name, expected)]),
+                cache_hit: false,
+                provenance: Some(self.provenance_for(action)),
+                skipped_dependency: None,
+                failure_output: None,
+            });
+        }
+
+        // Miss, command form: fetch in a sandbox (network permitted by the capability;
+        // no snapshot restore/save). `capture` already stored the produced bytes in the
+        // CAS under their *actual* digest — a wrong-hash blob there is harmless, it
+        // simply isn't `expected` — so we only need to check that digest against the pin.
         let result = self.run_core(action, self.sandbox_root(&expected), false, false)?;
         if result.exit_code != 0 {
             // The fetch command itself failed (e.g. the artifact is unreachable). Surface
@@ -532,12 +736,7 @@ impl LocalExecutor {
             env: &action.env,
         };
         let run_start = Instant::now();
-        let mut child = sandbox::build_command(action, &spec)
-            .map_err(ExecError::Sandbox)?
-            .spawn()
-            .map_err(ExecError::Spawn)?;
-        let status = wait_with_timeout(&mut child, action.timeout_ms)?;
-        let exit_code = status.code().unwrap_or(-1);
+        let (exit_code, failure_output) = run_command(action, &spec)?;
         let t_run = run_start.elapsed();
 
         let mut t_capture = Duration::ZERO;
@@ -581,10 +780,14 @@ impl LocalExecutor {
             });
         }
 
+        let provenance = (exit_code == 0).then(|| self.provenance_for(action));
         Ok(ActionResult {
             exit_code,
             outputs,
             cache_hit: false,
+            provenance,
+            skipped_dependency: None,
+            failure_output,
         })
     }
 
@@ -705,12 +908,7 @@ impl LocalExecutor {
             env: &action.env,
         };
         let run_start = Instant::now();
-        let mut child = sandbox::build_command(action, &spec)
-            .map_err(ExecError::Sandbox)?
-            .spawn()
-            .map_err(ExecError::Spawn)?;
-        let status = wait_with_timeout(&mut child, action.timeout_ms)?;
-        let exit_code = status.code().unwrap_or(-1);
+        let (exit_code, failure_output) = run_command(action, &spec)?;
         let t_run = run_start.elapsed();
 
         let mut t_capture = Duration::ZERO;
@@ -751,10 +949,14 @@ impl LocalExecutor {
             });
         }
 
+        let provenance = (exit_code == 0).then(|| self.provenance_for(action));
         Ok(ActionResult {
             exit_code,
             outputs,
             cache_hit: false,
+            provenance,
+            skipped_dependency: None,
+            failure_output,
         })
     }
 
@@ -772,6 +974,101 @@ impl LocalExecutor {
         guard_resolved(action)?;
         let root = self.sandboxes.join(sandbox_name);
         self.run_core(action, root, restore, save)
+    }
+
+    /// Run (or cache-hit) a tool query: a sealed, network-denied, output-less action
+    /// whose **stdout is the result** (DESIGN.md §3.6, spiked here).
+    ///
+    /// Differences from [`Executor::execute`], each load-bearing:
+    /// - **stdout/stderr are piped, not nulled.** stdout is the query's output and is
+    ///   stored in the CAS under [`QUERY_STDOUT`]; stderr rides along into the error
+    ///   on failure. Both pipes are drained on threads while waiting, so a query
+    ///   emitting more than a pipe buffer (cargo metadata is megabytes) can't deadlock.
+    /// - **The sandbox root is stable per query *identity*** (command/env/toolchains/
+    ///   working dir — not inputs), because tools embed absolute paths in stdout and
+    ///   byte-stable output across input edits is the early-cutoff keystone. Same-
+    ///   identity runs serialize on a per-identity lock; the root is wiped and
+    ///   re-materialized each run (queries have no warm state by construction).
+    /// - **Cache entries are namespaced** (`anneal-query-v1`) and store the stdout
+    ///   blob digest; a hit reads the blob back from the CAS.
+    pub fn run_query(&self, spec: &QuerySpec) -> Result<QueryResult, ExecError> {
+        let action = spec.action();
+        guard_valid(action)?;
+        guard_resolved(action)?;
+        self.check_enforcement_floor(action)?;
+
+        let key = query_key(action);
+        if let Some(stored) = self.cache.lookup(&key)? {
+            if let Some(digest) = stored.outputs.get(QUERY_STDOUT) {
+                if let Some(stdout) = self.cas.get(digest)? {
+                    return Ok(QueryResult {
+                        stdout,
+                        cache_hit: true,
+                    });
+                }
+                // Blob missing from the CAS (no GC exists yet, but fail open to a
+                // re-run rather than closed on a torn store).
+            }
+        }
+
+        let identity = query_identity(action);
+        let lock = self.warm_key_lock(&identity);
+        let _guard = lock.lock().unwrap();
+
+        let root = self.queries.join(&identity.to_hex()[..16]);
+        if root.exists() {
+            fs::remove_dir_all(&root)?;
+        }
+        let prepared = materializer::prepare_at(&self.cas, action, root)?;
+
+        let sandbox_spec = SandboxSpec {
+            mode: action.execution_mode,
+            root: &prepared.root,
+            cwd: &prepared.cwd,
+            home: &prepared.home,
+            tmp: &prepared.tmp,
+            env: &action.env,
+        };
+        let mut cmd = sandbox::build_command(action, &sandbox_spec).map_err(ExecError::Sandbox)?;
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn().map_err(ExecError::Spawn)?;
+
+        let stdout_pipe = child.stdout.take().expect("stdout was piped above");
+        let stderr_pipe = child.stderr.take().expect("stderr was piped above");
+        let stdout_thread = thread::spawn(move || drain(stdout_pipe));
+        let stderr_thread = thread::spawn(move || drain(stderr_pipe));
+
+        let status = wait_with_timeout(&mut child, action.timeout_ms)?;
+        let stdout = stdout_thread.join().unwrap_or_default();
+        let stderr = stderr_thread.join().unwrap_or_default();
+        let exit_code = status.code().unwrap_or(-1);
+
+        if !self.retain_sandboxes {
+            let _ = fs::remove_dir_all(&prepared.root);
+        }
+
+        if exit_code != 0 {
+            return Err(ExecError::QueryFailed {
+                name: action.name().to_owned(),
+                exit_code,
+                stderr_tail: tail(&stderr),
+            });
+        }
+
+        let digest = self.cas.put(&stdout)?;
+        self.cache.insert(
+            &key,
+            &StoredResult {
+                exit_code: 0,
+                outputs: BTreeMap::from([(QUERY_STDOUT.to_owned(), digest)]),
+                provenance: Some(self.provenance_for(action)),
+            },
+        )?;
+        Ok(QueryResult {
+            stdout,
+            cache_hit: false,
+        })
     }
 
     /// Run the **warm-reuse** path for `action` **outside the action cache**, for the
@@ -804,6 +1101,7 @@ impl Executor for LocalExecutor {
     fn execute(&self, action: &Action) -> Result<ActionResult, ExecError> {
         guard_valid(action)?;
         guard_resolved(action)?;
+        self.check_enforcement_floor(action)?;
 
         // Fixed-output (FOD) fetches are cached by their *output* hash, not their inputs,
         // and verified against the pin — a different execution path entirely (§FOD).
@@ -848,6 +1146,9 @@ impl Executor for LocalExecutor {
                     exit_code: stored.exit_code,
                     outputs: stored.outputs,
                     cache_hit: true,
+                    provenance: stored.provenance,
+                    skipped_dependency: None,
+                    failure_output: None,
                 });
             }
         }
@@ -865,6 +1166,7 @@ impl Executor for LocalExecutor {
                 &StoredResult {
                     exit_code: result.exit_code,
                     outputs: result.outputs.clone(),
+                    provenance: result.provenance.clone(),
                 },
             )?;
         }
@@ -891,6 +1193,75 @@ fn guard_resolved(action: &Action) -> Result<(), ExecError> {
 }
 
 /// Wait for `child`, killing it if it exceeds `timeout_ms`.
+/// Read a child pipe to EOF. Runs on its own thread so a query writing more
+/// than a pipe buffer can't deadlock against `wait_with_timeout`.
+fn drain(mut pipe: impl io::Read) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let _ = pipe.read_to_end(&mut buf);
+    buf
+}
+
+/// The last few lines of captured stderr, for the `QueryFailed` diagnostic.
+fn tail(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(10);
+    lines[start..].join("\n")
+}
+
+/// Spawn the sandboxed command and wait for it. stdout/stderr are piped and
+/// drained on threads (the child's stdio is otherwise nulled — see
+/// `apply_sandbox_process_hardening`); on a non-zero exit a bounded tail comes
+/// back for the failure report. `Native` actions keep inherited stdio (§7.2:
+/// run directly in the host context), so their failures carry no tail.
+fn run_command(action: &Action, spec: &SandboxSpec) -> Result<(i32, Option<String>), ExecError> {
+    let mut cmd = sandbox::build_command(action, spec).map_err(ExecError::Sandbox)?;
+    if action.execution_mode == ExecutionMode::Native {
+        let mut child = cmd.spawn().map_err(ExecError::Spawn)?;
+        let status = wait_with_timeout(&mut child, action.timeout_ms)?;
+        return Ok((status.code().unwrap_or(-1), None));
+    }
+
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(ExecError::Spawn)?;
+    let stdout_pipe = child.stdout.take().expect("stdout was piped above");
+    let stderr_pipe = child.stderr.take().expect("stderr was piped above");
+    let stdout_thread = thread::spawn(move || drain(stdout_pipe));
+    let stderr_thread = thread::spawn(move || drain(stderr_pipe));
+    let status = wait_with_timeout(&mut child, action.timeout_ms)?;
+    let stdout = stdout_thread.join().unwrap_or_default();
+    let stderr = stderr_thread.join().unwrap_or_default();
+    let exit_code = status.code().unwrap_or(-1);
+    let failure_output = (exit_code != 0).then(|| diagnostic_tail(&stderr, &stdout));
+    Ok((exit_code, failure_output))
+}
+
+/// How much of a failed action's output the result carries: enough for a
+/// compiler error with context (rustc/cargo diagnostics span dozens of lines —
+/// the 10-line query `tail` is too tight), bounded so a pathological line
+/// cannot bloat the report.
+const DIAG_TAIL_LINES: usize = 40;
+const DIAG_TAIL_BYTES: usize = 16 * 1024;
+
+/// The last [`DIAG_TAIL_LINES`] lines of stderr — or of stdout when stderr is
+/// empty (some tools report errors there) — capped at [`DIAG_TAIL_BYTES`].
+fn diagnostic_tail(stderr: &[u8], stdout: &[u8]) -> String {
+    let source = if stderr.is_empty() { stdout } else { stderr };
+    let text = String::from_utf8_lossy(source);
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(DIAG_TAIL_LINES);
+    let mut tail = lines[start..].join("\n");
+    if tail.len() > DIAG_TAIL_BYTES {
+        let cut = tail.len() - DIAG_TAIL_BYTES;
+        // Keep the *end* (errors conclude the output), on a char boundary.
+        let boundary = (cut..tail.len())
+            .find(|&i| tail.is_char_boundary(i))
+            .unwrap_or(tail.len());
+        tail = format!("[... truncated ...]{}", &tail[boundary..]);
+    }
+    tail
+}
+
 fn wait_with_timeout(child: &mut Child, timeout_ms: u64) -> Result<ExitStatus, ExecError> {
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     loop {
@@ -912,6 +1283,12 @@ fn wait_with_timeout(child: &mut Child, timeout_ms: u64) -> Result<ExitStatus, E
 pub enum ExecError {
     /// A filesystem/CAS error during materialization, capture, or caching.
     Io(io::Error),
+    /// A native fixed-output download definitively failed (transport, after
+    /// retries, or a 4xx). Hash mismatches are `FixedOutputMismatch`, not this.
+    Fetch {
+        action: String,
+        error: crate::fetch::FetchError,
+    },
     /// The configured sandbox backend is missing or unusable.
     Sandbox(SandboxError),
     /// The command could not be spawned.
@@ -933,12 +1310,26 @@ pub enum ExecError {
     FixedOutputMismatch { expected: Digest, actual: Digest },
     /// The action contract is malformed and was rejected before materialization.
     InvalidAction(ActionError),
+    /// A tool query exited nonzero. Queries provide analysis facts, so a failed
+    /// query is a build error, never cached; the stderr tail is carried for the
+    /// diagnostic.
+    QueryFailed {
+        name: String,
+        exit_code: i32,
+        stderr_tail: String,
+    },
+    /// The `require_enforced` floor is set and this platform's sealed sandbox
+    /// delivers a weaker grade — fail loudly rather than degrade silently (§2.8).
+    EnforcementBelowFloor { grade: EnforcementGrade },
 }
 
 impl fmt::Display for ExecError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ExecError::Io(e) => write!(f, "I/O error: {e}"),
+            ExecError::Fetch { action, error } => {
+                write!(f, "action {action:?}: {error}")
+            }
             ExecError::Sandbox(e) => write!(f, "{e}"),
             ExecError::Spawn(e) => write!(f, "failed to spawn command: {e}"),
             ExecError::MissingOutput(name) => {
@@ -965,6 +1356,20 @@ impl fmt::Display for ExecError {
                 "fixed-output hash mismatch: expected {expected}, fetched {actual}"
             ),
             ExecError::InvalidAction(error) => write!(f, "invalid action: {error}"),
+            ExecError::QueryFailed {
+                name,
+                exit_code,
+                stderr_tail,
+            } => write!(
+                f,
+                "query {name:?} exited with code {exit_code}: {stderr_tail}"
+            ),
+            ExecError::EnforcementBelowFloor { grade } => write!(
+                f,
+                "enforcement floor not met: this platform's sealed sandbox delivers \
+                 `{grade}`, but `require_enforced` demands `enforced`; run on a \
+                 Linux-namespace platform or drop the floor"
+            ),
         }
     }
 }

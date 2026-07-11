@@ -18,8 +18,8 @@ mod support;
 /// every build maps to the same warm working tree.
 fn concat_action(a: Digest, b: Digest, snapshot_key: Digest) -> Action {
     support::shell_action("concat", "mkdir -p cache && cat a.txt b.txt > out.txt")
-        .input("a", "a.txt", a)
-        .input("b", "b.txt", b)
+        .source_input("a", "a.txt", a)
+        .source_input("b", "b.txt", b)
         .output("out", "out.txt")
         .snapshot(snapshot_key, vec![PathBuf::from("cache")])
         .build()
@@ -87,7 +87,7 @@ fn private_snapshot_skips_cas_save_under_warm_reuse_but_shared_saves() {
             tag_name,
             "mkdir -p cache && echo m > cache/m && cp in.txt out.txt",
         )
-        .input("in", "in.txt", blob)
+        .source_input("in", "in.txt", blob)
         .output("out", "out.txt");
         if private {
             b.snapshot_private(key, vec![PathBuf::from("cache")])

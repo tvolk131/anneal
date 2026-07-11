@@ -42,10 +42,11 @@ use anneal_exec::{Action, ActionBuilder, Toolchain};
 
 use crate::attrs::AttrValue;
 use crate::context::RuleContext;
-use crate::providers::{Artifact, ArtifactSource, FileSet, ProviderSet};
+use crate::providers::{route_data_inputs, Artifact, ArtifactSource, FileSet, ProviderSet};
 use crate::rule::{Analysis, Rule, RuleError};
 use crate::schema::{AttrSchema, AttrType};
-use crate::toolchain::{nix_base_runtime, nix_store_toolchain, toolchain_path_env};
+use crate::state::{PersistentStateDecl, StateActionExt, StateKind};
+use crate::toolchain::{nix_base_runtime, nix_store_toolchain};
 
 /// `scripts` is an optional table; the rule validates its structure. `data` routes other
 /// targets' file outputs into the workspace — plain-path (§4 of `docs/pnpm-workspace.md`):
@@ -77,7 +78,6 @@ impl Rule for PnpmWorkspace {
     fn analyze(&self, ctx: &RuleContext) -> Result<Analysis, RuleError> {
         let toolchain = nix_store_toolchain("node", &["pnpm", "node"])?;
         let runtime = nix_base_runtime()?;
-        let path_env = toolchain_path_env(&[&toolchain, &runtime]);
 
         // --- install inputs: manifests + lockfile only (not the source tree) ---
         if !ctx.package_file_exists(Path::new("package.json")) {
@@ -97,11 +97,16 @@ impl Rule for PnpmWorkspace {
         let package_json = ctx.source_artifact(Path::new("package.json"))?;
 
         let label = ctx.label().clone();
-        // The same snapshot key is shared by install (which saves) and every script
-        // (which restores) — the concrete form of "the edge carries the install-snapshot
-        // identity" (§6 of the pnpm doc).
-        let snapshot_key = snapshot_key(&toolchain, &runtime, source_digest(&lockfile), ctx);
-        let snapshot_paths = vec![PathBuf::from("node_modules"), PathBuf::from(STORE_DIR)];
+        // node_modules + store is **phase-separated** state (DESIGN.md §2.1):
+        // produced by exactly one action (install), consumed read-only by every
+        // script. No trust delegated, so no attestation exists — the shape to
+        // prefer, and the typed proof that ceremony correlates with risk.
+        let modules_state = ctx.declare_state(PersistentStateDecl {
+            namespace: "pnpm-node-modules",
+            shard: modules_state_shard(&toolchain, &runtime, source_digest(&lockfile), ctx),
+            kind: StateKind::PhaseSeparated,
+            paths: vec![PathBuf::from("node_modules"), PathBuf::from(STORE_DIR)],
+        })?;
 
         let mut actions = Vec::new();
 
@@ -118,7 +123,6 @@ impl Rule for PnpmWorkspace {
                     format!("--store-dir={STORE_DIR}"),
                 ],
             ),
-            &path_env,
             &toolchain,
             &runtime,
         );
@@ -127,7 +131,7 @@ impl Rule for PnpmWorkspace {
         // while keeping the lockfile digest in the action key.
         let install = add_writable_source(add_source(install, &package_json), &lockfile)
             .configured(ctx.config().clone(), Vec::new())
-            .snapshot(snapshot_key, snapshot_paths.clone())
+            .produce_state(&modules_state)?
             .try_build()?;
         actions.push(install);
 
@@ -140,7 +144,7 @@ impl Rule for PnpmWorkspace {
             // consuming scripts** at its per-edge destination — not routed through install.
             let routed = resolve_data(ctx)?;
 
-            for (script_index, (name, spec)) in scripts.into_iter().enumerate() {
+            for (script_index, (name, spec)) in scripts.iter().enumerate() {
                 let spec = spec.as_dict().ok_or_else(|| {
                     RuleError::Message(format!("pnpm_workspace: scripts[{name:?}] must be a table"))
                 })?;
@@ -154,14 +158,13 @@ impl Rule for PnpmWorkspace {
                     "test" => {
                         let results_path =
                             PathBuf::from(format!(".anneal/pnpm-tests/{script_index}/results.txt"));
-                        let action = with_routed(
+                        let action = route_data_inputs(
                             with_sources(
                                 with_env(
                                     Action::builder(
                                         format!("pnpm_workspace test {label} {name}"),
                                         test_command(name, &results_path),
                                     ),
-                                    &path_env,
                                     &toolchain,
                                     &runtime,
                                 ),
@@ -171,7 +174,7 @@ impl Rule for PnpmWorkspace {
                         )
                         .output("results.txt", results_path)
                         .configured(ctx.config().clone(), Vec::new())
-                        .snapshot_restore(snapshot_key, snapshot_paths.clone())
+                        .read_state(&modules_state)?
                         .try_build()?;
                         actions.push(action);
                     }
@@ -182,14 +185,13 @@ impl Rule for PnpmWorkspace {
                             .map(<[String]>::to_vec)
                             .unwrap_or_default();
                         let action_id = format!("pnpm_workspace build {label} {name}");
-                        let mut builder = with_routed(
+                        let mut builder = route_data_inputs(
                             with_sources(
                                 with_env(
                                     Action::builder(
                                         action_id.clone(),
                                         vec!["pnpm".to_owned(), "run".to_owned(), name.clone()],
                                     ),
-                                    &path_env,
                                     &toolchain,
                                     &runtime,
                                 ),
@@ -209,7 +211,7 @@ impl Rule for PnpmWorkspace {
                         }
                         let action = builder
                             .configured(ctx.config().clone(), Vec::new())
-                            .snapshot_restore(snapshot_key, snapshot_paths.clone())
+                            .read_state(&modules_state)?
                             .try_build()?;
                         actions.push(action);
                     }
@@ -248,18 +250,13 @@ fn test_command(script: &str, results_path: &Path) -> Vec<String> {
     vec!["sh".to_owned(), "-c".to_owned(), body]
 }
 
-/// Apply the shared environment: toolchain on PATH, an in-sandbox pnpm store, and the
-/// update notifier disabled (no network reach).
-fn with_env(
-    builder: ActionBuilder,
-    path_env: &str,
-    toolchain: &Toolchain,
-    runtime: &Toolchain,
-) -> ActionBuilder {
+/// Apply the shared environment: the toolchains (whose bin dirs compose into PATH at
+/// build — see `ActionBuilder`), an in-sandbox pnpm store, and the update notifier
+/// disabled (no network reach).
+fn with_env(builder: ActionBuilder, toolchain: &Toolchain, runtime: &Toolchain) -> ActionBuilder {
     builder
         .toolchain(toolchain.clone())
         .toolchain(runtime.clone())
-        .env("PATH", path_env)
         .env("npm_config_store_dir", STORE_DIR)
         .env("npm_config_update_notifier", "false")
 }
@@ -320,36 +317,16 @@ fn resolve_data(ctx: &RuleContext) -> Result<Vec<Artifact>, RuleError> {
     Ok(routed)
 }
 
-/// Add routed `data` artifacts as inputs at their per-edge destination. A resolved source
-/// flows in as a blob; a produced output as an action-graph edge resolved at execution.
-fn with_routed(mut builder: ActionBuilder, routed: &[Artifact]) -> ActionBuilder {
-    for artifact in routed {
-        let name = artifact.path.to_string_lossy().into_owned();
-        match &artifact.source {
-            ArtifactSource::Source(digest) => {
-                builder = builder.input(name, artifact.path.clone(), *digest);
-            }
-            ArtifactSource::Output {
-                action,
-                name: output,
-            } => {
-                builder = builder.input_from_output(name, artifact.path.clone(), action, output);
-            }
-        }
-    }
-    builder
-}
-
 /// Add a single resolved source artifact as a content-addressed input at its own path.
 fn add_source(builder: ActionBuilder, artifact: &Artifact) -> ActionBuilder {
     let name = artifact.path.to_string_lossy().into_owned();
-    builder.input(name, artifact.path.clone(), source_digest(artifact))
+    builder.source_input(name, artifact.path.clone(), source_digest(artifact))
 }
 
 /// Add a source artifact as a private writable input while preserving its digest identity.
 fn add_writable_source(builder: ActionBuilder, artifact: &Artifact) -> ActionBuilder {
     let name = artifact.path.to_string_lossy().into_owned();
-    builder.writable_input(name, artifact.path.clone(), source_digest(artifact))
+    builder.writable_source_input(name, artifact.path.clone(), source_digest(artifact))
 }
 
 fn is_pnpm_lockfile(path: &Path) -> bool {
@@ -367,23 +344,21 @@ fn source_digest(artifact: &Artifact) -> Digest {
     }
 }
 
-/// Coarse snapshot key — `(platform, toolchain, pnpm-lock.yaml)` (§6 of the pnpm doc).
-/// The toolchain term is the canonical `/nix/store/...` identity for pnpm/node. **Node
-/// version is intentionally not a separate term**: with `--ignore-scripts` there is no
-/// install-time native compilation, so `node_modules` content does not depend on it.
-fn snapshot_key(
+/// The `pnpm-node-modules` state shard — `(toolchain, runtime, pnpm-lock.yaml,
+/// platform)` (§6 of the pnpm doc). The toolchain term is the canonical
+/// `/nix/store/...` identity for pnpm/node. **Node version is intentionally not a
+/// separate term**: with `--ignore-scripts` there is no install-time native
+/// compilation, so `node_modules` content does not depend on it.
+fn modules_state_shard(
     toolchain: &Toolchain,
     runtime: &Toolchain,
     lockfile: Digest,
     ctx: &RuleContext,
-) -> Digest {
-    let mut buf = Vec::new();
-    buf.extend_from_slice(toolchain.identity().as_bytes());
-    buf.push(0);
-    buf.extend_from_slice(runtime.identity().as_bytes());
-    buf.push(0);
-    buf.extend_from_slice(lockfile.as_bytes());
-    buf.push(0);
-    buf.extend_from_slice(ctx.config().platform().target_triple().as_bytes());
-    Digest::of(&buf)
+) -> Vec<String> {
+    vec![
+        toolchain.identity().to_owned(),
+        runtime.identity().to_owned(),
+        lockfile.to_hex(),
+        ctx.config().platform().target_triple().to_owned(),
+    ]
 }

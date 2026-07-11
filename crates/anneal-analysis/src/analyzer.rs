@@ -5,10 +5,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anneal_cas::Cas;
-use anneal_core::{Configuration, Label};
-use anneal_exec::Action;
+use anneal_core::{Configuration, ExecMode, Label};
+use anneal_exec::{Action, InputSource, LocalExecutor};
 use anneal_loader::TargetGraph;
-use anneal_rules::{ProviderSet, ResolvedDep, RuleContext, RuleRegistry, SourcePathRecorder};
+use anneal_rules::{
+    Artifact, ArtifactSource, ProviderSet, ResolvedDep, RuleContext, RuleRegistry,
+    SourcePathRecorder, StateRegistry,
+};
 
 use crate::error::AnalysisError;
 
@@ -16,10 +19,19 @@ use crate::error::AnalysisError;
 #[derive(Debug, Clone)]
 pub struct AnalyzedTarget {
     pub label: Label,
+    /// The configuration this target was analyzed under — its configured
+    /// identity. Differs across nodes when the focus cone colors the graph.
+    pub config: Configuration,
     /// Providers exposed to dependents.
     pub providers: ProviderSet,
     /// Actions contributed by this target (often empty for provider-only rules).
     pub actions: Vec<Action>,
+    /// The generated files this target's actions consume at tree-shaped paths —
+    /// **derived** from the action inputs flagged `mirror_to_tree`, each `path`
+    /// re-homed to a **workspace-relative** destination. This is the view `anneal
+    /// materialize` parks; it is not a rule-authored field but a projection of the
+    /// imports (a single source of truth — the action inputs).
+    pub routed_data: Vec<Artifact>,
 }
 
 /// The analyzed action graph: every reached target's result, plus a dependency
@@ -57,6 +69,13 @@ impl ActionGraph {
         self.targets.get(label).map(|t| &t.providers)
     }
 
+    /// The generated files a target's build routes into its package tree
+    /// (workspace-relative destinations) — the set `anneal materialize` parks
+    /// so native tools see what the sandbox sees.
+    pub fn routed_data(&self, label: &Label) -> Option<&[Artifact]> {
+        self.targets.get(label).map(|t| t.routed_data.as_slice())
+    }
+
     /// The targets in dependency order.
     pub fn order(&self) -> &[Label] {
         &self.order
@@ -70,6 +89,22 @@ pub struct Analyzer<'a> {
     config: &'a Configuration,
     workspace_root: &'a Path,
     cas: &'a Cas,
+    /// Cross-target persistent-state declarations for this run (idempotence +
+    /// mismatch checking; DESIGN.md §3.3).
+    states: StateRegistry,
+    /// Executor for analysis-time tool queries (DESIGN.md §3.6). Optional:
+    /// rules that never query analyze fine without one.
+    executor: Option<&'a LocalExecutor>,
+    /// The focus cone (DESIGN.md §4.2): labels colored `Incremental` — the
+    /// edited targets plus their transitive dependents. `None` means uniform
+    /// coloring (every node gets the base configuration unchanged); `Some`
+    /// means per-node coloring: cone members build Incremental, everything
+    /// else Hermetic. One configuration per node per invocation, always.
+    cone: Option<HashSet<Label>>,
+    /// Workspace-relative tree paths written by `anneal materialize`, excluded
+    /// from every rule's source discovery (they are parked copies of generated
+    /// outputs, not sources — see `RuleContext::with_materialized`).
+    materialized: BTreeSet<PathBuf>,
 }
 
 impl<'a> Analyzer<'a> {
@@ -86,7 +121,73 @@ impl<'a> Analyzer<'a> {
             config,
             workspace_root,
             cas,
+            states: StateRegistry::new(),
+            executor: None,
+            cone: None,
+            materialized: BTreeSet::new(),
         }
+    }
+
+    /// Exclude `anneal materialize`-written tree paths (workspace-relative,
+    /// from the materialize manifest) from source discovery. Without this, a
+    /// materialized copy would be recorded as a source and collide with the
+    /// producing action's declared output in `validate_generated_paths`.
+    pub fn with_materialized_paths(mut self, paths: BTreeSet<PathBuf>) -> Self {
+        self.materialized = paths;
+        self
+    }
+
+    /// Color the graph per node (DESIGN.md §4.2): labels in `cone` analyze
+    /// under `ExecMode::Incremental`, all others under `ExecMode::Hermetic`
+    /// (the base configuration's other axes are shared by every node). Without
+    /// this call, every node gets the base configuration unchanged — the
+    /// uniform coloring the `--exec-mode` flag forces.
+    pub fn with_incremental_cone(mut self, cone: HashSet<Label>) -> Self {
+        self.cone = Some(cone);
+        self
+    }
+
+    /// The configuration a node analyzes under.
+    fn node_config(&self, label: &Label) -> Configuration {
+        match &self.cone {
+            None => self.config.clone(),
+            Some(cone) => {
+                let mut axes = self.config.axes().clone();
+                axes.exec_mode = if cone.contains(label) {
+                    ExecMode::Incremental
+                } else {
+                    ExecMode::Hermetic
+                };
+                Configuration::new(self.config.platform().clone(), axes)
+            }
+        }
+    }
+
+    /// The §4.3 monotonicity assert, at edge-resolution time: no Hermetic node
+    /// may depend on an Incremental node. By construction of the cone (edited
+    /// targets plus transitive *dependents*) this cannot fire — which is
+    /// exactly why it is asserted rather than trusted: a future coloring-policy
+    /// tweak (or a pin flag that fails to take the monotone closure) would
+    /// otherwise silently poison the shared cache.
+    fn assert_monotone(&self, node: &Label, dep: &Label) -> Result<(), AnalysisError> {
+        let Some(cone) = &self.cone else {
+            return Ok(());
+        };
+        if !cone.contains(node) && cone.contains(dep) {
+            return Err(AnalysisError::ConeViolation {
+                hermetic: node.clone(),
+                incremental: dep.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Enable analysis-time tool queries by wiring the executor through to
+    /// rule contexts. Queries are sealed, network-denied, stdout-captured
+    /// actions — this is the §5.1 by-design breach of strict phasing.
+    pub fn with_executor(mut self, executor: &'a LocalExecutor) -> Self {
+        self.executor = Some(executor);
+        self
     }
 
     /// Analyze `root` and its transitive dependencies into an [`ActionGraph`].
@@ -129,6 +230,7 @@ impl<'a> Analyzer<'a> {
 
         // Analyze dependencies first so their providers are available.
         for dep in &decl.deps {
+            self.assert_monotone(label, dep)?;
             self.visit(dep, targets, order, in_progress, source_paths)?;
         }
 
@@ -155,15 +257,23 @@ impl<'a> Analyzer<'a> {
             decl.label.package(),
             Path::new("BUILD"),
         ));
-        let ctx = RuleContext::new_recording_sources(
+        let node_config = self.node_config(label);
+        let ctx = RuleContext::new(
             decl.label.clone(),
             &decl.attrs,
-            self.config,
+            &node_config,
             &package_dir,
             self.cas,
             &resolved_deps,
             source_paths,
+            rule.kind(),
+            &self.states,
+            &self.materialized,
         );
+        let ctx = match self.executor {
+            Some(executor) => ctx.with_executor(executor),
+            None => ctx,
+        };
         let analysis = rule.analyze(&ctx).map_err(|error| AnalysisError::Rule {
             label: label.clone(),
             error,
@@ -171,12 +281,43 @@ impl<'a> Analyzer<'a> {
 
         in_progress.remove(label);
         order.push(label.clone());
+        // Derive the routed-data view (what `anneal materialize` mirrors) from this
+        // target's own actions: every input flagged `mirror_to_tree` is a generated
+        // file the inner tool reads at a tree path. Re-home each to its
+        // workspace-relative destination — composing the action's working directory,
+        // not just the package (the package alone was a latent bug for any future
+        // non-"." working dir) — and dedup, since the same routed file is attached to
+        // several compiling actions (cargo's build/compile/doc/integration) yet should
+        // appear once. No rule-authored list: the inputs are the single source of truth.
+        let mut routed_data: Vec<Artifact> = Vec::new();
+        for action in &analysis.actions {
+            for input in action.inputs().values() {
+                if !input.mirror_to_tree {
+                    continue;
+                }
+                let artifact = Artifact {
+                    path: action_workspace_path(&decl.label, action, &input.path),
+                    source: match &input.source {
+                        InputSource::Blob(digest) => ArtifactSource::Source(*digest),
+                        InputSource::Output { action, name } => ArtifactSource::Output {
+                            action: action.clone(),
+                            name: name.clone(),
+                        },
+                    },
+                };
+                if !routed_data.contains(&artifact) {
+                    routed_data.push(artifact);
+                }
+            }
+        }
         targets.insert(
             label.clone(),
             AnalyzedTarget {
                 label: label.clone(),
+                config: node_config,
                 providers: analysis.providers,
                 actions: analysis.actions,
+                routed_data,
             },
         );
         Ok(())

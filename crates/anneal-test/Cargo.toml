@@ -6,3 +6,6 @@ description = "Structured test results (§19.2) and translation from test-framew
 
 [dependencies]
 anneal-core = { path = "../anneal-core" }
+
+[lints]
+workspace = true

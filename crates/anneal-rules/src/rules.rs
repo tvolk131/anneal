@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 use anneal_exec::Action;
 
 use crate::context::RuleContext;
-use crate::providers::{Artifact, ArtifactSource, FileSet, ProviderSet};
+use crate::providers::{route_data_inputs, Artifact, ArtifactSource, FileSet, ProviderSet};
 use crate::rule::{Analysis, Rule, RuleError};
 use crate::schema::{AttrSchema, AttrType};
-use crate::toolchain::{nix_base_runtime, toolchain_path_env};
+use crate::toolchain::nix_base_runtime;
 
 const FILEGROUP_SCHEMA: &[AttrSchema] = &[AttrSchema::required("srcs", AttrType::StringList)];
 const ALIAS_SCHEMA: &[AttrSchema] = &[AttrSchema::required("actual", AttrType::Label)];
@@ -65,6 +65,10 @@ impl Rule for Alias {
         let dep = ctx.deps().first().ok_or_else(|| {
             RuleError::Message("alias requires its `actual` target to be resolved".to_owned())
         })?;
+        // Providers forward to dependents; routing does not. routed-data lives on a
+        // target's own action inputs, and an alias emits none — so it structurally
+        // routes nothing (no actions ⇒ no mirror_to_tree inputs ⇒ empty derived view),
+        // exactly the intended cross-package behavior, now without a special case.
         Ok(Analysis {
             actions: Vec::new(),
             providers: dep.providers.clone(),
@@ -101,7 +105,8 @@ impl Rule for GenRule {
         // Inputs = direct source files + every file provided by `deps` targets. A
         // dependency artifact may be a resolved source (`filegroup`) or another
         // action's produced output (`genrule`); either flows straight through as the
-        // matching input source.
+        // matching input source. The dep-provided set is also this target's routed
+        // data: generated files staged at tree paths the command reads.
         let mut inputs: Vec<Artifact> = Vec::new();
         for src in direct_srcs {
             inputs.push(ctx.source_artifact(Path::new(src))?);
@@ -123,30 +128,17 @@ impl Rule for GenRule {
             .replace("$(OUTS)", &outs.join(" "));
 
         let runtime = nix_base_runtime()?;
-        let path_env = toolchain_path_env(&[&runtime]);
 
         // The action's name doubles as its graph id; outputs are referenced as
         // `(action_id, output_name)` by any consumer.
         let action_id = format!("genrule {}", ctx.label());
         let command = vec!["sh".to_owned(), "-c".to_owned(), expanded];
-        let mut builder = Action::builder(action_id.clone(), command)
-            .toolchain(runtime)
-            .env("PATH", path_env);
-        for artifact in &inputs {
-            let name = artifact.path.to_string_lossy().into_owned();
-            match &artifact.source {
-                ArtifactSource::Source(digest) => {
-                    builder = builder.input(name, artifact.path.clone(), *digest);
-                }
-                ArtifactSource::Output {
-                    action: producer,
-                    name: output,
-                } => {
-                    builder =
-                        builder.input_from_output(name, artifact.path.clone(), producer, output);
-                }
-            }
-        }
+        // PATH composes from the runtime toolchain's bin dirs at build (see ActionBuilder).
+        let mut builder = Action::builder(action_id.clone(), command).toolchain(runtime);
+        // Direct srcs flow in as plain source inputs; dep-provided generated files are this
+        // target's routed data (genrule's only Output inputs are dep-provided). Both via the
+        // shared routed-data dispatch.
+        builder = route_data_inputs(builder, &inputs);
         for out in outs {
             builder = builder.output(out.clone(), PathBuf::from(out));
         }

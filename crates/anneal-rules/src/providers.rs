@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 
 use anneal_core::Digest;
+use anneal_exec::{ActionBuilder, InputSource};
 
 /// Where an artifact's content comes from — mirroring [`anneal_exec::InputSource`],
 /// so a provider can carry both resolved sources and not-yet-produced outputs.
@@ -20,6 +21,22 @@ pub enum ArtifactSource {
     /// (its [`anneal_exec::Action::name`]) and output name. Resolved to content at
     /// execution time.
     Output { action: String, name: String },
+}
+
+impl ArtifactSource {
+    /// Lower this provider-level source to the action-level [`InputSource`] an
+    /// [`ActionBuilder`] consumes. A blanket `From` can't live in either crate (orphan
+    /// rule: in `anneal-rules` neither `From` nor `InputSource` is local; `anneal-exec`
+    /// can't see `ArtifactSource`), so it's an inherent method here, where the type is local.
+    pub(crate) fn to_input_source(&self) -> InputSource {
+        match self {
+            ArtifactSource::Source(digest) => InputSource::Blob(*digest),
+            ArtifactSource::Output { action, name } => InputSource::Output {
+                action: action.clone(),
+                name: name.clone(),
+            },
+        }
+    }
 }
 
 /// A file exposed by a target, with a logical (relative) path.
@@ -40,4 +57,36 @@ pub struct FileSet {
 pub struct ProviderSet {
     /// The files this target makes available (e.g. a `filegroup`'s sources).
     pub files: Option<FileSet>,
+}
+
+/// Wire a routed, dev-tree-visible **data** collection in as action inputs — the one
+/// dispatch shared by every rule that consumes generated data (`genrule`,
+/// `cargo_workspace`'s `data`, `pnpm_workspace`'s routed edges). Source members are plain
+/// inputs (`materialize` skips them — they already live in the tree); produced members are
+/// `mirror_to_tree`-routed, so the analyzer's derived view (and `anneal materialize`) parks
+/// them for native tools. Each artifact's `path` is both its input name and its tree-relative
+/// destination.
+///
+/// This is *only* for routed-data collections. It is deliberately **not** the path for
+/// Source-only collections (`with_sources`) or for produced edges that must stay out of the
+/// dev tree (`cargo_workspace`'s fetched `.crate` blobs via `with_crates`, the test-bin
+/// compile→run handoff) — those call [`ActionBuilder::input`] / [`ActionBuilder::input_from_output`]
+/// directly. Centralizing the dispatch here keeps the "produced ⇒ routed" rule a single source
+/// of truth, so a new rule can't silently wire a generated input as non-routed and break
+/// `materialize`.
+pub(crate) fn route_data_inputs(
+    mut builder: ActionBuilder,
+    artifacts: &[Artifact],
+) -> ActionBuilder {
+    for artifact in artifacts {
+        let name = artifact.path.to_string_lossy().into_owned();
+        // Declare the *role* ("this is data"); `data_input` derives `mirror_to_tree` from
+        // the source kind — a produced output is mirrored, a source blob is not.
+        builder = builder.data_input(
+            name,
+            artifact.path.clone(),
+            artifact.source.to_input_source(),
+        );
+    }
+    builder
 }

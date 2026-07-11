@@ -29,8 +29,26 @@
 mod action;
 mod cache;
 mod executor;
+/// Native fixed-output downloads (§FOD): the executor fetches pinned blobs
+/// in-process (rustls + embedded Mozilla roots) — no curl, no sandbox, no
+/// host trust configuration. See the module docs for the trust argument.
+mod fetch;
+/// Materializing routed files into the working tree (`anneal materialize`):
+/// the manifest-tracked bridge from CAS outputs to what native tools (cargo
+/// run, rust-analyzer) can see. Not part of the [`Executor`] deep module — a
+/// user-facing surface of its own, so it stays a public module rather than
+/// flat re-exports. (Distinct from the private `materializer`, which stages
+/// action *inputs* into sandboxes.)
+pub mod materialize;
 mod materializer;
+/// Tool queries (DESIGN.md §3.6, spiked): sealed, network-denied, stdout-captured
+/// actions whose output feeds analysis. See the module docs for the sandbox-root
+/// stability contract.
+mod query;
 mod sandbox;
+/// Trust plumbing (DESIGN.md §2.4, §2.8): enforcement grades, computed cache
+/// tiers, and cache-entry provenance.
+mod trust;
 mod verify;
 /// The warm-sandbox sync engine (docs/sandboxing.md §5), wired into the executor's
 /// snapshot-owner path via `LocalExecutor::warm_reuse`.
@@ -41,10 +59,13 @@ pub use action::{
 };
 pub use cache::action_digest;
 pub use executor::{ActionResult, ExecError, Executor, LocalExecutor, PhaseTimings, SandboxError};
+pub use fetch::FetchError;
+pub use query::{QueryBuilder, QueryResult, QuerySpec};
+pub use trust::{compute_tier, CacheTier, EnforcementGrade, Provenance};
 pub use verify::{
     prime_snapshot, verify_correctness_neutral, verify_warm_neutral, NeutralityReport,
 };
 
 /// Participates in every cache key (§8.1). Bump when sandbox semantics change so that
 /// a sandbox behavior change invalidates previously-cached results.
-pub(crate) const SANDBOX_VERSION: &str = "anneal-sandbox-6";
+pub(crate) const SANDBOX_VERSION: &str = "anneal-sandbox-7";

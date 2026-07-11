@@ -39,23 +39,44 @@
 //!   thousands of individual vendored files — so a committed `vendor/` isn't required and
 //!   the per-build input-handling cost is O(workspace sources), not O(vendored files).
 //!
-//! Deferred: `RUSTFLAGS`/sanitizer/coverage axes (§13.6), binary/bin-unit test targets,
-//! integration multi-binary split, separately-addressable test targets; in fetch mode,
+//! # Native libraries (`native_libs`)
+//!
+//! A workspace that links a prebuilt native library (`libpq`, `openssl`, `zlib`, …
+//! via a `-sys` crate) names it in `native_libs`, by toolchain-manifest key. Each
+//! resolves to a native-lib toolchain whose closure mounts read-only and whose env
+//! (`PKG_CONFIG_PATH`, …) + `pkg-config` bin dir join the compiling actions, so the
+//! `-sys` build script discovers it; its roots also mount on the test-run action
+//! (dynamic libs are needed at runtime). The library is declared, not inferred — no
+//! auto-mapping of `-sys` crates to nixpkgs attrs (§Q3). Bundled-C crates (`ring`)
+//! need none of this; they compile their own C with the toolchain.
+//!
+//! The `lto`/`debug_info`/`sanitizer`/`coverage` axes map into `RUSTFLAGS` via
+//! [`CargoWorkspace::axis_flags`] (§13.6); `opt_level` rides the Cargo profile.
+//!
+//! Deferred: binary/bin-unit test targets, integration multi-binary split,
+//! separately-addressable test targets; `opt_level` as a typed map entry rather than the
+//! explicit `extra_consumed` (a `FlagSink::CliArg` for `--release`); in fetch mode,
 //! git/`path`-registry deps and non-crates.io registries (vendor those), and a generated
 //! lockfile (needs the staged-graph pass).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use anneal_core::{AxisValues, Coverage, DebugInfo, Digest, Lto, OptLevel, Sanitizer, ALL_AXES};
+use anneal_core::{
+    Axis, Coverage, DebugInfo, Digest, ExecMode, Lto, OptLevel, Sanitizer, ALL_AXES,
+};
 use anneal_exec::{Action, ActionBuilder, Toolchain};
 
+use crate::axis::{configure_axis_action, AxisFlagMap, FlagSink};
 use crate::context::RuleContext;
 use crate::diagnostics;
-use crate::providers::{Artifact, ArtifactSource, ProviderSet};
+use crate::providers::{route_data_inputs, Artifact, ArtifactSource, ProviderSet};
 use crate::rule::{Analysis, Rule, RuleError};
 use crate::schema::{AttrSchema, AttrType};
-use crate::toolchain::{nix_base_runtime, nix_store_toolchain, toolchain_path_env};
+use crate::state::{Attestation, Concurrency, PersistentStateDecl, StateActionExt, StateKind};
+use crate::toolchain::{
+    nix_base_runtime, nix_lib_toolchain, nix_store_toolchain, nix_toolchain_env,
+};
 
 /// Directories never treated as build inputs.
 const IGNORED_DIRS: &[&str] = &["target", ".git", ".anneal"];
@@ -74,7 +95,19 @@ const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-
 /// …; §14.1, §14.6). This is the inner-tool-only case: Cargo/rustc read the content at
 /// execution; Anneal never introspects it at analysis. (A generated `Cargo.toml`, which
 /// the rule *would* parse at analysis, is the §14.6 staged-pass case, not an edge.)
-const SCHEMA: &[AttrSchema] = &[AttrSchema::optional("data", AttrType::LabelList)];
+/// `native_libs` names extra Nix-provided native libraries this workspace links —
+/// `libpq`, `openssl`, `zlib`, … — by their **toolchain-manifest key** (declared in
+/// the consuming flake, e.g. via `mkNativeLibToolchain`), *not* a label. Each
+/// contributes read-only roots (the library's closure, mounted into the build) and
+/// env (PATH / `PKG_CONFIG_PATH` / link flags) to the compiling actions, so a `-sys`
+/// crate's build script finds the library. An unknown name is an analysis error; an
+/// env-var collision across two libraries is a hard error (compose them into one
+/// toolchain in the flake). This is the declared-not-inferred path (no auto-mapping
+/// of `-sys` crates to nixpkgs attrs).
+const SCHEMA: &[AttrSchema] = &[
+    AttrSchema::optional("data", AttrType::LabelList),
+    AttrSchema::optional("native_libs", AttrType::StringList),
+];
 
 pub struct CargoWorkspace;
 
@@ -85,6 +118,41 @@ impl Rule for CargoWorkspace {
 
     fn schema(&self) -> &'static [AttrSchema] {
         SCHEMA
+    }
+
+    /// cargo maps four axes into `RUSTFLAGS` (§13.6). The framework derives `consumed_axes`
+    /// from this map (∪ the explicit non-flag `OptLevel` at each call site) and renders the
+    /// flags per node — replacing the hand-written `rustflags_for` + `ALL_AXES`-consumed
+    /// pair, and dropping `exec_mode` (correctness-neutral; it gates a state grant, not a
+    /// flag) from the output key. Each renderer takes only its own axis's value, so it
+    /// cannot read another field — the consumed set and the real flag dependencies are
+    /// guaranteed equal. The match arms are the rustc spellings (the rule's knowledge).
+    fn axis_flags(&self) -> AxisFlagMap {
+        AxisFlagMap::empty()
+            .lto(FlagSink::EnvVar("RUSTFLAGS"), |lto| match lto {
+                Lto::Off => None,
+                Lto::Thin => Some("-Clto=thin".to_owned()),
+                Lto::Full => Some("-Clto=fat".to_owned()),
+            })
+            .debug_info(
+                FlagSink::EnvVar("RUSTFLAGS"),
+                |debug_info| match debug_info {
+                    DebugInfo::Full => None,
+                    DebugInfo::LineTablesOnly => Some("-Cdebuginfo=1".to_owned()),
+                    DebugInfo::None => Some("-Cdebuginfo=0".to_owned()),
+                },
+            )
+            .sanitizer(FlagSink::EnvVar("RUSTFLAGS"), |sanitizer| match sanitizer {
+                Sanitizer::None => None,
+                Sanitizer::Address => Some("-Zsanitizer=address".to_owned()),
+                Sanitizer::Thread => Some("-Zsanitizer=thread".to_owned()),
+                Sanitizer::Memory => Some("-Zsanitizer=memory".to_owned()),
+                Sanitizer::Undefined => Some("-Zsanitizer=undefined".to_owned()),
+            })
+            .coverage(FlagSink::EnvVar("RUSTFLAGS"), |coverage| match coverage {
+                Coverage::On => Some("-Cinstrument-coverage".to_owned()),
+                Coverage::Off => None,
+            })
     }
 
     fn analyze(&self, ctx: &RuleContext) -> Result<Analysis, RuleError> {
@@ -121,21 +189,78 @@ impl Rule for CargoWorkspace {
         };
         let release_flag = if release { " --release" } else { "" };
 
-        let path_env = diagnostics::time("cargo_workspace.path_env", || {
-            toolchain_path_env(&[&toolchain, &runtime])
-        });
+        // Workspace `native_libs`: extra Nix-provided native libraries this
+        // workspace links (libpq, openssl, …), each named by manifest toolchain
+        // key. Resolved to toolchains whose roots mount into the build and whose
+        // env joins the compiling actions; their bin dirs (e.g. `pkg-config`)
+        // also join PATH. Unknown name → analysis error.
+        let native_lib_names = ctx.attrs().string_list_opt("native_libs")?;
+        let native_libs: Vec<Toolchain> = native_lib_names
+            .iter()
+            .map(|name| nix_lib_toolchain(name))
+            .collect::<Result<_, _>>()?;
 
-        // cargo_workspace interprets all five axes (§13.6), so it consumes all five —
-        // each enters the cache key, and the snapshot key, at its current value.
-        let rustflags = rustflags_for(ctx.config().axes());
-        let consumed = ALL_AXES.to_vec();
+        // Compiling/linking env: the rust toolchain's declared env (`DEVELOPER_DIR`
+        // on macOS, so `xcrun`/rustc/cc find the pinned SDK in the scrubbed sandbox)
+        // merged with each native lib's env. A key set to *different* values by two
+        // toolchains is a hard error (compose them into one toolchain in the flake)
+        // so a path-like var like `NIX_LDFLAGS`/`PKG_CONFIG_PATH` is never silently
+        // half-dropped. Applied only to these cargo actions, never the canonical
+        // sandbox env, so other rules are unaffected.
+        let mut env = nix_toolchain_env("rust")?;
+        for name in native_lib_names {
+            merge_toolchain_env(&mut env, nix_toolchain_env(name)?, name)?;
+        }
+
+        // Axis→flag mapping (§13.6): the framework renders RUSTFLAGS from this map and
+        // derives each compiling action's consumed_axes from it (∪ OptLevel — a non-flag
+        // axis that still changes the binary, see `configure_axis_action` calls below).
+        // exec_mode is deliberately absent: it gates a state grant, not a flag, and is
+        // correctness-neutral, so it must not enter the output cache key.
+        let axis_map = self.axis_flags();
+
+        // The shared environment every compiling/linking cargo action runs with.
+        // Built once; only the action name and command vary per action.
+        let setup = CargoActionEnv {
+            toolchain: &toolchain,
+            runtime: &runtime,
+            native_libs: &native_libs,
+            env: &env,
+        };
 
         let crates =
             diagnostics::time("cargo_workspace.workspace_crates", || workspace_crates(ctx))?;
-        let snapshot_key = diagnostics::time("cargo_workspace.snapshot_key", || {
-            snapshot_key(&toolchain, &runtime, &sources, ctx)
-        });
-        let snapshot_paths = vec![PathBuf::from("target")];
+        // The typed form of the old coarse snapshot key (DESIGN.md §2.1 /
+        // Appendix A ruling 4): `target/` is **interleaved** state — mutated by
+        // the very actions that read it — so declaring it carries the
+        // attestation, and the epoch folds into the state key so a discovered
+        // cargo-soundness bug revokes every warm tree derived under it.
+        // Declared only under `ExecMode::Incremental` (§4.4): the Hermetic arm
+        // of this rule emits the same actions with no state grant — cold,
+        // deterministic, promotable under full enforcement. That asymmetry is
+        // the §2.4 dev-loop/shared-cache reconciliation, per-rule-interpreted.
+        let incremental = ctx.config().axes().exec_mode == ExecMode::Incremental;
+        let target_state = if !incremental {
+            None
+        } else {
+            Some(ctx.declare_state(PersistentStateDecl {
+                namespace: "cargo-target",
+                shard: diagnostics::time("cargo_workspace.state_shard", || {
+                    target_state_shard(&toolchain, &runtime, &native_libs, &sources, ctx)
+                }),
+                kind: StateKind::Interleaved {
+                    concurrency: Concurrency::Exclusive,
+                    attestation: Attestation {
+                        epoch: 1,
+                        rationale: "cargo fingerprint reuse is sound under --locked, a \
+                                pinned toolchain, CARGO_INCREMENTAL=0, and warm-reuse \
+                                content sync; epoch bumped on cargo soundness-class \
+                                advisories (cf. the 1.52.0 incremental emergency)",
+                    },
+                },
+                paths: vec![PathBuf::from("target")],
+            })?)
+        };
         let label = ctx.label().clone();
 
         // Inputs from `data` deps (§14.6, inner-tool-only): every file a dependency
@@ -159,7 +284,7 @@ impl Rule for CargoWorkspace {
             || -> Result<(), RuleError> {
                 if let Some(deps) = &fetch_deps {
                     for dep in deps {
-                        actions.push(fetch_action(dep, &runtime)?);
+                        actions.push(fetch_action(dep)?);
                     }
                 }
                 Ok(())
@@ -175,15 +300,12 @@ impl Rule for CargoWorkspace {
                     cargo_args("build", None, None, release_flag),
                 );
                 let mut build = with_crates(
-                    with_data(
+                    route_data_inputs(
                         with_sources(
                             cargo_builder(
                                 format!("cargo_workspace build {label}"),
                                 build_cmd,
-                                &path_env,
-                                &rustflags,
-                                &toolchain,
-                                &runtime,
+                                &setup,
                             ),
                             &sources,
                         ),
@@ -197,9 +319,8 @@ impl Rule for CargoWorkspace {
                     build = build.output(out.to_string_lossy().into_owned(), out);
                 }
                 actions.push(
-                    build
-                        .configured(ctx.config().clone(), consumed.clone())
-                        .snapshot_private(snapshot_key, snapshot_paths.clone())
+                    configure_axis_action(build, ctx.config(), &axis_map, &[Axis::OptLevel])
+                        .mutate_state_opt(target_state.as_ref())?
                         .try_build()?,
                 );
                 Ok(())
@@ -220,7 +341,7 @@ impl Rule for CargoWorkspace {
                         let test_bin_path =
                             PathBuf::from(format!("target/anneal-tests/{}/test-bin", c.name));
                         let compile = with_crates(
-                            with_data(
+                            route_data_inputs(
                                 with_sources(
                                     cargo_builder(
                                         compile_id.clone(),
@@ -232,10 +353,7 @@ impl Rule for CargoWorkspace {
                                                 &test_bin_path,
                                             ),
                                         ),
-                                        &path_env,
-                                        &rustflags,
-                                        &toolchain,
-                                        &runtime,
+                                        &setup,
                                     ),
                                     &sources,
                                 ),
@@ -243,9 +361,14 @@ impl Rule for CargoWorkspace {
                             ),
                             crate_deps,
                         )
-                        .output("test-bin", test_bin_path)
-                        .configured(ctx.config().clone(), consumed.clone())
-                        .snapshot_private(snapshot_key, snapshot_paths.clone());
+                        .output("test-bin", test_bin_path);
+                        let compile = configure_axis_action(
+                            compile,
+                            ctx.config(),
+                            &axis_map,
+                            &[Axis::OptLevel],
+                        )
+                        .mutate_state_opt(target_state.as_ref())?;
                         actions.push(compile.try_build()?);
 
                         // run depends on the compiled binary (an action-graph edge); its cache
@@ -265,21 +388,29 @@ impl Rule for CargoWorkspace {
                             results_path.display(),
                             results_path.display()
                         );
-                        let run = Action::builder(
+                        let mut run = Action::builder(
                             run_id,
                             vec!["sh".to_owned(), "-c".to_owned(), run_script],
                         )
-                        .input_from_output("test-bin", "test-bin", compile_id, "test-bin")
+                        .dependency_input("test-bin", "test-bin", compile_id, "test-bin")
                         .output("results.txt", results_path)
+                        // PATH composes from these toolchains' bin dirs at build (+ the
+                        // native-lib bin dirs added just below) — see ActionBuilder.
                         .toolchain(toolchain.clone())
-                        .toolchain(runtime.clone())
-                        .env("PATH", &path_env)
-                        .configured(ctx.config().clone(), Vec::new());
+                        .toolchain(runtime.clone());
+                        // Native-lib roots mount into the run too: a dynamically-linked
+                        // test binary needs its libraries present at *runtime* (its
+                        // RUNPATH points at the mounted store paths). Env is not needed
+                        // here — the run compiles nothing.
+                        for lib in &native_libs {
+                            run = run.toolchain(lib.clone());
+                        }
+                        let run = run.configured(ctx.config().clone(), Vec::new());
                         actions.push(run.try_build()?);
 
                         // doc: single action (no reusable binary, §12.3).
                         let doc = with_crates(
-                            with_data(
+                            route_data_inputs(
                                 with_sources(
                                     cargo_builder(
                                         format!("cargo_workspace test {label} {} doc", c.name),
@@ -292,26 +423,24 @@ impl Rule for CargoWorkspace {
                                                 release_flag,
                                             ),
                                         ),
-                                        &path_env,
-                                        &rustflags,
-                                        &toolchain,
-                                        &runtime,
+                                        &setup,
                                     ),
                                     &sources,
                                 ),
                                 &data,
                             ),
                             crate_deps,
-                        )
-                        .configured(ctx.config().clone(), consumed.clone())
-                        .snapshot_private(snapshot_key, snapshot_paths.clone());
+                        );
+                        let doc =
+                            configure_axis_action(doc, ctx.config(), &axis_map, &[Axis::OptLevel])
+                                .mutate_state_opt(target_state.as_ref())?;
                         actions.push(doc.try_build()?);
                     }
 
                     if c.has_tests {
                         // integration: single action for now (multi-binary split deferred).
                         let integ = with_crates(
-                            with_data(
+                            route_data_inputs(
                                 with_sources(
                                     cargo_builder(
                                         format!(
@@ -327,19 +456,21 @@ impl Rule for CargoWorkspace {
                                                 release_flag,
                                             ),
                                         ),
-                                        &path_env,
-                                        &rustflags,
-                                        &toolchain,
-                                        &runtime,
+                                        &setup,
                                     ),
                                     &sources,
                                 ),
                                 &data,
                             ),
                             crate_deps,
+                        );
+                        let integ = configure_axis_action(
+                            integ,
+                            ctx.config(),
+                            &axis_map,
+                            &[Axis::OptLevel],
                         )
-                        .configured(ctx.config().clone(), consumed.clone())
-                        .snapshot_private(snapshot_key, snapshot_paths.clone());
+                        .mutate_state_opt(target_state.as_ref())?;
                         actions.push(integ.try_build()?);
                     }
                 }
@@ -347,6 +478,8 @@ impl Rule for CargoWorkspace {
             },
         )?;
 
+        // The routed-data view (what `materialize` parks) is derived by the analyzer from
+        // the `data` inputs `route_data_inputs` flagged `mirror_to_tree`; no separate field.
         Ok(Analysis {
             actions,
             providers: ProviderSet::default(),
@@ -386,64 +519,72 @@ impl CrateInfo {
     }
 }
 
-/// Build a base `cargo` action builder with the shared environment (toolchain on
-/// PATH, deterministic settings, and the axis-derived `RUSTFLAGS`). `command` is the
-/// full argv.
-fn cargo_builder(
-    name: String,
-    command: Vec<String>,
-    path_env: &str,
-    rustflags: &str,
-    toolchain: &Toolchain,
-    runtime: &Toolchain,
-) -> ActionBuilder {
+/// The shared environment every `cargo` compiling/linking action runs with:
+/// the toolchains whose roots mount into the build (rust + posix runtime + any
+/// workspace `native_libs`) — their bin dirs compose into PATH at build — and their merged
+/// env. The axis-derived `RUSTFLAGS` is *not* here; `configure_axis_action` adds it per
+/// action. Built once per analysis; only the action name and command vary across the
+/// build/compile/doc/integration actions.
+struct CargoActionEnv<'a> {
+    toolchain: &'a Toolchain,
+    runtime: &'a Toolchain,
+    native_libs: &'a [Toolchain],
+    env: &'a BTreeMap<String, String>,
+}
+
+/// Build a base `cargo` action builder with the shared [`CargoActionEnv`]: every
+/// toolchain attached (roots mounted), the merged env applied, and the axis-derived
+/// `RUSTFLAGS`. `command` is the full argv.
+fn cargo_builder(name: String, command: Vec<String>, setup: &CargoActionEnv) -> ActionBuilder {
     let mut builder = Action::builder(name, command)
-        .toolchain(toolchain.clone())
-        .toolchain(runtime.clone())
-        .env("PATH", path_env)
+        .toolchain(setup.toolchain.clone())
+        .toolchain(setup.runtime.clone());
+    // Native-lib toolchains: their closures mount read-only so the linker/build
+    // scripts find the libraries (their env joined `setup.env` already).
+    for lib in setup.native_libs {
+        builder = builder.toolchain(lib.clone());
+    }
+    // PATH composes from the attached toolchains' bin dirs at build (see ActionBuilder).
+    builder = builder
         .env("CARGO_TERM_COLOR", "never")
         .env("CARGO_INCREMENTAL", "0");
-    // Only set RUSTFLAGS when an axis actually changes a flag, so a default-config
-    // build is byte-for-byte what plain `cargo` produces.
-    if !rustflags.is_empty() {
-        builder = builder.env("RUSTFLAGS", rustflags);
+    // The merged toolchain env (DEVELOPER_DIR on macOS, native-lib PATH/pkg-config/
+    // link flags). Each value is a store path, so it enters the action cache key.
+    for (key, value) in setup.env {
+        builder = builder.env(key, value);
     }
+    // RUSTFLAGS is NOT set here — `configure_axis_action` renders it from the axis map at
+    // each call site (and only when an axis actually changes a flag, so a default-config
+    // build is byte-for-byte what plain `cargo` produces).
     builder
 }
 
-/// Translate the `lto`, `debug_info`, `sanitizer`, and `coverage` axes into a
-/// `RUSTFLAGS` string (§13.6). `opt_level` is handled separately as the Cargo
-/// profile. Each axis emits a flag only for non-default values, so the default
-/// configuration yields an empty string (no override of the profile's own choices).
-///
-/// `sanitizer` maps to `-Z sanitizer=…`, which requires a nightly toolchain; on
-/// stable a sanitized build will fail at compile time. The mapping is still applied
-/// so the configuration is honest and enters the cache key.
-fn rustflags_for(axes: &AxisValues) -> String {
-    let mut flags: Vec<String> = Vec::new();
-
-    match axes.lto {
-        Lto::Off => {}
-        Lto::Thin => flags.push("-Clto=thin".to_owned()),
-        Lto::Full => flags.push("-Clto=fat".to_owned()),
+/// Merge `additions` into `base`, erroring on a true conflict (same key set to a
+/// *different* value); same key + same value is idempotent. This layers a native
+/// lib's env onto the rust toolchain's. Path-like vars (`NIX_LDFLAGS`,
+/// `PKG_CONFIG_PATH`) that two libraries both set must be composed into a single
+/// toolchain in the flake — silently half-dropping one would be a subtle build
+/// breakage, so it fails loudly instead.
+fn merge_toolchain_env(
+    base: &mut BTreeMap<String, String>,
+    additions: BTreeMap<String, String>,
+    source: &str,
+) -> Result<(), RuleError> {
+    for (key, value) in additions {
+        match base.get(&key) {
+            Some(existing) if *existing != value => {
+                return Err(RuleError::Message(format!(
+                    "cargo_workspace native_libs env conflict on {key:?}: {source:?} sets it to \
+                     {value:?} but another toolchain set {existing:?}; compose these libraries \
+                     into a single toolchain in your flake so their values merge correctly"
+                )));
+            }
+            _ => {
+                base.insert(key, value);
+            }
+        }
     }
-    match axes.debug_info {
-        DebugInfo::Full => {} // profile default
-        DebugInfo::LineTablesOnly => flags.push("-Cdebuginfo=1".to_owned()),
-        DebugInfo::None => flags.push("-Cdebuginfo=0".to_owned()),
-    }
-    match axes.sanitizer {
-        Sanitizer::None => {}
-        Sanitizer::Address => flags.push("-Zsanitizer=address".to_owned()),
-        Sanitizer::Thread => flags.push("-Zsanitizer=thread".to_owned()),
-        Sanitizer::Memory => flags.push("-Zsanitizer=memory".to_owned()),
-        Sanitizer::Undefined => flags.push("-Zsanitizer=undefined".to_owned()),
-    }
-    if axes.coverage == Coverage::On {
-        flags.push("-Cinstrument-coverage".to_owned());
-    }
-
-    flags.join(" ")
+    Ok(())
 }
 
 /// Add every source file as a content-addressed input.
@@ -451,28 +592,7 @@ fn with_sources(mut builder: ActionBuilder, sources: &[Artifact]) -> ActionBuild
     for artifact in sources {
         if let ArtifactSource::Source(digest) = &artifact.source {
             let name = artifact.path.to_string_lossy().into_owned();
-            builder = builder.input(name, artifact.path.clone(), *digest);
-        }
-    }
-    builder
-}
-
-/// Add `data` dependency artifacts as inputs, materialized at their declared paths in
-/// the build tree. A resolved source flows in as a blob; a produced output flows in as
-/// an action-graph edge resolved at execution.
-fn with_data(mut builder: ActionBuilder, data: &[Artifact]) -> ActionBuilder {
-    for artifact in data {
-        let name = artifact.path.to_string_lossy().into_owned();
-        match &artifact.source {
-            ArtifactSource::Source(digest) => {
-                builder = builder.input(name, artifact.path.clone(), *digest);
-            }
-            ArtifactSource::Output {
-                action,
-                name: output,
-            } => {
-                builder = builder.input_from_output(name, artifact.path.clone(), action, output);
-            }
+            builder = builder.source_input(name, artifact.path.clone(), *digest);
         }
     }
     builder
@@ -608,11 +728,14 @@ fn fetch_plan(ctx: &RuleContext) -> Result<Option<Vec<LockDep>>, RuleError> {
     Ok((!deps.is_empty()).then_some(deps))
 }
 
-/// A fixed-output fetch (§FOD) for one crate: download its `.crate` from static.crates.io
-/// into the single declared output `crate`, pinned to the lockfile checksum. Cached by
-/// output (a present blob skips the download), verified against the pin (a mismatch fails
-/// closed). The graph-unique name lets the compiling actions reference it.
-fn fetch_action(dep: &LockDep, runtime: &Toolchain) -> Result<Action, RuleError> {
+/// A fixed-output fetch (§FOD) for one crate, performed **natively by the
+/// executor** (in-process rustls with embedded Mozilla roots — no curl, no
+/// sandbox, no toolchain, no host trust configuration): download its `.crate`
+/// from static.crates.io into the single declared output `crate`, pinned to
+/// the lockfile checksum. Cached by output (a present blob skips the
+/// download), verified against the pin (a mismatch fails closed). The
+/// graph-unique name lets the compiling actions reference it.
+fn fetch_action(dep: &LockDep) -> Result<Action, RuleError> {
     let expected = Digest::from_hex(&dep.checksum).map_err(|e| {
         RuleError::Message(format!(
             "{} {}: invalid checksum hex in Cargo.lock: {e}",
@@ -622,20 +745,13 @@ fn fetch_action(dep: &LockDep, runtime: &Toolchain) -> Result<Action, RuleError>
     let base = dep.base();
     let url = format!("https://static.crates.io/crates/{}/{base}.crate", dep.name);
     let output_path = PathBuf::from(format!(".anneal/fetch/{base}.crate"));
-    let script = format!(
-        "curl -sSL --fail --retry 3 -o {} '{url}'",
-        output_path.display()
-    );
-    let path_env = toolchain_path_env(&[runtime]);
     Ok(Action::builder(
         format!("cargo_workspace fetch {base}"),
-        vec!["sh".to_owned(), "-c".to_owned(), script],
+        Vec::<String>::new(),
     )
-    .toolchain(runtime.clone())
-    .env("PATH", path_env)
     .output("crate", output_path)
     .platform_independent()
-    .fixed_output(expected)
+    .fetch(url, expected)
     .try_build()?)
 }
 
@@ -644,7 +760,7 @@ fn fetch_action(dep: &LockDep, runtime: &Toolchain) -> Result<Action, RuleError>
 fn with_crates(mut builder: ActionBuilder, deps: &[LockDep]) -> ActionBuilder {
     for dep in deps {
         let base = dep.base();
-        builder = builder.input_from_output(
+        builder = builder.dependency_input(
             format!("crate:{base}"),
             format!(".anneal-crates/{base}.crate"),
             format!("cargo_workspace fetch {base}"),
@@ -694,38 +810,53 @@ fn assembly_prelude(deps: &[LockDep]) -> String {
     s
 }
 
-/// Coarse snapshot key: `(toolchain, runtime, lockfile, target_triple, all axis values)`
-/// (§8.2). Including the axis values gives each configuration its own `target/`
-/// snapshot, so a debug, a release, and a coverage build don't thrash one another's.
-fn snapshot_key(
+/// The `cargo-target` state shard: `(toolchain, runtime, lockfile, target_triple,
+/// all axis values)` (§8.2). Including the axis values gives each configuration its
+/// own `target/` tree, so a debug, a release, and a coverage build don't thrash one
+/// another's. Formerly the hand-rolled snapshot-key digest; the typed state layer
+/// derives the key from this shard plus rule scope, kind, and attestation epoch.
+fn target_state_shard(
     toolchain: &Toolchain,
     runtime: &Toolchain,
+    native_libs: &[Toolchain],
     sources: &[Artifact],
     ctx: &RuleContext,
-) -> Digest {
-    let mut buf = Vec::new();
-    buf.extend_from_slice(toolchain.identity().as_bytes());
-    buf.push(0);
-    buf.extend_from_slice(runtime.identity().as_bytes());
-    buf.push(0);
-    if let Some(ArtifactSource::Source(lock)) = sources
+) -> Vec<String> {
+    let mut shard = vec![
+        toolchain.identity().to_owned(),
+        runtime.identity().to_owned(),
+    ];
+    // Native libs change what links into `target/`, so they must re-key the warm
+    // tree (else switching libpq versions could restore a stale, wrong-linked
+    // `target/` — §8.2). Sorted so list reordering in BUILD isn't a spurious bust.
+    let mut lib_identities: Vec<String> = native_libs
         .iter()
-        .find(|a| a.path == Path::new("Cargo.lock"))
-        .map(|a| &a.source)
-    {
-        buf.extend_from_slice(lock.as_bytes());
-    }
-    buf.push(0);
-    buf.extend_from_slice(ctx.config().platform().target_triple().as_bytes());
-    buf.push(0);
+        .map(|t| t.identity().to_owned())
+        .collect();
+    lib_identities.sort();
+    shard.extend(lib_identities);
+    shard.push(
+        match sources
+            .iter()
+            .find(|a| a.path == Path::new("Cargo.lock"))
+            .map(|a| &a.source)
+        {
+            Some(ArtifactSource::Source(lock)) => lock.to_hex(),
+            _ => "no-lockfile".to_owned(),
+        },
+    );
+    shard.push(ctx.config().platform().target_triple().to_owned());
+    // The warm-tree shard deliberately uses ALL_AXES — not the action's derived
+    // consumed set. State identity is **per-configuration** (a debug, a release, and an
+    // Incremental vs Hermetic build each want their own `target/` tree so they don't
+    // thrash one another), whereas output identity is per-content (the action key). So
+    // exec_mode is excluded from the action key but kept here: the two are different keys
+    // with different jobs.
     let all_axes = BTreeSet::from(ALL_AXES);
     for (name, value) in ctx.config().axes().consumed(&all_axes) {
-        buf.extend_from_slice(name.as_bytes());
-        buf.push(b'=');
-        buf.extend_from_slice(value.as_bytes());
-        buf.push(b';');
+        shard.push(format!("{name}={value}"));
     }
-    Digest::of(&buf)
+    shard
 }
 
 /// Enumerate workspace member crates, noting whether each has a library target and an
@@ -819,12 +950,80 @@ fn workspace_crates(ctx: &RuleContext) -> Result<Vec<CrateInfo>, RuleError> {
 
 #[cfg(test)]
 mod tests {
-    use super::rustflags_for;
-    use anneal_core::{AxisValues, Coverage, DebugInfo, Lto, Sanitizer};
+    use super::{merge_toolchain_env, CargoWorkspace};
+    use crate::Rule;
+    use anneal_core::{Axis, AxisValues, Coverage, DebugInfo, Lto, Sanitizer};
+    use std::collections::BTreeMap;
+
+    /// The RUSTFLAGS cargo's axis map renders for `axes` (empty string if no axis
+    /// contributes) — the through-the-map equivalent of the old `rustflags_for`.
+    fn rustflags(axes: &AxisValues) -> String {
+        CargoWorkspace
+            .axis_flags()
+            .lower(axes)
+            .env
+            .get("RUSTFLAGS")
+            .cloned()
+            .unwrap_or_default()
+    }
 
     #[test]
     fn default_config_emits_no_rustflags() {
-        assert_eq!(rustflags_for(&AxisValues::default()), "");
+        assert_eq!(rustflags(&AxisValues::default()), "");
+    }
+
+    #[test]
+    fn consumed_axes_are_derived_from_the_map_and_exclude_exec_mode() {
+        // The desync closure: the consumed set IS the map's key set. cargo maps the four
+        // RUSTFLAGS axes; exec_mode (a state-grant gate, correctness-neutral) and opt_level
+        // (a profile/CLI axis, declared explicitly at the call site) are NOT in the map.
+        let mapped = CargoWorkspace.axis_flags().mapped_axes();
+        assert!(mapped.contains(&Axis::Lto));
+        assert!(mapped.contains(&Axis::DebugInfo));
+        assert!(mapped.contains(&Axis::Sanitizer));
+        assert!(mapped.contains(&Axis::Coverage));
+        assert!(
+            !mapped.contains(&Axis::ExecMode),
+            "exec_mode is correctness-neutral and maps to no flag — must not be consumed"
+        );
+        assert!(
+            !mapped.contains(&Axis::OptLevel),
+            "opt_level is a profile/CLI axis, consumed via the explicit call-site list"
+        );
+    }
+
+    #[test]
+    fn env_merge_layers_distinct_keys_and_is_idempotent() {
+        let mut base = BTreeMap::from([("DEVELOPER_DIR".to_owned(), "/sdk".to_owned())]);
+        merge_toolchain_env(
+            &mut base,
+            BTreeMap::from([("PKG_CONFIG_PATH".to_owned(), "/zlib/pc".to_owned())]),
+            "zlib",
+        )
+        .unwrap();
+        // Same key, same value from another lib is fine (idempotent), not a conflict.
+        merge_toolchain_env(
+            &mut base,
+            BTreeMap::from([("PKG_CONFIG_PATH".to_owned(), "/zlib/pc".to_owned())]),
+            "zlib-again",
+        )
+        .unwrap();
+        assert_eq!(base["DEVELOPER_DIR"], "/sdk");
+        assert_eq!(base["PKG_CONFIG_PATH"], "/zlib/pc");
+    }
+
+    #[test]
+    fn env_merge_conflict_on_different_value_is_a_hard_error() {
+        let mut base = BTreeMap::from([("PKG_CONFIG_PATH".to_owned(), "/openssl/pc".to_owned())]);
+        let err = merge_toolchain_env(
+            &mut base,
+            BTreeMap::from([("PKG_CONFIG_PATH".to_owned(), "/libpq/pc".to_owned())]),
+            "postgresql",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("PKG_CONFIG_PATH"), "names the key: {msg}");
+        assert!(msg.contains("conflict"), "calls it a conflict: {msg}");
     }
 
     #[test]
@@ -836,7 +1035,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            rustflags_for(&axes),
+            rustflags(&axes),
             "-Clto=thin -Cdebuginfo=0 -Cinstrument-coverage"
         );
     }
@@ -848,7 +1047,7 @@ mod tests {
             debug_info: DebugInfo::LineTablesOnly,
             ..Default::default()
         };
-        assert_eq!(rustflags_for(&axes), "-Clto=fat -Cdebuginfo=1");
+        assert_eq!(rustflags(&axes), "-Clto=fat -Cdebuginfo=1");
     }
 
     #[test]
@@ -857,6 +1056,6 @@ mod tests {
             sanitizer: Sanitizer::Address,
             ..Default::default()
         };
-        assert_eq!(rustflags_for(&axes), "-Zsanitizer=address");
+        assert_eq!(rustflags(&axes), "-Zsanitizer=address");
     }
 }

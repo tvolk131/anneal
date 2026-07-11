@@ -106,7 +106,7 @@ fn sealed_action_can_read_declared_input_and_write_declared_output() {
     let exec = LocalExecutor::new(dir.path().join(".anneal")).unwrap();
     let input = exec.cas().put(b"declared").unwrap();
     let action = support::shell_action("macos-declared-io", "cat in.txt > out.txt")
-        .input("in", "in.txt", input)
+        .source_input("in", "in.txt", input)
         .output("out", "out.txt")
         .build();
 

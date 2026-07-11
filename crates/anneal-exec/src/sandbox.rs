@@ -45,6 +45,22 @@ use crate::executor::SandboxError;
 #[cfg(target_os = "linux")]
 use std::ffi::OsStr;
 
+/// The enforcement grade this host's **sealed** backend delivers (DESIGN.md
+/// §2.8). A platform fact, not an action property: Linux bubblewrap is
+/// structural absence (and a missing/unusable bwrap fails the build rather
+/// than degrading, so `Enforced` is accurate whenever a sealed action actually
+/// runs); macOS Seatbelt is loud policy interception; the no-backend cfg
+/// fallback applies no isolation at all.
+pub(crate) fn sealed_enforcement_grade() -> crate::trust::EnforcementGrade {
+    if cfg!(target_os = "linux") {
+        crate::trust::EnforcementGrade::Enforced
+    } else if cfg!(target_os = "macos") {
+        crate::trust::EnforcementGrade::LoudBestEffort
+    } else {
+        crate::trust::EnforcementGrade::Unenforced
+    }
+}
+
 /// Everything the sandbox needs that is not on the action itself.
 pub(crate) struct SandboxSpec<'a> {
     pub mode: ExecutionMode,
@@ -92,6 +108,9 @@ pub(crate) fn build_command(action: &Action, spec: &SandboxSpec) -> Result<Comma
 }
 
 fn apply_sandbox_process_hardening(cmd: &mut Command) -> Result<(), SandboxError> {
+    // Default stdio is fully nulled (no host terminal leaks into the action).
+    // The executor re-pipes stdout/stderr to fresh pipes for failure
+    // diagnostics (`run_command`) — equally hermetic; stdin stays null.
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -202,6 +221,11 @@ fn macos_profile(action: &Action, spec: &SandboxSpec) -> String {
         "/usr/share",
         "/private/var/db",
         "/private/var/select",
+        // Apple's LibreSSL reads /private/etc/ssl/openssl.cnf at library init
+        // (and ignores OPENSSL_CONF), so anything linking system libcurl —
+        // rustup-distributed cargo, git — aborts without it. Same near-constant
+        // Darwin runtime class as /private/var/select above.
+        "/private/etc/ssl",
         "/Library/Apple/usr/libexec/oah",
         "/System/Library/Apple/usr/libexec/oah",
         "/System/Library/LaunchDaemons/com.apple.oahd.plist",

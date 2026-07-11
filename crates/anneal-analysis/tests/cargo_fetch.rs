@@ -1,8 +1,14 @@
 //! Fetch mode (§FOD): a workspace with a committed `Cargo.lock` but **no** `vendor/`
-//! builds by hash-pinned-fetching its crates.io dependencies and assembling a vendor
-//! tree in-sandbox — no pre-vendoring required.
+//! builds by hash-pinned-fetching its crates.io dependencies — natively in the
+//! executor (embedded Mozilla roots; no curl, no sandbox, no host trust
+//! configuration) — and assembling a vendor tree in-sandbox. No pre-vendoring
+//! required.
 //!
-//! Ignored by default: it downloads a crate from static.crates.io. Run explicitly:
+//! These tests download from static.crates.io. The first is **gated, not
+//! ignored**: it runs whenever `ANNEAL_NETWORK_TESTS=1` is set, so a networked
+//! CI lane actually exercises fetch mode (it silently rotted once behind a
+//! plain `#[ignore]`). The heavier transitive test stays `#[ignore]`d:
+//!   ANNEAL_NETWORK_TESTS=1 cargo test -p anneal-analysis --test cargo_fetch
 //!   cargo test -p anneal-analysis --test cargo_fetch -- --ignored
 
 use anneal_analysis::Analyzer;
@@ -12,8 +18,12 @@ use anneal_loader::load_package;
 use anneal_rules::builtin_rules;
 
 #[test]
-#[ignore = "network: downloads cfg-if from static.crates.io"]
 fn fetch_mode_builds_a_registry_dep_offline() {
+    // Network-gated rather than #[ignore]d — see the module docs.
+    if std::env::var_os("ANNEAL_NETWORK_TESTS").is_none() {
+        eprintln!("skipping: set ANNEAL_NETWORK_TESTS=1 to run network-gated fetch tests");
+        return;
+    }
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     let ws = root.join("ws");

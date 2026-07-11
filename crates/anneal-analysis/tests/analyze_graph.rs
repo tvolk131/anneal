@@ -348,3 +348,61 @@ alias(name = "b", actual = "//pkg:a")
         "expected a cycle, got {err}"
     );
 }
+
+#[test]
+fn alias_forwards_providers_but_routes_nothing_across_packages() {
+    // A consumer genrule routes a generated file; an alias in ANOTHER package points at
+    // it. The alias forwards the consumer's providers (so it's usable as a dep) but routes
+    // NOTHING: it emits no actions, hence no `mirror_to_tree` inputs, hence an empty
+    // derived routed view. The wrong cross-package re-home is structurally impossible now,
+    // not avoided by a special case.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("pkg")).unwrap();
+    std::fs::write(
+        root.join("pkg/BUILD"),
+        "genrule(name = \"gen\", outs = [\"config.json\"], cmd = \"printf '{}' > $(OUTS)\")\n\
+         genrule(name = \"consumer\", deps = [\"//pkg:gen\"], outs = [\"out.txt\"], \
+         cmd = \"cat config.json > $(OUTS)\")\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("other")).unwrap();
+    std::fs::write(
+        root.join("other/BUILD"),
+        "alias(name = \"al\", actual = \"//pkg:consumer\")\n",
+    )
+    .unwrap();
+
+    let registry = builtin_rules();
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
+    let al = Label::parse("//other:al").unwrap();
+    let graph = anneal_loader::load_closure(root, &al, &registry).unwrap();
+    let g = Analyzer::new(&graph, &registry, &host_config(), root, exec.cas())
+        .analyze(&al)
+        .unwrap();
+
+    // The consumer routes the generated config.json, re-homed into ITS package.
+    let consumer = Label::parse("//pkg:consumer").unwrap();
+    let consumer_routed = g.routed_data(&consumer).expect("consumer analyzed");
+    assert_eq!(
+        consumer_routed.len(),
+        1,
+        "consumer routes one generated file"
+    );
+    assert_eq!(
+        consumer_routed[0].path,
+        std::path::PathBuf::from("pkg/config.json")
+    );
+
+    // The alias forwards the consumer's providers verbatim...
+    assert_eq!(
+        g.providers(&al),
+        g.providers(&consumer),
+        "alias forwards providers"
+    );
+    // ...but routes nothing (no actions => no mirror_to_tree inputs => empty view).
+    assert!(
+        g.routed_data(&al).expect("alias analyzed").is_empty(),
+        "alias routes nothing across packages"
+    );
+}

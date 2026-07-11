@@ -17,6 +17,13 @@ pub enum AnalysisError {
     UnknownRule { label: Label, kind: String },
     /// The rule's `analyze` failed.
     Rule { label: Label, error: RuleError },
+    /// The §4.3 monotonicity theorem was violated: a Hermetic node depends on
+    /// an Incremental node. By construction of the focus cone (edited targets
+    /// plus transitive dependents) this cannot happen — so if it fires, the
+    /// coloring policy is broken, and a Hermetic node consuming dev-built
+    /// bytes is a poisoned shared cache. Asserted at edge resolution, never
+    /// trusted to policy.
+    ConeViolation { hermetic: Label, incremental: Label },
     /// Two generated outputs claim the same workspace-relative path.
     GeneratedOutputCollision {
         path: PathBuf,
@@ -50,6 +57,18 @@ impl fmt::Display for AnalysisError {
             }
             AnalysisError::Rule { label, error } => {
                 write!(f, "`{label}`: {error}")
+            }
+            AnalysisError::ConeViolation {
+                hermetic,
+                incremental,
+            } => {
+                write!(
+                    f,
+                    "focus-cone monotonicity violated: hermetic `{hermetic}` depends on \
+                     incremental `{incremental}` — a hermetic node consuming dev-built \
+                     bytes would poison the shared cache (DESIGN.md §4.3); the coloring \
+                     policy is broken"
+                )
             }
             AnalysisError::GeneratedOutputCollision {
                 path,
