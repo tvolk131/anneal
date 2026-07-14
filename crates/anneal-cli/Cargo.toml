@@ -2,7 +2,7 @@
 name = "anneal-cli"
 version.workspace = true
 edition.workspace = true
-description = "The `anneal` command-line interface — thin orchestration over the build system (§18)."
+description = "The `anneal` command-line interface — thin orchestration over the build system."
 
 [[bin]]
 name = "anneal"

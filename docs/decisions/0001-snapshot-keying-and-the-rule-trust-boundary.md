@@ -3,8 +3,9 @@
 - **Status:** Accepted — 2026-06-22
 - **Contract it governs:** `docs/rules.md` §5–§6 (the trust boundary and how the snapshot key
   is formed). This note records the *decision and its rationale*; `rules.md` is the durable
-  contract. Background invariants: `build-system-design.md` §1.4 (correctness-neutral),
-  §8.2 (snapshot protocol), §3.2 ("wrap, don't decompose"), §2.4/§2.8 (cache tiers / trust).
+  contract. Current background is summarized in [`../../DESIGN.md`](../../DESIGN.md) §§1, 6,
+  and 7. References to a shared cache below describe its future admission boundary; no remote
+  backend exists today.
 
 ## Context
 
@@ -56,7 +57,7 @@ the snapshot is never reused.
   "silently wrong, later," correctness is simply prior; there is no exchange rate to compute.
 - **The flexibility has no legitimate non-anti-pattern use.** Every input an author might mark
   incremental-safe is (a) the source tree — already excluded via the channel; (b) output-relevant
-  — excluding it *is* the §1.4 cardinal sin; or (c) output-irrelevant churn — already poisoning the
+  — excluding it violates the correctness-neutral invariant; or (c) output-irrelevant churn — already poisoning the
   *action* cache, whose correct fix is to stop feeding it to the action, fixing both caches. So the
   verb's entire residual value is to legitimize bugs. (Note: "rule changes are rare" is *not* the
   argument — it bounds frequency, not blast radius. The argument is no-legitimate-use.)
@@ -81,7 +82,7 @@ the snapshot is never reused.
   *second* unenforced-judgment surface (free-form exclusion) on top of the one that's irreducible
   (shard population, which can only err by being too coarse).
 - **Full decomposition (per-crate content-addressed actions, the Bazel/`rules_rust` model).**
-  Would yield a structural neutrality guarantee, but by abandoning "wrap, don't decompose" (§3.2) —
+  Would yield a structural neutrality guarantee, but by abandoning "wrap, don't decompose" —
   i.e. by re-implementing the incrementality every wrapped tool already implements. This is the
   thing anneal exists *not* to do.
 - **Lean entirely on the verifier (trust-but-verify as the primary mechanism).** Rejected as

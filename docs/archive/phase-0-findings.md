@@ -1,4 +1,7 @@
-# Phase 0 spike findings
+# Phase 0 spike findings — archived
+
+> **Archived:** Historical results from the initial Starlark and CAS spikes. Current behavior
+> is documented by the [README](../../README.md), architecture overview, and tests.
 
 Throwaway code under `spikes/`. Purpose: retire the two highest-risk §22 assumptions
 before committing real interfaces. Run with:

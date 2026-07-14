@@ -1,11 +1,16 @@
-# Anneal — Milestone 1 Implementation Plan
+# Anneal — Milestone 1 implementation plan — archived
+
+> **Archived:** This is the original pre-implementation plan. It is not the current backlog or
+> availability reference. See [`../../TODO.md`](../../TODO.md) and the
+> [README status matrix](../../README.md#current-implementation-status).
 
 > Companion to `build-system-design.md`. That document defines *what* the Thesis
 > MVP is and *why*; this one defines the *order* we build it, the *exit criteria*
 > for each phase, the *crate decomposition*, and the *verification harness* that
 > guards the central correctness invariant.
 >
-> Status: pre-implementation. Section references (§) point at `build-system-design.md`.
+> Original status: pre-implementation. Section references (§) point at the archived
+> `original-build-system-design.md`.
 
 ---
 
