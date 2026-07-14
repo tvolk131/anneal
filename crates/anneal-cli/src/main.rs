@@ -1,16 +1,13 @@
-//! `anneal` — the Anneal command-line interface (§18).
+//! `anneal` — the Anneal command-line interface.
 //!
 //! Deliberately a **thin coordinator** (the plan's crate decomposition allows this one
 //! crate to be a coordinator): it parses flags, builds a [`Configuration`] from the
-//! universal-axis selectors (§6.6), and drives the existing pipeline —
+//! universal-axis selectors, and drives the existing pipeline —
 //! `load_package → Analyzer → LocalExecutor::execute_graph` — then reports.
 //!
-//! # Milestone-1 scope
-//!
-//! Two commands, `build` and `test`, over a **single package** (the one named by the
-//! target label) — multi-package workspace loading and the `query`/`affected`/`why`
-//! commands are the next increment (§11.3). All logic lives in the libraries; this file
-//! only orchestrates and formats.
+//! The current surface includes build, test, affected-target queries, dependency-path
+//! explanations, and generated-file materialization. All substantive logic lives in the
+//! libraries; this file only orchestrates and formats.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -51,7 +48,7 @@ enum Command {
         /// The target label, e.g. `//app:app`.
         target: String,
     },
-    /// List the targets affected by changes since a git ref (§11.3).
+    /// List the targets affected by changes since a git ref.
     Affected {
         /// The git ref to diff against (e.g. `origin/main`, a commit SHA).
         #[arg(long)]
@@ -95,14 +92,14 @@ enum Command {
     },
 }
 
-/// The universal configuration axes (§6.2, §6.6), selectable per invocation. Each is
+/// The universal configuration axes, selectable per invocation. Each is
 /// global so it can appear before or after the subcommand.
 #[derive(Args)]
 struct ConfigArgs {
     /// Workspace root (defaults to the current directory).
     #[arg(long, global = true, value_name = "DIR")]
     workspace_root: Option<PathBuf>,
-    /// Target platform triple (§6.6 `--target`). Defaults to a host placeholder.
+    /// Target platform triple. Defaults to a host placeholder.
     #[arg(long, global = true, value_name = "TRIPLE")]
     platform: Option<String>,
     /// `debug` | `release` | `release-with-debuginfo`.
@@ -120,10 +117,11 @@ struct ConfigArgs {
     /// `on` | `off`.
     #[arg(long, global = true, value_name = "STATE")]
     coverage: Option<String>,
-    /// `incremental` | `hermetic` (DESIGN.md §4.1). Incremental actions may use
+    /// `incremental` | `hermetic`. Incremental actions may use
     /// warm interleaved tool state (fast, machine-local results); hermetic
-    /// actions may not (cold, deterministic, shareable). Default: incremental —
-    /// the dev loop. CI passes `--exec-mode hermetic` (with `--require-enforced`).
+    /// actions may not (cold and state-isolated, with promotable provenance).
+    /// No remote backend exists today. Default: incremental — the dev loop.
+    /// CI passes `--exec-mode hermetic` (with `--require-enforced`).
     #[arg(long, global = true, value_name = "MODE")]
     exec_mode: Option<String>,
     /// Max actions to run concurrently. Defaults to the machine's parallelism.
@@ -132,7 +130,7 @@ struct ConfigArgs {
     jobs: Option<usize>,
     /// Fail sealed execution on any platform whose sandbox enforcement is below
     /// `enforced` (Linux namespaces), instead of silently degrading — the
-    /// mandatory CI posture (DESIGN.md §2.8). macOS Seatbelt is `loud-best-effort`,
+    /// mandatory CI posture. macOS Seatbelt is `loud-best-effort`,
     /// so this flag fails sealed actions on macOS by design.
     #[arg(long, global = true)]
     require_enforced: bool,
@@ -205,7 +203,7 @@ fn run(cli: Cli) -> Result<i32, String> {
     }
 }
 
-/// Explain a dependency relationship (§11.3). With `<to>`: the shortest path from `from`
+/// Explain a dependency relationship. With `<to>`: the shortest path from `from`
 /// to `to`. With `--since`: why `from` is affected by changes since the ref (the path to
 /// the nearest changed target in `from`'s dependency closure). Uses `from`'s forward
 /// closure only — no whole-workspace load.
@@ -281,7 +279,7 @@ fn print_path(path: &[Label]) {
     println!("  {}", rendered.join(" → "));
 }
 
-/// Print the targets affected by changes since `since` (§11.3): `git diff` → owning
+/// Print the targets affected by changes since `since`: `git diff` → owning
 /// packages → reverse-dependency closure. Loads the whole workspace (reverse-deps need
 /// every target), but runs no analysis.
 fn affected(since: &str, root: &Path) -> Result<i32, String> {
