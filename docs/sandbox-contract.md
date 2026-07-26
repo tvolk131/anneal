@@ -1,5 +1,9 @@
 # Sealed Sandbox Contract
 
+> **Status:** Normative current contract, last reconciled July 14, 2026.
+> Platform guarantees are intentionally graded. Linux `Enforced` and macOS
+> `LoudBestEffort` are not interchangeable claims.
+
 This is the contract rule authors can rely on when they choose
 `ExecutionMode::Sealed`. It describes the observable boundary Anneal provides; rule
 authors are still responsible for writing actions that are deterministic given this
@@ -150,8 +154,9 @@ Rule authors must:
 - write rules that are deterministic relative to the documented visible surfaces;
 - mark actions non-cacheable when their outputs are not reproducible under this contract.
 
-Sealing makes the cache key trustworthy. It does not by itself prove that outputs are
-deterministic.
+Sealing establishes the action's declared input boundary at the platform's enforcement grade.
+It does not by itself prove that outputs are deterministic, and it cannot compensate for an
+engine defect that omits declared identity from the cache key.
 
 ## Guarantee-to-test map
 

@@ -1,6 +1,12 @@
-# Anneal — v1 Design Document
+# Anneal — original v1 design document
 
-> Status: Design / pre-implementation
+> **Archived:** This pre-implementation design has been superseded by the current
+> [`../../DESIGN.md`](../../DESIGN.md), [README status matrix](../../README.md), and normative
+> contract documents. It is retained for rationale and history, not as an implementation or
+> product reference. The Simplex material added during later exploration points to the active
+> proposal at [`../simplex-rules.md`](../simplex-rules.md).
+
+> Original status: Design / pre-implementation
 > Scope: Defines the Milestone 1 (Thesis MVP) feature set, the v1.x roadmap, architecture, deliberate deferrals, benchmark gates, and known risks.
 
 ---
@@ -330,7 +336,7 @@ Actions declare a mode: **`sealed`** (hermetic, strict input isolation; default 
 - **macOS**: `sandbox-exec` profiles. Best-effort (~95% in practice), not strict — see [§22](#22-open-questions-and-risks). Optional Linux-VM mode for strict needs.
 - **No Windows in v1.**
 
-The materializer is shared across platforms; only the isolation layer differs. See [`docs/sandboxing.md`](docs/sandboxing.md) for the full materialization/isolation model, the per-platform hermeticity guarantees, and the use of read-tracking to **enforce** declared inputs (catch under-declaration) rather than to relax invalidation.
+The materializer is shared across platforms; only the isolation layer differs. See [`docs/sandboxing.md`](../sandboxing.md) for the full materialization/isolation model, the per-platform hermeticity guarantees, and the use of read-tracking to **enforce** declared inputs (catch under-declaration) rather than to relax invalidation.
 
 ### 7.4 Strict environment hermeticity
 
@@ -530,6 +536,11 @@ The rule introspects `Cargo.toml` and each crate's structure, generating per-`(c
 ### 13.5 v1.x rules
 
 `nextjs_app` (with explicit cacheability modes — [§14.5](#145-nextjs-cacheability-modes)); `rust_wasm_lib` (Rust → WASM → TS with wasm-bindgen typed bindings, the cross-language type-safety demonstration); `uv_workspace` (Python); `go_module` (Go). Deferred entirely: C/C++/JVM rules, framework rules beyond Next.js, npm/yarn (pnpm preferred for lockfile/workspace semantics), Poetry/pip-tools (uv preferred).
+
+A proposed build-only integration for Blockstream Research's Smplx framework — typed local
+and hash-pinned remote Simplex packages feeding a sealed `simplex build` action — is specified
+in [`docs/simplex-rules.md`](../simplex-rules.md). It is exploratory v1.x work, not part of
+the Milestone-1 rule set above.
 
 ### 13.6 Axis interpretation matrix
 
