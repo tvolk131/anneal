@@ -5,7 +5,9 @@
 //! network (Milestone 1 is scoped to public-/no-dependency workflows; vendoring is
 //! a later increment).
 
-use anneal_action::Action;
+use std::path::Path;
+
+use anneal_action::{action_digest, Action};
 use anneal_analysis::{ActionGraph, Analyzer};
 use anneal_core::{AxisValues, Configuration, OptLevel, Platform};
 use anneal_exec::{Executor, LocalExecutor};
@@ -435,5 +437,66 @@ fn build_demands_no_test_actions_test_demands_the_test_run() {
     assert!(
         test_set.len() < g.actions().count(),
         "something must be pruned"
+    );
+}
+
+/// The `exclude` contract: excluded files are not build inputs, so editing
+/// one leaves every action identity byte-identical — the cache's "nothing
+/// to do" verdict — while editing a real source changes it. This is the
+/// dogfood keystone: docs edits must not rebuild the workspace wherever the
+/// store persists.
+#[test]
+fn excluded_files_do_not_change_action_identity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(ws.join("mylib/src")).unwrap();
+    std::fs::write(
+        ws.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"mylib\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join("mylib/Cargo.toml"),
+        "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(ws.join("mylib/src/lib.rs"), "pub fn f() {}\n").unwrap();
+    std::fs::write(ws.join("NOTES.md"), "docs\n").unwrap();
+    std::fs::create_dir_all(ws.join("docs")).unwrap();
+    std::fs::write(ws.join("docs/guide.md"), "guide\n").unwrap();
+    std::fs::write(
+        ws.join("BUILD"),
+        "cargo_workspace(name = \"ws\", exclude = [\"docs\", \"NOTES.md\"])\n",
+    )
+    .unwrap();
+
+    let registry = builtin_rules();
+    let cfg = config(OptLevel::Debug);
+    let label = anneal_core::Label::parse("//ws:ws").unwrap();
+    let digest_of = |root: &Path| -> Vec<anneal_core::Digest> {
+        let graph = load_package(root, "ws", &registry).unwrap();
+        let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
+        Analyzer::new(&graph, &registry, &cfg, root, exec.cas())
+            .analyze(&label)
+            .unwrap()
+            .actions()
+            .map(action_digest)
+            .collect::<Vec<_>>()
+    };
+
+    let before = digest_of(tmp.path());
+    std::fs::write(ws.join("docs/guide.md"), "guide v2 — edited\n").unwrap();
+    std::fs::write(ws.join("NOTES.md"), "docs v2\n").unwrap();
+    let after_excluded_edit = digest_of(tmp.path());
+    assert_eq!(
+        before, after_excluded_edit,
+        "editing excluded files must leave action identity byte-identical"
+    );
+
+    std::fs::write(ws.join("mylib/src/lib.rs"), "pub fn g() {}\n").unwrap();
+    let after_real_edit = digest_of(tmp.path());
+    assert_ne!(
+        before, after_real_edit,
+        "editing a real source must change identity"
     );
 }
