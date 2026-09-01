@@ -61,10 +61,14 @@ pub use cache::action_digest;
 pub use executor::{ActionResult, ExecError, Executor, LocalExecutor, PhaseTimings, SandboxError};
 pub use fetch::FetchError;
 pub use query::{QueryBuilder, QueryResult, QuerySpec};
-pub use trust::{compute_tier, CacheTier, EnforcementGrade, Provenance};
+pub use trust::compute_tier;
 pub use verify::{
     prime_snapshot, verify_correctness_neutral, verify_warm_neutral, NeutralityReport,
 };
+
+// The stored trust vocabulary lives in `anneal-store` (it is what cache entries
+// persist); re-exported here so downstream crates see one vocabulary.
+pub use anneal_store::{CacheTier, EnforcementGrade, Provenance};
 
 /// Participates in every cache key (§8.1). Bump when sandbox semantics change so that
 /// a sandbox behavior change invalidates previously-cached results.

@@ -104,13 +104,14 @@ pub struct MaterializeStore {
 }
 
 impl MaterializeStore {
-    /// Open the manifest under `store_root` (e.g. `.anneal/`); a missing
+    /// Open the manifest under `local_root` (the machine-local half of the
+    /// `.anneal` store, where materialization ownership lives); a missing
     /// manifest is an empty one. Destinations resolve under `workspace_root`.
     pub fn open(
-        store_root: impl Into<PathBuf>,
+        local_root: impl Into<PathBuf>,
         workspace_root: impl Into<PathBuf>,
     ) -> io::Result<Self> {
-        let manifest_path = store_root.into().join("materialized");
+        let manifest_path = local_root.into().join("materialized");
         let entries = match fs::read_to_string(&manifest_path) {
             Ok(text) => parse_manifest(&text)?,
             Err(e) if e.kind() == io::ErrorKind::NotFound => BTreeMap::new(),
@@ -310,6 +311,11 @@ impl MaterializeStore {
 
     /// Persist the manifest: tmp + rename, the action-cache idiom.
     fn save(&self) -> io::Result<()> {
+        // Crash-injection point: after the tree writes, before the ownership
+        // record publishes them — the "orphan materialized file" crash state
+        // (`--check` and re-apply reconcile it; the never-clobber rule means
+        // an unowned file is refused, never silently overwritten).
+        anneal_core::crash_point("materialize-write");
         let mut text = String::from(MANIFEST_HEADER);
         text.push('\n');
         for (path, (label, digest)) in &self.entries {
@@ -438,7 +444,7 @@ mod tests {
     }
 
     fn open(f: &Fixture) -> MaterializeStore {
-        MaterializeStore::open(f.ws.join(".anneal"), &f.ws).unwrap()
+        MaterializeStore::open(f.ws.join(".anneal/local"), &f.ws).unwrap()
     }
 
     fn writable(path: &Path) {

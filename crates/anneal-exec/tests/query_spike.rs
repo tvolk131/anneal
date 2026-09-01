@@ -259,7 +259,7 @@ fn metadata_embeds_sandbox_paths() {
     if cfg!(target_os = "linux") {
         assert!(json.contains("/work"), "Linux guest path embedded");
     } else {
-        let queries_dir = store.path().join("queries");
+        let queries_dir = exec.store().queries_root();
         assert!(
             json.contains(&*queries_dir.to_string_lossy()),
             "macOS host query root embedded in output"

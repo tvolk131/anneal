@@ -3,6 +3,8 @@
 Documents in this directory describe possible future mechanisms. They are not current product
 commitments and must not be used as implementation-status references.
 
+- [`anneal-store.md`](anneal-store.md) — one crate owning the `.anneal/` layout, locking,
+  crash recovery, and transport boundary.
 - [`input-sensing.md`](input-sensing.md) — observe reads to propose declarations and improve
   diagnostics.
 - [`remote-cache.md`](remote-cache.md) — share trusted content-addressed results after local

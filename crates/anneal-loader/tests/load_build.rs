@@ -148,6 +148,7 @@ genrule(
     srcs = ["hello.txt", "world.txt"],
     outs = ["greeting.txt"],
     cmd = "cat $(SRCS) > $(OUTS)",
+    deterministic = True,
 )
 "#,
     )

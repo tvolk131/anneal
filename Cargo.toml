@@ -5,6 +5,7 @@ resolver = "2"
 members = [
     "crates/anneal-core",
     "crates/anneal-cas",
+    "crates/anneal-store",
     "crates/anneal-exec",
     "crates/anneal-rules",
     "crates/anneal-loader",

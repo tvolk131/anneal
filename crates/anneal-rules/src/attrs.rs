@@ -108,6 +108,15 @@ impl Attrs {
         }
     }
 
+    /// An optional boolean attribute.
+    pub fn bool_opt(&self, name: &str) -> Result<Option<bool>, AttrError> {
+        match self.map.get(name) {
+            None => Ok(None),
+            Some(AttrValue::Bool(b)) => Ok(Some(*b)),
+            Some(_) => Err(AttrError::wrong_type(name, "bool")),
+        }
+    }
+
     /// A required label attribute.
     pub fn label(&self, name: &str) -> Result<&Label, AttrError> {
         match self.map.get(name) {

@@ -22,9 +22,8 @@ use anneal_exec::materialize::{MaterializeStore, TreeState};
 use anneal_exec::{Action, ActionResult, InputSource, LocalExecutor};
 use anneal_loader::{load_closure, load_workspace};
 use anneal_rules::{builtin_rules, ArtifactSource};
+use anneal_store::Store;
 use clap::{Args, Parser, Subcommand};
-
-mod lock;
 
 /// Anneal — a native-tool-preserving build system.
 #[derive(Parser)]
@@ -476,7 +475,11 @@ struct Pipeline {
     graph: ActionGraph,
     actions: Vec<Action>,
     exec: LocalExecutor,
-    _lock: lock::WorkspaceLock,
+    // The store and its write capability, held for the pipeline's whole run —
+    // a mutating command stays exclusive until it finishes, post-execution
+    // tree writes (`materialize`) included. Cheap clones of Arc-shared state.
+    _store: Store,
+    _guard: anneal_store::WorkspaceGuard,
 }
 
 /// The shared pipeline up to (not including) execution: parse the label, take
@@ -498,16 +501,18 @@ fn analyze_target(
     // resolution). Announce it on stderr so the terminal isn't silent until
     // the first action streams — and so stdout (the action log) stays clean.
     eprintln!("analyzing {label}…");
-    // A mutating command takes the coarse exclusive workspace lock for its whole run, so
-    // concurrent `anneal` processes can't collide on shared warm dirs / sandboxes. Held
-    // until the returned `PipelineRun` is dropped. Read-only commands
-    // (`affected`/`why`) deliberately do not acquire it. (See lock.rs.)
-    let lock = lock::WorkspaceLock::acquire(&root.join(".anneal"))
+    // A mutating command takes the workspace write capability for its whole
+    // run (`anneal-store`): the exclusive `flock`, boot recovery, and every
+    // store write behind the guard. Read-only commands (`affected`/`why`)
+    // never acquire it — they read immutable, atomically-published state.
+    let store =
+        Store::open(root.join(".anneal")).map_err(|e| format!("opening .anneal store: {e}"))?;
+    let guard = store
+        .lock()
         .map_err(|e| format!("acquiring workspace lock: {e}"))?;
     // Load the target's transitive package closure (cross-package deps included).
     let graph = load_closure(root, &label, &registry).map_err(|e| e.to_string())?;
-    let exec = LocalExecutor::new(root.join(".anneal"))
-        .map_err(|e| format!("opening .anneal store: {e}"))?;
+    let exec = LocalExecutor::with_store_guard(store.clone(), guard.clone());
     let exec = match jobs {
         Some(j) => exec.jobs(j),
         None => exec,
@@ -517,7 +522,7 @@ fn analyze_target(
     // them from every rule's source discovery (otherwise they'd shadow the
     // producing action's declared output — an analysis-time hard error — and
     // perturb source-derived snapshot keys).
-    let materialized = MaterializeStore::open(root.join(".anneal"), root)
+    let materialized = MaterializeStore::open(store.local_root(), root)
         .map_err(|e| format!("reading materialize manifest: {e}"))?
         .paths();
     let analyzer = Analyzer::new(&graph, &registry, config, root, exec.cas())
@@ -551,7 +556,8 @@ fn analyze_target(
         graph: analyzed,
         actions,
         exec,
-        _lock: lock,
+        _store: store,
+        _guard: guard,
     })
 }
 
@@ -612,7 +618,10 @@ fn materialize(
     }
 
     let open_store = || {
-        MaterializeStore::open(root.join(".anneal"), root)
+        // Read-only view of the materialize manifest: the pipeline's guard is
+        // held for the whole run, and this open only reads.
+        let local_root = pipeline.exec.store().local_root().to_path_buf();
+        MaterializeStore::open(local_root, root)
             .map_err(|e| format!("reading materialize manifest: {e}"))
     };
 
@@ -668,7 +677,8 @@ fn materialize(
 
 /// `materialize --list`: the manifest, with each entry's current tree state.
 fn materialize_list(root: &Path) -> Result<i32, String> {
-    let store = MaterializeStore::open(root.join(".anneal"), root)
+    let store = anneal_store::Store::open(root.join(".anneal"))
+        .and_then(|s| MaterializeStore::open(s.local_root().to_path_buf(), root))
         .map_err(|e| format!("reading materialize manifest: {e}"))?;
     let entries = store.entries();
     if entries.is_empty() {
@@ -697,9 +707,12 @@ fn materialize_clean(target: Option<&str>, force: bool, root: &Path) -> Result<i
         .map(|t| Label::parse(t).map_err(|e| format!("invalid target {t:?}: {e}")))
         .transpose()?
         .map(|l| l.to_string());
-    let _lock = lock::WorkspaceLock::acquire(&root.join(".anneal"))
+    let _store = anneal_store::Store::open(root.join(".anneal"))
+        .map_err(|e| format!("opening .anneal store: {e}"))?;
+    let _guard = _store
+        .lock()
         .map_err(|e| format!("acquiring workspace lock: {e}"))?;
-    let mut store = MaterializeStore::open(root.join(".anneal"), root)
+    let mut store = MaterializeStore::open(_store.local_root().to_path_buf(), root)
         .map_err(|e| format!("reading materialize manifest: {e}"))?;
     let report = store
         .clean(label.as_deref(), force)

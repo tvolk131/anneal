@@ -14,11 +14,13 @@ anneal-loader = { path = "../anneal-loader" }
 anneal-analysis = { path = "../anneal-analysis" }
 anneal-rules = { path = "../anneal-rules" }
 anneal-exec = { path = "../anneal-exec" }
+anneal-store = { path = "../anneal-store" }
 anneal-query = { path = "../anneal-query" }
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
 
 [dev-dependencies]
+anneal-core = { path = "../anneal-core" }
 tempfile = "3"
 
 [lints]

@@ -8,6 +8,7 @@ description = "Execution kernel: Action model, action cache, materializer, sandb
 anneal-core = { path = "../anneal-core" }
 anneal-cas = { path = "../anneal-cas" }
 anneal-snapshot = { path = "../anneal-snapshot" }
+anneal-store = { path = "../anneal-store" }
 libc = "0.2"
 # Native fixed-output fetch (src/fetch.rs): pure-Rust HTTP/TLS with Mozilla's
 # root store compiled in — defaults are rustls + ring + webpki-roots.

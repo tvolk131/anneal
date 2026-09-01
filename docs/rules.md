@@ -109,15 +109,14 @@ Sealing makes hidden reads fail at the platform's enforcement grade. It does not
 output bytes are reproducible: a sealed command may still read time, randomness, process state,
 or another visible nondeterministic surface.
 
-### Known generic-action deviation
+### Generic-action cacheability
 
-Ordinary actions currently default to `Deterministic`, and `genrule` lowers arbitrary `sh -c`
-commands without changing that policy. This contradicts the intended conservative rule contract
-for arbitrary commands. Until fixed, generic rules are `Partial`; rule authors must audit every
-built-in policy explicitly and must not infer “sealed means deterministic.”
-
-A future reproducibility-verification workflow may provide evidence for promotion, but no such
-automatic graduation path exists today.
+An arbitrary `sh -c` command is `NonCacheable` by default: the engine cannot assume a shell
+command's purity, and a wrong assumption would cache stale bytes under a valid key. Caching is
+the explicit `deterministic = True` opt-in — the rule author's claim that the command is a pure
+function of its inputs. A false claim poisons the cache; the claim is the author's to make, not
+the engine's. A future reproducibility-verification workflow may provide evidence for promotion,
+but no automatic graduation path exists today.
 
 ## 6. Persistent state
 

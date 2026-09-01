@@ -22,7 +22,7 @@ Status labels:
 | Area | Status | Current behavior and remaining work |
 |---|---|---|
 | Loading and analysis | **Available** | Loads the requested target's transitive package closure; whole-workspace loading supports reverse-dependency queries. Generated-path collisions and generated-output/source shadowing fail during analysis. Enforcing one sweeping workspace owner per package remains planned. |
-| Local execution and caching | **Partial** | Executes independent actions concurrently, caches content-addressed results, reuses warm tool state, streams completion, preserves independent work after failures, skips failed dependents, and reports bounded failure output. Ordinary `build` and `test` execute the full analyzed action set rather than pruning to demanded outputs. Pre-1.0 cache-identity hardening is listed below. |
+| Local execution and caching | **Partial** | Executes independent actions concurrently, caches content-addressed results, reuses warm tool state, streams completion, preserves independent work after failures, skips failed dependents, and reports bounded failure output. Ordinary `build` and `test` execute the full analyzed action set rather than pruning to demanded outputs. The store lives behind the `anneal-store` crate with a crash-safe layout, capability-guarded writes, and interruption tests. |
 | Linux sandbox | **Available** | Bubblewrap provides namespace-based filesystem and network isolation. Linux sandbox tests run through the Docker CI path. |
 | macOS sandbox | **Partial** | Seatbelt denies undeclared file access and network access according to action policy, with scrubbed environments and declared toolchain roots. It is graded `LoudBestEffort`, not Linux-equivalent `Enforced`; a Linux VM is a proposal, not a committed execution path. |
 | Focus-cone execution | **Experimental** | `build` and `test` derive dirty targets and their dependents from `git status`, run that cone as `Incremental`, and color the rest `Hermetic`. The monotonicity invariant is enforced. There is no hysteresis or pinning yet; committing makes the tree clean and can trigger a Hermetic rebuild because Incremental and Hermetic action contracts have different keys. |
@@ -32,7 +32,7 @@ Status labels:
 | `cargo_workspace` | **Partial** | Builds coarse Cargo workspaces, maintains warm `target/` state, splits library unit-test compilation from execution, supports doc/integration tests, fixed-output crates.io acquisition from a committed lockfile, declared native libraries, and Rust flag axes. It preserves Cargo fingerprint/`target/` reuse but currently sets `CARGO_INCREMENTAL=0`, disabling rustc incremental code generation. Missing pieces include authoritative `cargo metadata` staging, binary/bin-unit targets, per-integration-binary targets, separately addressable tests, generated lockfiles, and non-crates.io acquisition. |
 | `pnpm_workspace` | **Partial** | Performs frozen offline installs into phase-separated state and runs explicitly declared test/build scripts. External package acquisition, lifecycle/native-build actions, script cache promotion, structured JS test results, and a portable content-addressed pnpm store remain planned. |
 | `nickel_eval` | **Partial** | Exports one self-contained Nickel source to a selected supported format and exposes it to downstream rules. Multi-file Nickel imports are not yet declared or supported. |
-| Generic and routing rules | **Partial** | `filegroup`, `alias`, and `genrule` work across package boundaries. Generated data consumed by actions can be routed into their sandbox paths. Alias targets forward providers but intentionally do not re-home materialization routes. Generic `genrule` cache policy still needs to be reconciled with the rule contract before arbitrary shell commands should be treated as reproducible. |
+| Generic and routing rules | **Partial** | `filegroup`, `alias`, and `genrule` work across package boundaries. Generated data consumed by actions can be routed into their sandbox paths. Alias targets forward providers but intentionally do not re-home materialization routes. Arbitrary `genrule` commands are `NonCacheable` by default; caching requires the explicit `deterministic = True` claim. |
 | Worktree materialization | **Available** | `anneal materialize` mirrors generated inputs consumed by a target into tree-shaped paths, tracks ownership/digests, avoids mtime churn, refuses destructive overwrites by default, and supports `--check`, `--list`, `--clean`, and `--force`. It materializes the actual consuming target, not an alias to it. |
 | Dependency queries | **Partial** | `affected --since`, `why <from> <to>`, and `why <target> --since` are available. `affected` currently omits untracked-but-unadded files; `why --all`, `affected --explain`, and general `query`/`aquery` commands are planned. |
 | Toolchains | **Partial** | First-party rules resolve closure-complete Nix toolchains from `ANNEAL_TOOLCHAIN_MANIFEST`; toolchain identity, roots, action environment, and derived `PATH` enter the action contract. Anneal-managed provisioning and user-facing `WORKSPACE` toolchain registration are planned, so the current adopter path requires Nix. |
@@ -45,16 +45,16 @@ Status labels:
 ### Pre-1.0 trust hardening
 
 Anneal's architecture requires cache hits to be interchangeable with executing the same
-action. Before making a strong shared-cache promise, the current implementation still needs
-to:
-
-- include the complete declared output mapping in action identity;
-- harden file-digest memoization against same-size, same-mtime content replacement;
-- make arbitrary-command cacheability explicit rather than implicit; and
-- strengthen persistent-state owner identity across otherwise similar workspaces and targets.
-
-These are active correctness tasks, not remote-cache-only optimizations. They are tracked at
-the top of [`TODO.md`](TODO.md).
+action. The identity layer now enforces this locally: the complete declared output mapping
+and the network capability enter the action key (via an `ActionIdentity` struct whose field
+set is pinned by per-field variation tests); file-digest memoization keys on mtime, size,
+ctime, and inode, so a same-size, same-mtime replacement cannot reuse a stale digest;
+arbitrary commands cache only through the explicit `deterministic` opt-in; and persistent
+state keys include the declaring target, so distinct owners never share a warm tree. Action
+cache hits verify their output blobs exist and fail open to a re-run. Remaining before a
+strong shared-cache promise: broader cold-vs-warm neutrality verification and remote-cache
+admission rules (see [`TODO.md`](TODO.md) and the
+[anneal-store proposal](docs/proposals/anneal-store.md)).
 
 ## Current CLI
 

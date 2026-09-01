@@ -26,8 +26,11 @@ fn workspace(build: &str) -> tempfile::TempDir {
 
 #[test]
 fn build_runs_the_graph_and_caches() {
-    let ws =
-        workspace("genrule(name = \"gen\", outs = [\"out.txt\"], cmd = \"echo hi > $(OUTS)\")\n");
+    // Caching is the `deterministic = True` opt-in (an arbitrary command is
+    // NonCacheable by default — the engine cannot assume its purity).
+    let ws = workspace(
+        "genrule(name = \"gen\", outs = [\"out.txt\"], cmd = \"echo hi > $(OUTS)\", deterministic = True)\n",
+    );
 
     let out = anneal(ws.path(), &["build", "//pkg:gen"]);
     let stdout = String::from_utf8_lossy(&out.stdout);

@@ -51,6 +51,11 @@ impl SnapshotStore {
 
     /// Snapshot `dir` under `key`, replacing any prior snapshot for that key. Returns
     /// `false` (a no-op) if `dir` does not exist (nothing was built yet).
+    ///
+    /// Write order is the crash-safety protocol (§3.1 of the anneal-store
+    /// proposal): file blobs → manifest blob → index. A pointer is never written
+    /// before its pointee, so an interruption leaves unreferenced debris or a
+    /// complete older generation — never a dangling index.
     pub fn save(&self, cas: &Cas, key: &Digest, dir: &Path) -> io::Result<bool> {
         if !dir.exists() {
             return Ok(false);
@@ -58,21 +63,33 @@ impl SnapshotStore {
         let mut entries = Vec::new();
         collect(dir, dir, cas, &mut entries)?;
         let manifest_digest = cas.put(&encode(&entries))?;
+        // Crash-injection point: after the manifest is durable, before the index
+        // points at it — the "orphaned manifest" crash state.
+        anneal_core::crash_point("snapshot-manifest");
         write_index(&self.index_path(key), &manifest_digest)?;
         Ok(true)
     }
 
     /// Restore the snapshot for `key` into `dir` (created if needed). Returns `false`
     /// if no snapshot exists for the key (a cold start — handled gracefully, §8.2).
+    ///
+    /// A snapshot is an accelerator, so a torn index or missing/corrupt manifest
+    /// **degrades to a cold start** (`Ok(false)`), never fails the build: the
+    /// worst case is rebuilding tool state, which is the §1.4 invariant.
     pub fn restore(&self, cas: &Cas, key: &Digest, dir: &Path) -> io::Result<bool> {
         let manifest_digest = match read_index(&self.index_path(key))? {
             Some(d) => d,
             None => return Ok(false),
         };
-        let manifest = cas
-            .get(&manifest_digest)?
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "snapshot manifest missing"))?;
-        let entries = decode(&manifest)?;
+        let Some(manifest) = cas.get(&manifest_digest)? else {
+            // Torn store (index published, blob missing — no GC exists yet, but
+            // an incomplete import or a bug could produce it): cold start.
+            return Ok(false);
+        };
+        let Ok(entries) = decode(&manifest) else {
+            // A corrupt manifest blob is the same accelerator-only failure.
+            return Ok(false);
+        };
 
         fs::create_dir_all(dir)?;
         // Entries are in parent-first order, so directories exist before their contents.
@@ -309,19 +326,33 @@ impl Cursor<'_> {
 }
 
 fn write_index(path: &Path, manifest_digest: &Digest) -> io::Result<()> {
-    let tmp = path.with_extension("tmp");
+    // Pid + nonce temp name: a fixed name would let two writers interleave on
+    // the same tmp file (the coarse workspace lock hides this today; the name
+    // discipline makes it safe regardless — the same rule as CAS puts).
+    let tmp = path.with_extension(format!("tmp.{}.{}", std::process::id(), tmp_nonce()));
+    // Crash-injection point: the index rename is the publish of a snapshot
+    // generation — dying here leaves the previous generation live.
+    anneal_core::crash_point("snapshot-index");
     fs::write(&tmp, manifest_digest.to_hex())?;
     fs::rename(&tmp, path)
 }
 
 fn read_index(path: &Path) -> io::Result<Option<Digest>> {
     match fs::read_to_string(path) {
-        Ok(hex) => Digest::from_hex(hex.trim())
-            .map(Some)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string())),
+        // Tolerant: a torn index (power loss between write and rename cannot
+        // tear a *published* index, but corruption/bit-rot can) is a cold
+        // start, not a build error — the accelerator degrade rule.
+        Ok(hex) => Ok(Digest::from_hex(hex.trim()).ok()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
     }
+}
+
+/// Distinct temp names within a process so concurrent saves can't collide.
+use std::sync::atomic::{AtomicU64, Ordering};
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+fn tmp_nonce() -> u64 {
+    TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 #[cfg(test)]

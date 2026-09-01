@@ -29,7 +29,7 @@
 
 use std::path::PathBuf;
 
-use anneal_core::Digest;
+use anneal_core::{Digest, Label};
 use anneal_exec::ActionBuilder;
 
 use crate::rule::RuleError;
@@ -113,12 +113,17 @@ impl StateHandle {
 }
 
 /// Derive the state key. Folds in the declaring rule's kind (§2.6 scoping),
-/// the namespace and shard (identity), the kind discriminant, and — for
-/// interleaved state — the attestation epoch (revocation).
-pub(crate) fn state_key(rule_kind: &str, decl: &PersistentStateDecl) -> Digest {
+/// the **declaring target's label** (owner identity — TODO.md P0 #4: distinct
+/// owners with identical toolchain and configuration shards must never share
+/// a warm tree or snapshot), the namespace and shard (identity), the kind
+/// discriminant, and — for interleaved state — the attestation epoch
+/// (revocation).
+pub(crate) fn state_key(rule_kind: &str, owner: &Label, decl: &PersistentStateDecl) -> Digest {
     let mut buf = Vec::new();
-    buf.extend_from_slice(b"anneal-state-v1\n");
+    buf.extend_from_slice(b"anneal-state-v2\n");
     buf.extend_from_slice(rule_kind.as_bytes());
+    buf.push(0);
+    buf.extend_from_slice(owner.to_string().as_bytes());
     buf.push(0);
     buf.extend_from_slice(decl.namespace.as_bytes());
     buf.push(0);
@@ -223,6 +228,10 @@ mod tests {
     use super::*;
     use anneal_exec::Action;
 
+    fn owner() -> Label {
+        Label::parse("//pkg:owner").unwrap()
+    }
+
     fn handle(kind: StateKind) -> StateHandle {
         let decl = PersistentStateDecl {
             namespace: "test-state",
@@ -231,7 +240,7 @@ mod tests {
             paths: vec![PathBuf::from("state")],
         };
         StateHandle {
-            key: state_key("test_rule", &decl),
+            key: state_key("test_rule", &owner(), &decl),
             kind,
             namespace: decl.namespace,
             paths: decl.paths,
@@ -284,18 +293,37 @@ mod tests {
             kind,
             paths: vec![],
         };
-        let e1 = state_key("rule_a", &decl(interleaved(1)));
-        let e2 = state_key("rule_a", &decl(interleaved(2)));
+        let owner = owner();
+        let e1 = state_key("rule_a", &owner, &decl(interleaved(1)));
+        let e2 = state_key("rule_a", &owner, &decl(interleaved(2)));
         assert_ne!(e1, e2, "epoch bump revokes: every derived key changes");
 
-        let other_rule = state_key("rule_b", &decl(interleaved(1)));
+        let other_rule = state_key("rule_b", &owner, &decl(interleaved(1)));
         assert_ne!(
             e1, other_rule,
             "rule-kind scoping: same decl, different rule, different key"
         );
 
-        let phase_a = state_key("rule_a", &decl(StateKind::PhaseSeparated));
+        let phase_a = state_key("rule_a", &owner, &decl(StateKind::PhaseSeparated));
         assert_ne!(e1, phase_a, "kind is part of identity");
+    }
+
+    #[test]
+    fn owner_identity_scopes_the_key() {
+        // P0 #4: two targets with bit-identical declarations (same rule kind,
+        // namespace, shard) must not share a warm tree — each owns its own.
+        let decl = PersistentStateDecl {
+            namespace: "ns",
+            shard: vec!["same-shard".into()],
+            kind: interleaved(1),
+            paths: vec![],
+        };
+        let a = state_key("rule_a", &Label::parse("//pkg:a").unwrap(), &decl);
+        let b = state_key("rule_a", &Label::parse("//pkg:b").unwrap(), &decl);
+        assert_ne!(
+            a, b,
+            "distinct owners with identical shards must not collide on one state tree"
+        );
     }
 
     #[test]
