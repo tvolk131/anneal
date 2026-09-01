@@ -1,6 +1,6 @@
 # Anneal architecture
 
-> **Status:** Current architecture overview, last reconciled July 14, 2026.
+> **Status:** Current architecture overview, last reconciled August 31, 2026.
 > The [README](README.md) owns feature availability. The contract documents under
 > [`docs/`](docs/README.md) own user- and rule-author-facing guarantees. Proposals describe
 > possible future work and are not part of this architecture.
@@ -93,19 +93,24 @@ warm directories and snapshot handling, live in
 
 ## 6. Local reuse, trust, and provenance
 
-The executor has a local content-addressed store, action-result cache, and snapshot store.
-Cache entries record provenance and a computed trust tier. `--require-enforced` can impose a
-minimum enforcement floor. `Promotable` currently records eligibility only; no remote backend
-uploads or downloads entries.
+The local `.anneal` store is owned by the `anneal-store` crate: a transportable,
+content-addressed half (`store/`) and a machine-bound half (`local/`), with a single
+capability-guarded workspace lock, lock-free readers over immutable files, and a
+crash-safety model pinned by crash-injection tests (see the
+[anneal-store proposal](docs/proposals/anneal-store.md)). Cache entries record provenance
+and a computed trust tier. `--require-enforced` can impose a minimum enforcement floor.
+`Promotable` currently records eligibility only; no remote backend uploads or downloads
+entries.
 
 An action-cache hit must be observationally interchangeable with executing the same action.
 Persistent native-tool state follows the same correctness-neutral invariant: warm and cold
 execution may differ in cost, not in declared outputs or success.
 
-Several pre-1.0 correctness-hardening tasks remain before Anneal should make a strong
-shared-cache promise. They are tracked at the top of [`TODO.md`](TODO.md), including complete
-action identity, file-digest memoization, generic action cache policy, and persistent-state
-owner identity.
+The identity-layer hardening tracked at the top of [`TODO.md`](TODO.md) has landed: complete
+action identity (including the declared output map), ctime/inode-hardened digest memoization,
+the explicit generic-action cacheability opt-in, and owner identity in persistent-state keys.
+Remaining before a strong shared-cache promise: broader cold-vs-warm neutrality verification
+and remote-cache admission rules.
 
 ## 7. Persistent native-tool state
 

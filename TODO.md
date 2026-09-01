@@ -8,21 +8,21 @@
 
 ## Priority 0 — correctness and trust
 
-- [ ] Include the complete declared output map in action identity and add collision tests for
+- [x] Include the complete declared output map in action identity and add collision tests for
       renamed logical outputs and changed destination paths.
-- [ ] Harden the file-digest memoization contract so a same-size, same-mtime content change
-      cannot reuse a stale digest. Decide the role of inode, ctime, file watchers, and a
-      paranoid verification path before remote publication exists.
-- [ ] Reconcile generic action cache policy with the rule contract. Arbitrary `genrule`
-      commands must not silently receive deterministic/cacheable treatment without an
-      explicit, enforceable policy.
-- [ ] Include sufficient workspace/package/target identity in persistent-state keys so
+- [x] Harden the file-digest memoization contract so a same-size, same-mtime content change
+      cannot reuse a stale digest. (Memo keys on mtime, size, ctime, and inode; file watchers
+      rejected; the paranoid path is reading bytes directly into `put`.)
+- [x] Reconcile generic action cache policy with the rule contract. `genrule` commands are
+      `NonCacheable` by default; caching requires the explicit `deterministic = True` claim.
+- [x] Include sufficient workspace/package/target identity in persistent-state keys so
       distinct owners with otherwise identical toolchain and configuration inputs cannot
-      collide.
+      collide. (State keys fold the declaring target's label.)
 - [ ] Expand cold-versus-warm correctness-neutrality verification across representative
       Cargo and pnpm pipelines, including content reverts and interrupted warm-state commits.
-- [ ] Audit every action-identity field against the rule contract and add a test that fails
-      when a newly added identity field is omitted from hashing.
+- [x] Audit every action-identity field against the rule contract and add a test that fails
+      when a newly added identity field is omitted from hashing. (`ActionIdentity` plus the
+      per-field variation suite in `anneal-exec/src/cache.rs`.)
 
 ## Priority 1 — production operation
 
@@ -32,7 +32,9 @@
 - [ ] Implement demand-driven action pruning so `build` and `test` execute only actions whose
       outputs are required by the requested operation.
 - [ ] Define interruption, cancellation, and concurrent-process behavior for all persistent
-      stores and cover it with process-level tests.
+      stores and cover it with process-level tests. (Interruption is covered by the
+      `ANNEAL_CRASH_AFTER` suite in `anneal-store`/`anneal-exec`/`anneal-cli`; cancellation
+      and concurrent-process behavior remain.)
 - [ ] Add subprocess-level CLI tests for materialization, refusal behavior, cleanup, and
       consumer-subgraph selection.
 - [ ] Decide whether aliases should forward or explicitly reject materialization routes.
@@ -116,6 +118,8 @@ Current benchmark methodology and indicative measurements live in
 
 The following have design value but are not required to establish Anneal's current thesis:
 
+- [`anneal-store` crate](docs/proposals/anneal-store.md) — single owner of the `.anneal/`
+  layout, locking, crash recovery, and transport boundary.
 - [Input sensing](docs/proposals/input-sensing.md)
 - [Remote/shared cache](docs/proposals/remote-cache.md)
 - [Linux VM execution](docs/proposals/linux-vm.md)
