@@ -178,9 +178,10 @@ store.gc(Policy::default()); store.fsck();        // later phases
   (reuse checks, import admission).
 
 Dependency direction: `anneal-store → anneal-cas, anneal-snapshot, anneal-core`;
-`anneal-exec → anneal-store`. Identity *computation* stays beside `Action` in
-`anneal-exec`; the store exposes digest-keyed persistence. Warm diff-sync logic stays in
-`warm.rs`; the store owns manifest load/save and the commit-record semantics. The test
+`anneal-exec → anneal-action, anneal-store`. Identity *computation* stays
+beside the `Action` model (the `anneal-action` crate); the store exposes
+digest-keyed persistence. Warm diff-sync logic stays in `warm.rs`; the store
+owns manifest load/save and the commit-record semantics. The test
 for what belongs in the crate: does it know a path under `.anneal/` or a policy about
 trusting `.anneal/` contents? If yes, it is store code; if it is about *what to build*,
 it is not.

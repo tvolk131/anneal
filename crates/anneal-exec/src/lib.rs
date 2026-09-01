@@ -2,19 +2,21 @@
 //!
 //! A deep module. Its public surface is essentially one method —
 //! [`Executor::execute`] — which turns an [`Action`] into an [`ActionResult`].
-//! Everything about *how* an action runs is hidden behind that interface, split
-//! into four private concerns (the layering from the design doc):
+//! Everything about *how* an action runs is hidden behind that interface. The
+//! *what* — the action spec and its cache identity — lives in `anneal-action`;
+//! the *have we already run this* — persisted results — lives in
+//! `anneal-store`. This crate is the how, split into private concerns:
 //!
 //! | module        | concern                | answers                         |
 //! |---------------|------------------------|---------------------------------|
-//! | [`action`]    | the action spec (§19.1) + cache-key | *what* is being run         |
-//! | [`cache`]     | action cache (§8.1)    | *have we already run this?*     |
+//! | [`executor`]  | orchestration + parallel scheduling | *what runs when, and in what order?* |
 //! | [`materializer`] | CAS ↔ filesystem (§3.4) | *where do the bytes go?*     |
 //! | [`sandbox`]   | OS isolation (§7.3)    | *what is the action allowed to do?* |
+//! | [`warm`]      | warm-tree reuse (§5)   | *how does native tool state survive?* |
 //!
-//! The orchestration that ties them together lives in [`executor`]. A caller of
-//! `execute` never names the sandbox or the materializer; the only knob that reaches
-//! them is the action's `execution_mode` field — data on the action, not an API.
+//! A caller of `execute` never names the sandbox or the materializer; the only
+//! knob that reaches them is the action's `execution_mode` — data on the
+//! action, not an API.
 //!
 //! ## Scope
 //!
