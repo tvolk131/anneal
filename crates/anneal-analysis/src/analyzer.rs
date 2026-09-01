@@ -76,10 +76,52 @@ impl ActionGraph {
         self.targets.get(label).map(|t| t.routed_data.as_slice())
     }
 
+    /// The actions one target's rule contributed (the per-target slice the
+    /// flat [`ActionGraph::actions`] view concatenates). Demand selection
+    /// reads this to find a target's test-result outputs.
+    pub fn target_actions(&self, label: &Label) -> Option<&[Action]> {
+        self.targets.get(label).map(|t| t.actions.as_slice())
+    }
+
     /// The targets in dependency order.
     pub fn order(&self) -> &[Label] {
         &self.order
     }
+}
+
+/// The demanded action subgraph for an operation on `label` (demand-driven
+/// pruning): every action reachable backward from the operation's terminals
+/// — `label`'s output-backed providers, plus its test-result outputs when
+/// `include_tests`. Source-backed providers need no work. An alias label
+/// works for providers (they forward) but contributes no test terminals of
+/// its own — callers resolve alias chains first.
+pub fn demanded_actions(graph: &ActionGraph, label: &Label, include_tests: bool) -> Vec<Action> {
+    let mut terminals: Vec<anneal_exec::Terminal> = graph
+        .providers(label)
+        .into_iter()
+        .flat_map(|p| p.files.iter().flat_map(|f| f.files.iter()))
+        .filter_map(|artifact| match &artifact.source {
+            ArtifactSource::Output { action, name } => Some(anneal_exec::Terminal {
+                action: action.clone(),
+                output: name.clone(),
+            }),
+            ArtifactSource::Source(_) => None,
+        })
+        .collect();
+    if include_tests {
+        for action in graph.target_actions(label).into_iter().flatten() {
+            for name in action.outputs().keys() {
+                if name == anneal_exec::TEST_RESULT_OUTPUT {
+                    terminals.push(anneal_exec::Terminal {
+                        action: action.name().to_owned(),
+                        output: name.clone(),
+                    });
+                }
+            }
+        }
+    }
+    let all: Vec<Action> = graph.actions().cloned().collect();
+    anneal_exec::demanded(&all, &terminals)
 }
 
 /// Analyzes targets from a [`TargetGraph`] under a fixed [`Configuration`].

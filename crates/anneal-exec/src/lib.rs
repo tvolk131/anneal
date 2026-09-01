@@ -28,6 +28,9 @@
 //! Linux.
 //! The precise sealed-mode contract lives in `docs/sandbox-contract.md`.
 
+/// Demand-driven pruning: which actions an operation may run (backward
+/// reachability from demanded outputs over the scheduler's edge set).
+mod demand;
 mod executor;
 /// Native fixed-output downloads (§FOD): the executor fetches pinned blobs
 /// in-process (rustls + embedded Mozilla roots) — no curl, no sandbox, no
@@ -54,6 +57,7 @@ mod verify;
 /// snapshot-owner path via `LocalExecutor::warm_reuse`.
 mod warm;
 
+pub use demand::{demanded, Terminal, TEST_RESULT_OUTPUT};
 pub use executor::{ActionResult, ExecError, Executor, LocalExecutor, PhaseTimings, SandboxError};
 pub use fetch::FetchError;
 pub use trust::compute_tier;

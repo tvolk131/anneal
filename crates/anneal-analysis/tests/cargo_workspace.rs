@@ -393,3 +393,47 @@ fn ws_path(ws: &std::path::Path, rel: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(ws).unwrap();
     ws.join(rel)
 }
+
+/// Demand pruning over a real rule: `build` demands no test actions;
+/// `test` demands the target's own test run. The rule emits build,
+/// test-compile, and test-run actions for one label — exactly the shape
+/// pruning exists for.
+#[test]
+fn build_demands_no_test_actions_test_demands_the_test_run() {
+    let tmp = cargo_fixture();
+    let root = tmp.path();
+    let registry = builtin_rules();
+    let graph = load_package(root, "ws", &registry).unwrap();
+    let cfg = config(OptLevel::Debug);
+    let exec = LocalExecutor::new(root.join(".anneal")).unwrap();
+    let label = anneal_core::Label::parse("//ws:ws").unwrap();
+    let g = Analyzer::new(&graph, &registry, &cfg, root, exec.cas())
+        .analyze(&label)
+        .unwrap();
+
+    let build_set = anneal_analysis::demanded_actions(&g, &label, false);
+    assert!(
+        build_set
+            .iter()
+            .any(|a| a.name().starts_with("cargo_workspace build")),
+        "the build action must be demanded"
+    );
+    assert!(
+        build_set.iter().all(|a| !a.name().contains("test")),
+        "build must demand no test actions: {:?}",
+        build_set.iter().map(|a| a.name()).collect::<Vec<_>>()
+    );
+
+    let test_set = anneal_analysis::demanded_actions(&g, &label, true);
+    assert!(
+        test_set
+            .iter()
+            .any(|a| a.name().starts_with("cargo_workspace test-run")),
+        "test must demand the target's test-run action"
+    );
+    assert!(test_set.len() > build_set.len());
+    assert!(
+        test_set.len() < g.actions().count(),
+        "something must be pruned"
+    );
+}

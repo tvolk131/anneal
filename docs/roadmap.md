@@ -24,8 +24,8 @@ Anneal currently provides a local build-system vertical slice:
 - Nix-manifest-backed first-party toolchains and pinned fixed-output downloads.
 
 The current product is pre-1.0. It requires Nix for the supported adopter path, has no remote
-cache or store garbage collection, executes the full analyzed action set for ordinary builds,
-and has correctness-hardening work listed in [`TODO.md`](../TODO.md).
+cache or store garbage collection, and has correctness-hardening work listed in
+[`TODO.md`](../TODO.md). Ordinary builds execute the demanded action subgraph.
 
 ## Next — production confidence
 

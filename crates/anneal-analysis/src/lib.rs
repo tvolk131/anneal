@@ -29,5 +29,5 @@
 mod analyzer;
 mod error;
 
-pub use analyzer::{ActionGraph, AnalyzedTarget, Analyzer};
+pub use analyzer::{demanded_actions, ActionGraph, AnalyzedTarget, Analyzer};
 pub use error::AnalysisError;

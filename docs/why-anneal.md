@@ -235,7 +235,6 @@ Important current boundaries include:
 - no automatic onboarding or Anneal-managed tool provisioning;
 - no general input-sensing or trust-explanation command;
 - no Linux VM execution path on macOS;
-- no demand-driven pruning for ordinary `build` and `test`;
 - coarse first-party rule granularity and incomplete ecosystem coverage;
 - known cache-identity and persistent-state hardening tasks listed in
   [`TODO.md`](../TODO.md).
