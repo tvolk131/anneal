@@ -203,7 +203,11 @@ fn run(cli: Cli) -> Result<i32, String> {
                 cli.config.exec_mode.is_none(),
             ),
             (None, None) => Err("specify a target label or --base <git-ref>".to_owned()),
-            (Some(_), Some(_)) => unreachable!("clap rejects target with --base"),
+            // clap rejects the pair (conflicts_with); stay defensive rather
+            // than panic if the flag grammar ever drifts.
+            (Some(target), Some(_)) => Err(format!(
+                "specify either a target ({target}) or --base, not both"
+            )),
         },
         Command::Materialize {
             target,
@@ -689,22 +693,11 @@ fn analyze_target(
     let label = Label::parse(target).map_err(|e| format!("invalid target {target:?}: {e}"))?;
     let registry = builtin_rules();
     // A mutating command takes the workspace write capability for its whole
-    // run (`anneal-store`): the exclusive `flock`, boot recovery, and every
-    // store write behind the guard. Read-only commands (`affected`/`why`)
-    // never acquire it — they read immutable, atomically-published state.
-    let store =
-        Store::open(root.join(".anneal")).map_err(|e| format!("opening .anneal store: {e}"))?;
-    let guard = store
-        .lock()
-        .map_err(|e| format!("acquiring workspace lock: {e}"))?;
+    // run (`anneal-store`). Read-only commands (`affected`/`why`) never
+    // acquire it — they read immutable, atomically-published state.
+    let (store, guard, exec) = locked_exec(root, jobs, require_enforced)?;
     // Load the target's transitive package closure (cross-package deps included).
     let graph = load_closure(root, &label, &registry).map_err(|e| e.to_string())?;
-    let exec = LocalExecutor::with_store_guard(store.clone(), guard.clone());
-    let exec = match jobs {
-        Some(j) => exec.jobs(j),
-        None => exec,
-    };
-    let exec = exec.require_enforced(require_enforced);
     // Tree copies written by `anneal materialize` are not sources: exclude
     // them from every rule's source discovery (otherwise they'd shadow the
     // producing action's declared output — an analysis-time hard error — and

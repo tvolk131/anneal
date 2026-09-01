@@ -525,3 +525,35 @@ fn test_requires_a_target_or_base() {
     let out = anneal(tmp.path(), &["test"]);
     assert!(!out.status.success());
 }
+
+#[test]
+fn test_base_on_an_unowned_change_goes_workspace_wide() {
+    // A change outside any package can't be scoped — everything is affected,
+    // loudly: both packages' tests run.
+    let ws = exec_ws("0");
+    std::fs::write(ws.path().join("README.md"), "unowned\n").unwrap();
+    git(ws.path(), &["add", "."]);
+    git(ws.path(), &["commit", "-q", "-m", "readme"]);
+
+    let out = anneal(ws.path(), &["test", "--base", "main"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("//pkg-a:t"), "{stdout}");
+    assert!(stdout.contains("//pkg-b:t"), "{stdout}");
+    assert!(stdout.contains("tests: 2 passed, 0 failed"), "{stdout}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("whole workspace"),
+        "the conservative fallback must be announced"
+    );
+}
+
+#[test]
+fn test_target_and_base_are_mutually_exclusive() {
+    let ws = exec_ws("0");
+    let out = anneal(ws.path(), &["test", "//pkg-a:t", "--base", "main"]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "clap rejects the pair with a usage error, not a panic"
+    );
+}
