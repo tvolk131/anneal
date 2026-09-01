@@ -36,7 +36,11 @@ docker build \
 
 # `docker run` returns anneal's exit code (failures propagate); --privileged
 # is what makes the bwrap namespace probe pass. /nix is read-only so the
-# sandbox mounts toolchain closures from the manifest's store paths.
+# sandbox mounts toolchain closures from the manifest's store paths. The
+# checkout is runner-owned while the container runs as root, so git's
+# safe.directory check is allowed via environment config (no file needed —
+# and the comment must stay OUTSIDE the continued command, where a `#`
+# would swallow the rest of the invocation).
 docker run \
   --rm \
   --privileged \
@@ -44,8 +48,6 @@ docker run \
   -v "$repo/.anneal:/work/.anneal" \
   -v /nix:/nix:ro \
   -e "ANNEAL_TOOLCHAIN_MANIFEST=$manifest" \
-  # The checkout is runner-owned; the container runs as root. Allow git's
-  # safe.directory check via environment config (no file needed).
   -e GIT_CONFIG_COUNT=1 \
   -e GIT_CONFIG_KEY_0=safe.directory \
   -e GIT_CONFIG_VALUE_0=/work \
