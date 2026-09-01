@@ -178,6 +178,9 @@ impl Rule for CargoWorkspace {
         let exclude = ctx.attrs().string_list_opt("exclude")?;
         let excluded = |rel: &std::path::Path| -> bool {
             exclude.iter().any(|e| {
+                // Tolerate a trailing slash in the declaration ("docs/"):
+                // without normalization it would silently exclude nothing.
+                let e = e.trim_end_matches('/');
                 rel == std::path::Path::new(e) || rel.starts_with(format!("{e}/").as_str())
             })
         };

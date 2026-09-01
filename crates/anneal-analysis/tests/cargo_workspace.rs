@@ -466,7 +466,7 @@ fn excluded_files_do_not_change_action_identity() {
     std::fs::write(ws.join("docs/guide.md"), "guide\n").unwrap();
     std::fs::write(
         ws.join("BUILD"),
-        "cargo_workspace(name = \"ws\", exclude = [\"docs\", \"NOTES.md\"])\n",
+        "cargo_workspace(name = \"ws\", exclude = [\"docs/\", \"NOTES.md\"])\n",
     )
     .unwrap();
 

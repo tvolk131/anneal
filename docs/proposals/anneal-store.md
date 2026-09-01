@@ -196,7 +196,12 @@ mean*. Imports verify blob digests, require provenance lines, and honor the enfo
 floor. Mark-and-sweep export (entries touched this run plus the imported set) keeps
 exports incremental. This boundary is also the local half of the
 [remote cache proposal](remote-cache.md); a remote backend substitutes for the archive
-without changing it.
+without changing it. The dogfood CI job exercises it today: `actions/cache`
+persists `store/` across runs (directory-restore within one repository's
+trust domain — GitHub's branch-scoped cache isolation means poisoning
+requires merged code), which is why a docs-only PR is a cache hit and a
+code PR executes only its affected cone. The `export`/`import` commands
+remain future work for cross-repo transports that need admission checks.
 
 ## 7. Absorbed correctness work
 

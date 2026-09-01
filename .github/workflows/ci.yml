@@ -121,10 +121,26 @@ jobs:
           key: anneal-store-v1-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'BUILD') }}
           restore-keys: anneal-store-v1-${{ runner.os }}-
 
-      - name: anneal test --base origin/master
+      # PRs diff from where they diverged from master. A push to master
+      # cannot use origin/master as its own base — checkout puts the ref at
+      # the pushed SHA, so the merge-base is HEAD and the run would be an
+      # empty no-op that saves an empty store. Master runs diff against
+      # HEAD~1 (the merge commit's first parent = the previous master tip),
+      # which is the PR's change set and what seeds the cache.
+      - name: Resolve dogfood base
+        id: base
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "ref=origin/master" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=HEAD~1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: anneal test --base
         env:
           ANNEAL_TOOLCHAIN_MANIFEST: ${{ steps.nix.outputs.manifest }}
           ANNEAL_BIN: target/release/anneal
+          ANNEAL_LINUX_SANDBOX_COMMAND: test --base ${{ steps.base.outputs.ref }} --require-enforced
         run: ./scripts/dogfood-linux.sh
 
       - name: Save the anneal store
