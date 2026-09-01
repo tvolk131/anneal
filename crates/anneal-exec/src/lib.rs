@@ -1,7 +1,7 @@
 //! `anneal-exec` — the execution kernel (§7).
 //!
 //! A deep module. Its public surface is essentially one method —
-//! [`Executor::execute`] — which turns an [`Action`] into an [`ActionResult`].
+//! [`Executor::execute`] — which turns an [`anneal_action::Action`] into an [`ActionResult`].
 //! Everything about *how* an action runs is hidden behind that interface. The
 //! *what* — the action spec and its cache identity — lives in `anneal-action`;
 //! the *have we already run this* — persisted results — lives in
@@ -9,10 +9,10 @@
 //!
 //! | module        | concern                | answers                         |
 //! |---------------|------------------------|---------------------------------|
-//! | [`executor`]  | orchestration + parallel scheduling | *what runs when, and in what order?* |
-//! | [`materializer`] | CAS ↔ filesystem (§3.4) | *where do the bytes go?*     |
-//! | [`sandbox`]   | OS isolation (§7.3)    | *what is the action allowed to do?* |
-//! | [`warm`]      | warm-tree reuse (§5)   | *how does native tool state survive?* |
+//! | `executor`    | orchestration + parallel scheduling | *what runs when, and in what order?* |
+//! | `materializer` | CAS ↔ filesystem (§3.4) | *where do the bytes go?*     |
+//! | `sandbox`     | OS isolation (§7.3)    | *what is the action allowed to do?* |
+//! | `warm`        | warm-tree reuse (§5)   | *how does native tool state survive?* |
 //!
 //! A caller of `execute` never names the sandbox or the materializer; the only
 //! knob that reaches them is the action's `execution_mode` — data on the
