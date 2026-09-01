@@ -44,6 +44,11 @@ docker run \
   -v "$repo/.anneal:/work/.anneal" \
   -v /nix:/nix:ro \
   -e "ANNEAL_TOOLCHAIN_MANIFEST=$manifest" \
+  # The checkout is runner-owned; the container runs as root. Allow git's
+  # safe.directory check via environment config (no file needed).
+  -e GIT_CONFIG_COUNT=1 \
+  -e GIT_CONFIG_KEY_0=safe.directory \
+  -e GIT_CONFIG_VALUE_0=/work \
   -w /work \
   "$image" \
   "./$anneal_bin" $command
