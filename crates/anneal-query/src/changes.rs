@@ -218,19 +218,30 @@ mod tests {
         );
     }
 
-    fn repo() -> Repo {
+    /// These tests exercise real git and skip when git is not on PATH —
+    /// e.g. inside a sealed action sandbox whose toolchain carries no git
+    /// (the CI test lane runs them with git present).
+    fn repo() -> Option<Repo> {
+        if !std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+        {
+            eprintln!("skipping: git is not on PATH");
+            return None;
+        }
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
         git_ok(&root, &["init", "-q", "-b", "main"]);
         fs::write(root.join("base.txt"), "base\n").unwrap();
         git_ok(&root, &["add", "."]);
         git_ok(&root, &["commit", "-q", "-m", "base"]);
-        Repo { _tmp: tmp, root }
+        Some(Repo { _tmp: tmp, root })
     }
 
     #[test]
     fn changed_since_is_the_literal_diff() {
-        let r = repo();
+        let Some(r) = repo() else { return };
         fs::write(r.root.join("base.txt"), "edited\n").unwrap();
         fs::write(r.root.join("new.txt"), "new\n").unwrap();
         git_ok(&r.root, &["add", "."]);
@@ -247,7 +258,7 @@ mod tests {
         // past the divergence point, --base still reports only this branch's
         // changes. Diffing against the ref tip would (wrongly) include the
         // target branch's own new files as "changes".
-        let r = repo();
+        let Some(r) = repo() else { return };
         git_ok(&r.root, &["checkout", "-q", "-b", "feature"]);
         fs::write(r.root.join("feature.txt"), "f\n").unwrap();
         git_ok(&r.root, &["add", "."]);
@@ -270,7 +281,7 @@ mod tests {
 
     #[test]
     fn untracked_lists_new_files_but_not_ignored_debris() {
-        let r = repo();
+        let Some(r) = repo() else { return };
         fs::write(r.root.join(".gitignore"), "ignored-dir/\n*.log\n").unwrap();
         git_ok(&r.root, &["add", "."]);
         git_ok(&r.root, &["commit", "-q", "-m", "gitignore"]);
@@ -290,7 +301,7 @@ mod tests {
     fn untracked_excludes_the_anneal_store_itself() {
         // Without this, the first build (which creates `.anneal/`) would turn
         // every later change query workspace-wide in un-gitignored repos.
-        let r = repo();
+        let Some(r) = repo() else { return };
         fs::create_dir_all(r.root.join(".anneal/store/objects")).unwrap();
         fs::write(r.root.join(".anneal/store/objects/blob"), b"x").unwrap();
         fs::write(r.root.join("real.txt"), "r\n").unwrap();
@@ -299,7 +310,7 @@ mod tests {
 
     #[test]
     fn dirty_covers_modified_untracked_and_renames() {
-        let r = repo();
+        let Some(r) = repo() else { return };
         fs::write(r.root.join("base.txt"), "edited\n").unwrap();
         fs::write(r.root.join("fresh.txt"), "fresh\n").unwrap();
         let dirty = dirty(&r.root).unwrap();
@@ -322,7 +333,7 @@ mod tests {
 
     #[test]
     fn tracked_filters_and_ignored_answers() {
-        let r = repo();
+        let Some(r) = repo() else { return };
         fs::write(r.root.join("untracked.txt"), "u\n").unwrap();
         let tracked = tracked(
             &r.root,
@@ -334,7 +345,7 @@ mod tests {
 
     #[test]
     fn a_missing_ref_is_a_clear_error() {
-        let r = repo();
+        let Some(r) = repo() else { return };
         let err = changed_base(&r.root, "no-such-ref").unwrap_err();
         assert!(err.to_string().contains("no-such-ref"), "{err}");
     }

@@ -107,6 +107,13 @@ const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-
 const SCHEMA: &[AttrSchema] = &[
     AttrSchema::optional("data", AttrType::LabelList),
     AttrSchema::optional("native_libs", AttrType::StringList),
+    // Paths (files or directory prefixes, relative to the package) that are
+    // never build inputs — docs, CI config, spike dirs in a workspace whose
+    // package root is also the repository root. Excluded files do not enter
+    // source discovery, so editing one leaves every action identity unchanged
+    // (a cache hit wherever the store persists). The list is the rule author's
+    // claim that no excluded file affects the build; anneal does not verify it.
+    AttrSchema::optional("exclude", AttrType::StringList),
 ];
 
 pub struct CargoWorkspace;
@@ -168,9 +175,21 @@ impl Rule for CargoWorkspace {
         } else {
             IGNORED_DIRS
         };
+        let exclude = ctx.attrs().string_list_opt("exclude")?;
+        let excluded = |rel: &std::path::Path| -> bool {
+            exclude.iter().any(|e| {
+                // Tolerate a trailing slash in the declaration ("docs/"):
+                // without normalization it would silently exclude nothing.
+                let e = e.trim_end_matches('/');
+                rel == std::path::Path::new(e) || rel.starts_with(format!("{e}/").as_str())
+            })
+        };
         let sources = diagnostics::time("cargo_workspace.source_tree", || {
             ctx.source_tree(Path::new("."), ignored)
-        })?;
+        })?
+        .into_iter()
+        .filter(|artifact| !excluded(&artifact.path))
+        .collect::<Vec<_>>();
         if sources.is_empty() {
             return Err(RuleError::Message(
                 "cargo_workspace: no source files found in the package".to_owned(),

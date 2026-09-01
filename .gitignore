@@ -10,3 +10,6 @@
 
 # `nix build` output symlink
 /result
+
+# macOS noise
+.DS_Store

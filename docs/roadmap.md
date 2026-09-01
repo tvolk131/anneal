@@ -22,6 +22,8 @@ Anneal currently provides a local build-system vertical slice:
 - the CI oracle form of `affected` (`--base` merge-base scoping, `--format json`)
   plus dependency-impact and shortest-path queries through `affected` and `why`;
 - Nix-manifest-backed first-party toolchains and pinned fixed-output downloads.
+- the dogfood: anneal's own CI builds and unit-tests anneal itself via
+  `test --base`, with `.anneal/store` persisted across runs by `actions/cache`.
 
 The current product is pre-1.0. It requires Nix for the supported adopter path, has no remote
 cache or store garbage collection, and has correctness-hardening work listed in
