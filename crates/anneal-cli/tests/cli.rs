@@ -42,6 +42,14 @@ fn build_runs_the_graph_and_caches() {
     assert!(stdout.contains("genrule //pkg:gen"), "stdout:\n{stdout}");
     assert!(stdout.contains("build ok"), "stdout:\n{stdout}");
 
+    // The summary reports the demand split (here 1/1 — a single-action
+    // closure demands everything it analyzed).
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("demanded"),
+        "the build summary reports demand: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
     // An identical re-run hits the action cache.
     let again = anneal(ws.path(), &["build", "//pkg:gen"]);
     assert!(

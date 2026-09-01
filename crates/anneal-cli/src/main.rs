@@ -411,25 +411,28 @@ fn build(
     auto_cone: bool,
 ) -> Result<i32, String> {
     let pipeline = analyze_target(target, config, root, jobs, require_enforced, auto_cone)?;
+    let (actions, pruned) = demanded_for(&pipeline, /*include_tests*/ false);
     let results = pipeline
         .exec
-        .execute_graph_observed(&pipeline.actions, &|action, result| {
+        .execute_graph_observed(&actions, &|action, result| {
             print_action_status(action, result)
         })
         .map_err(|e| e.to_string())?;
 
     let (failed, skipped) = failure_counts(&results);
     let cached = results.iter().filter(|r| r.cache_hit).count();
+    let total = pipeline.actions.len();
     if failed > 0 || skipped > 0 {
         eprintln!(
             "build FAILED — {failed}/{} action(s) failed ({skipped} skipped)",
-            pipeline.actions.len()
+            actions.len()
         );
         Ok(1)
     } else {
         println!(
-            "build ok — {} action(s) ({cached} cached)",
-            pipeline.actions.len()
+            "build ok — {}/{} action(s) demanded ({cached} cached, {pruned} pruned)",
+            actions.len(),
+            total
         );
         Ok(0)
     }
@@ -445,9 +448,10 @@ fn test(
     auto_cone: bool,
 ) -> Result<i32, String> {
     let pipeline = analyze_target(target, config, root, jobs, require_enforced, auto_cone)?;
+    let (actions, pruned) = demanded_for(&pipeline, /*include_tests*/ true);
     let results = pipeline
         .exec
-        .execute_graph_observed(&pipeline.actions, &|action, result| {
+        .execute_graph_observed(&actions, &|action, result| {
             print_action_status(action, result)
         })
         .map_err(|e| e.to_string())?;
@@ -476,7 +480,11 @@ fn test(
         println!("no test targets found for {target}");
         return Ok(0);
     }
-    println!("tests: {passed} passed, {failed} failed");
+    println!(
+        "tests: {passed} passed, {failed} failed ({}/{} action(s) demanded, {pruned} pruned)",
+        actions.len(),
+        pipeline.actions.len()
+    );
     if failed > 0 || action_failures > 0 {
         Ok(1)
     } else {
@@ -489,6 +497,7 @@ fn test(
 /// the pipeline is dropped, so a mutating command stays exclusive for its
 /// whole run, post-execution tree writes (`materialize`) included.
 struct Pipeline {
+    label: Label,
     graph: ActionGraph,
     actions: Vec<Action>,
     exec: LocalExecutor,
@@ -570,12 +579,54 @@ fn analyze_target(
     let analyzed = analyzer.analyze(&label).map_err(|e| e.to_string())?;
     let actions: Vec<Action> = analyzed.actions().cloned().collect();
     Ok(Pipeline {
+        label: label.clone(),
         graph: analyzed,
         actions,
         exec,
         _store: store,
         _guard: guard,
     })
+}
+
+/// The demanded subgraph for an operation: every action reachable backward
+/// from the terminals through the dependency edges. `build` demands the
+/// requested target's exposed providers; `test` additionally demands its
+/// test-result outputs (the same convention the summary reads). Returns the
+/// pruned action list and how many were pruned, for honest reporting.
+fn demanded_for(pipeline: &Pipeline, include_tests: bool) -> (Vec<Action>, usize) {
+    let mut terminals: Vec<anneal_exec::Terminal> = pipeline
+        .graph
+        .providers(&pipeline.label)
+        .into_iter()
+        .flat_map(|p| p.files.iter().flat_map(|f| f.files.iter()))
+        .filter_map(|artifact| match &artifact.source {
+            ArtifactSource::Output { action, name } => Some(anneal_exec::Terminal {
+                action: action.clone(),
+                output: name.clone(),
+            }),
+            ArtifactSource::Source(_) => None,
+        })
+        .collect();
+    if include_tests {
+        for action in pipeline
+            .graph
+            .target_actions(&pipeline.label)
+            .into_iter()
+            .flatten()
+        {
+            for name in action.outputs().keys() {
+                if name == anneal_exec::TEST_RESULT_OUTPUT {
+                    terminals.push(anneal_exec::Terminal {
+                        action: action.name().to_owned(),
+                        output: name.clone(),
+                    });
+                }
+            }
+        }
+    }
+    let demanded = anneal_exec::demanded(&pipeline.actions, &terminals);
+    let pruned = pipeline.actions.len() - demanded.len();
+    (demanded, pruned)
 }
 
 /// `materialize <target>`: make the target's tree view match its sandbox.

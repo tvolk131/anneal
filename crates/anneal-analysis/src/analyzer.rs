@@ -76,6 +76,13 @@ impl ActionGraph {
         self.targets.get(label).map(|t| t.routed_data.as_slice())
     }
 
+    /// The actions one target's rule contributed (the per-target slice the
+    /// flat [`ActionGraph::actions`] view concatenates). Demand selection
+    /// reads this to find a target's test-result outputs.
+    pub fn target_actions(&self, label: &Label) -> Option<&[Action]> {
+        self.targets.get(label).map(|t| t.actions.as_slice())
+    }
+
     /// The targets in dependency order.
     pub fn order(&self) -> &[Label] {
         &self.order

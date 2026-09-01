@@ -29,8 +29,10 @@
 - [ ] Implement garbage collection and retention for CAS blobs, action results, snapshots,
       warm directories, and fixed-output downloads.
 - [ ] Add cache/store inspection and cleanup commands with dry-run support.
-- [ ] Implement demand-driven action pruning so `build` and `test` execute only actions whose
-      outputs are required by the requested operation.
+- [x] Implement demand-driven action pruning so `build` and `test` execute only actions whose
+      outputs are required by the requested operation. (`anneal-exec::demand`: backward
+      reachability from the operation's terminals over data and snapshot-owner edges; phase
+      vocabulary arrives later as addressable test targets and typed results.)
 - [ ] Define interruption, cancellation, and concurrent-process behavior for all persistent
       stores and cover it with process-level tests. (Interruption is covered by the
       `ANNEAL_CRASH_AFTER` suite in `anneal-store`/`anneal-exec`/`anneal-cli`; cancellation
