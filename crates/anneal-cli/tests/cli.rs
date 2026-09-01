@@ -305,6 +305,19 @@ fn affected_with_no_changes_exits_zero() {
     let out = anneal(tmp.path(), &["affected", "--base", "main"]);
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains("no changes"));
+
+    // The format is part of the contract even for the empty answer: JSON in,
+    // JSON out — a consumer must never hit a parse error on success.
+    let out = anneal(
+        tmp.path(),
+        &["affected", "--base", "main", "--format", "json"],
+    );
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim())
+        .expect("no-changes is still one JSON object");
+    assert_eq!(v["changed_files"], serde_json::json!([]));
+    assert_eq!(v["targets"], serde_json::json!([]));
+    assert_eq!(v["workspace_wide"], false);
 }
 
 #[test]

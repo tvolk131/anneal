@@ -334,8 +334,21 @@ fn affected(
     changed.sort();
     changed.dedup();
 
+    // The requested format is part of the contract whenever the query
+    // succeeds — including the empty answer.
     if changed.is_empty() {
-        println!("no changes since {base_desc}");
+        if format == Some("json") {
+            let json = serde_json::json!({
+                "base": base_desc,
+                "changed_files": [],
+                "unowned": [],
+                "workspace_wide": false,
+                "targets": [],
+            });
+            println!("{json}");
+        } else {
+            println!("no changes since {base_desc}");
+        }
         return Ok(0);
     }
     let graph = load_workspace(root, &builtin_rules()).map_err(|e| e.to_string())?;
