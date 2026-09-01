@@ -62,13 +62,24 @@ pub enum LinkKind {
     Copied,
 }
 
-/// One `(file-identity → digest)` record. The identity is `(mtime, size)`; a match
-/// lets [`Cas::ingest_file`] return the digest without re-reading or re-hashing the
-/// file body. Content-blind, exactly as cargo's own fingerprint is (see `ingest_file`).
+/// One `(file-identity → digest)` record. The identity is
+/// `(mtime, size, ctime, inode)`; a match lets [`Cas::ingest_file`] return the
+/// digest without re-reading or re-hashing the file body.
+///
+/// `ctime` (inode change time) is the hardening against the classic
+/// same-size/same-mtime replacement (TODO.md P0): mtime can be restored by
+/// whoever rewrites the file, but **ctime cannot be set by user code** — every
+/// content write moves it — so a swapped-in body at an identical mtime and size
+/// still misses the memo and is re-hashed. `inode` additionally catches a
+/// replace-by-rename that lands on a fresh inode.
 #[derive(Debug, Clone, Copy)]
 struct CacheEntry {
     mtime_nanos: u128,
     size: u64,
+    /// Unix `(ctime_secs, ctime_nanos)`; `None` where the platform has no ctime
+    /// (then the memo falls back to the historical mtime+size trade-off).
+    ctime: Option<(i64, u32)>,
+    inode: u64,
     digest: Digest,
 }
 
@@ -94,12 +105,29 @@ pub struct Cas {
 }
 
 impl Cas {
-    /// Open (creating if necessary) a store rooted at `root`.
+    /// Open (creating if necessary) a store rooted at `root`, with the digest
+    /// memo at `<root>/digest-cache`. The single-root convenience; the anneal
+    /// store layout uses [`Cas::open_split`] to keep the memo on the
+    /// machine-local side (`docs/proposals/anneal-store.md` §2).
     pub fn open(root: impl Into<PathBuf>) -> io::Result<Self> {
         let root = root.into();
-        let objects = root.join("objects");
+        Self::open_split(root.join("objects"), root.join("digest-cache"))
+    }
+
+    /// Open (creating if necessary) a store whose blobs live under
+    /// `objects_root` and whose digest memo is the file `memo_path`. Split so a
+    /// transportable blob tree and a machine-bound memo can live on opposite
+    /// sides of the store/local layout boundary.
+    pub fn open_split(
+        objects_root: impl Into<PathBuf>,
+        memo_path: impl Into<PathBuf>,
+    ) -> io::Result<Self> {
+        let objects = objects_root.into();
         fs::create_dir_all(&objects)?;
-        let cache_path = root.join("digest-cache");
+        let cache_path = memo_path.into();
+        if let Some(parent) = cache_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         let digest_cache = Mutex::new(load_digest_cache(&cache_path));
         Ok(Cas {
             objects,
@@ -124,6 +152,9 @@ impl Cas {
         let nonce = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let tmp = shard.join(format!(".tmp.{}.{}", std::process::id(), nonce));
         fs::write(&tmp, bytes)?;
+        // Crash-injection point: die after the data is written but before the
+        // rename publishes it — the "orphaned tmp debris" crash state.
+        anneal_core::crash_point("blob-put");
         match fs::rename(&tmp, &path) {
             Ok(()) => Ok(digest),
             Err(e) => {
@@ -144,25 +175,24 @@ impl Cas {
     ///
     /// Reading and SHA-256-ing a file scales with its size and, across a whole input
     /// tree, dominates analysis on a file-heavy repo (vendored deps = thousands of
-    /// files). So we cache `(path, mtime, size) → digest`: if the file's mtime and size
-    /// match a prior ingest *and* that blob is still in the store, we return the cached
-    /// digest after only a `stat` — never touching the file body. On any mismatch (or a
-    /// missing blob — the cache self-heals against GC/corruption) we fall back to the
-    /// full read+hash and refresh the entry.
+    /// files). So we cache `(path, mtime, size, ctime, inode) → digest`: if the
+    /// file's identity matches a prior ingest *and* that blob is still in the store,
+    /// we return the cached digest after only a `stat` — never touching the file
+    /// body. On any mismatch (or a missing blob — the cache self-heals against
+    /// GC/corruption) we fall back to the full read+hash and refresh the entry.
     ///
-    /// This is content-*blind*, the same trade-off cargo's own fingerprint makes: a
-    /// content change that preserves both mtime and size would be missed. Real edits
-    /// always move mtime, and the cache is local + cheaply rebuilt, but callers needing
-    /// absolute certainty should use [`put`](Cas::put) on bytes they have read themselves.
+    /// ctime is the memo's hardening (see [`CacheEntry`]): it moves on every
+    /// content write and cannot be restored by user code, so a same-size,
+    /// same-mtime replacement cannot reuse a stale digest.
     pub fn ingest_file(&self, path: &Path) -> io::Result<Digest> {
         let meta = fs::metadata(path)?;
         let identity = file_identity(&meta);
 
         // Fast path: a matching identity whose blob is still present.
-        if let Some((mtime, size)) = identity {
+        if let Some(id) = identity {
             let cached = self.digest_cache.lock().unwrap().entries.get(path).copied();
             if let Some(e) = cached {
-                if e.mtime_nanos == mtime && e.size == size && self.has(&e.digest) {
+                if e.matches(id) && self.has(&e.digest) {
                     return Ok(e.digest);
                 }
             }
@@ -172,16 +202,11 @@ impl Cas {
         self.reads.fetch_add(1, Ordering::Relaxed);
         let bytes = fs::read(path)?;
         let digest = self.put(&bytes)?;
-        if let Some((mtime, size)) = identity {
+        if let Some(id) = identity {
             let mut cache = self.digest_cache.lock().unwrap();
-            cache.entries.insert(
-                path.to_path_buf(),
-                CacheEntry {
-                    mtime_nanos: mtime,
-                    size,
-                    digest,
-                },
-            );
+            cache
+                .entries
+                .insert(path.to_path_buf(), CacheEntry::from_identity(id, digest));
             cache.dirty = true;
         }
         Ok(digest)
@@ -204,11 +229,19 @@ impl Cas {
         for (path, e) in &cache.entries {
             // Source paths never contain newlines; a non-UTF-8 path that round-trips
             // lossily just misses the cache next time (safe — a re-hash, not an error).
+            // A missing ctime serializes as `-` (platforms without one).
+            let (ct_secs, ct_nanos) = match e.ctime {
+                Some((s, n)) => (s.to_string(), n.to_string()),
+                None => ("-".to_owned(), "-".to_owned()),
+            };
             let _ = writeln!(
                 buf,
-                "{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 e.mtime_nanos,
                 e.size,
+                ct_secs,
+                ct_nanos,
+                e.inode,
                 e.digest.to_hex(),
                 path.display()
             );
@@ -274,34 +307,108 @@ impl Drop for Cas {
     }
 }
 
-/// `(mtime-nanoseconds, size)` identity for the digest cache, or `None` if the platform
-/// can't give a stable mtime (then we always read+hash — safe, just not cached).
-fn file_identity(meta: &fs::Metadata) -> Option<(u128, u64)> {
+impl CacheEntry {
+    fn from_identity(id: FileIdentity, digest: Digest) -> Self {
+        CacheEntry {
+            mtime_nanos: id.mtime_nanos,
+            size: id.size,
+            ctime: id.ctime,
+            inode: id.inode,
+            digest,
+        }
+    }
+
+    fn matches(&self, id: FileIdentity) -> bool {
+        self.mtime_nanos == id.mtime_nanos
+            && self.size == id.size
+            && self.ctime == id.ctime
+            && self.inode == id.inode
+    }
+}
+
+/// The stat-derived identity of one file: `(mtime-nanoseconds, size, ctime,
+/// inode)`, or `None` if the platform can't give a stable mtime (then we always
+/// read+hash — safe, just not cached).
+#[derive(Debug, Clone, Copy)]
+struct FileIdentity {
+    mtime_nanos: u128,
+    size: u64,
+    ctime: Option<(i64, u32)>,
+    inode: u64,
+}
+
+fn file_identity(meta: &fs::Metadata) -> Option<FileIdentity> {
     let mtime = meta
         .modified()
         .ok()?
         .duration_since(UNIX_EPOCH)
         .ok()?
         .as_nanos();
-    Some((mtime, meta.len()))
+    Some(FileIdentity {
+        mtime_nanos: mtime,
+        size: meta.len(),
+        ctime: ctime_of(meta),
+        inode: inode_of(meta),
+    })
 }
 
-/// Load the digest cache from disk. A missing/corrupt file, or any unparseable line, is
-/// tolerated: the entry is simply dropped (worst case, a re-hash). Format per line:
-/// `<mtime_nanos>\t<size>\t<digest_hex>\t<path>`.
+#[cfg(unix)]
+fn ctime_of(meta: &fs::Metadata) -> Option<(i64, u32)> {
+    use std::os::unix::fs::MetadataExt;
+    Some((meta.ctime(), meta.ctime_nsec() as u32))
+}
+
+#[cfg(not(unix))]
+fn ctime_of(_meta: &fs::Metadata) -> Option<(i64, u32)> {
+    None
+}
+
+#[cfg(unix)]
+fn inode_of(meta: &fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    meta.ino()
+}
+
+#[cfg(not(unix))]
+fn inode_of(_meta: &fs::Metadata) -> u64 {
+    0
+}
+
+/// Load the digest cache from disk. A missing/corrupt file, or any unparseable
+/// line, is tolerated: the entry is simply dropped (worst case, a re-hash — the
+/// memo's format is deliberately unpromised; changing it costs one re-hash pass,
+/// never correctness). Format per line:
+/// `<mtime_nanos>\t<size>\t<ctime_secs>\t<ctime_nanos>\t<inode>\t<digest_hex>\t<path>`
+/// with `-` for a missing ctime field.
 fn load_digest_cache(path: &Path) -> DigestCache {
     let mut entries = HashMap::new();
     if let Ok(text) = fs::read_to_string(path) {
         for line in text.lines() {
-            let mut parts = line.splitn(4, '\t');
-            let (Some(mt), Some(sz), Some(dg), Some(p)) =
-                (parts.next(), parts.next(), parts.next(), parts.next())
-            else {
+            let mut parts = line.splitn(7, '\t');
+            let (Some(mt), Some(sz), Some(cts), Some(ctn), Some(ino), Some(dg), Some(p)) = (
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+            ) else {
                 continue;
             };
-            let (Ok(mtime_nanos), Ok(size), Ok(digest)) =
-                (mt.parse::<u128>(), sz.parse::<u64>(), Digest::from_hex(dg))
-            else {
+            let ctime = match (cts, ctn) {
+                ("-", "-") => None,
+                (secs, nanos) => match (secs.parse::<i64>(), nanos.parse::<u32>()) {
+                    (Ok(secs), Ok(nanos)) => Some((secs, nanos)),
+                    _ => continue,
+                },
+            };
+            let (Ok(mtime_nanos), Ok(size), Ok(inode), Ok(digest)) = (
+                mt.parse::<u128>(),
+                sz.parse::<u64>(),
+                ino.parse::<u64>(),
+                Digest::from_hex(dg),
+            ) else {
                 continue;
             };
             entries.insert(
@@ -309,6 +416,8 @@ fn load_digest_cache(path: &Path) -> DigestCache {
                 CacheEntry {
                     mtime_nanos,
                     size,
+                    ctime,
+                    inode,
                     digest,
                 },
             );
@@ -526,18 +635,18 @@ mod tests {
     #[test]
     fn digest_cache_persists_across_reopen() {
         let dir = tempfile::tempdir().unwrap();
-        let f = dir.path().join("src.rs");
+        let f = dir.path().join("persisted");
         fs::write(&f, b"persisted").unwrap();
 
         let d = {
-            let cas = Cas::open(dir.path()).unwrap();
+            let cas = Cas::open(dir.path().join("cas")).unwrap();
             let d = cas.ingest_file(&f).unwrap();
             cas.flush().unwrap();
             d
         };
 
         // A fresh Cas over the same root loads the cache: the unchanged file is a hit.
-        let cas2 = Cas::open(dir.path()).unwrap();
+        let cas2 = Cas::open(dir.path().join("cas")).unwrap();
         let d2 = cas2.ingest_file(&f).unwrap();
         assert_eq!(d, d2);
         assert_eq!(
@@ -545,5 +654,53 @@ mod tests {
             0,
             "a persisted entry means no read after reopen"
         );
+    }
+
+    /// The P0 hardening: a content replacement that preserves both size and mtime
+    /// must NOT reuse the memoized digest. ctime moves on every write and cannot
+    /// be restored by user code, so the swap misses the memo and is re-hashed.
+    #[cfg(unix)]
+    #[test]
+    fn same_size_same_mtime_replacement_is_rehashed() {
+        use std::fs::OpenOptions;
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::open(dir.path().join("cas")).unwrap();
+        let f = dir.path().join("src.rs");
+
+        // v1: one byte, ingested and memoized.
+        fs::write(&f, b"a").unwrap();
+        let d1 = cas.ingest_file(&f).unwrap();
+        assert_eq!(cas.reads(), 1);
+
+        // Swap in v2 with the SAME size and the mtime restored to v1's.
+        let meta = fs::metadata(&f).unwrap();
+        let mtime = meta.modified().unwrap();
+        let ctime_before = (meta.ctime(), meta.ctime_nsec());
+        fs::write(&f, b"b").unwrap();
+        // Restore mtime exactly; ctime is kernel-maintained and cannot be restored.
+        OpenOptions::new()
+            .write(true)
+            .open(&f)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        let after = fs::metadata(&f).unwrap();
+        assert_eq!(
+            after.modified().unwrap(),
+            mtime,
+            "precondition: mtime equal"
+        );
+        assert_eq!(after.len(), meta.len(), "precondition: size equal");
+        assert_ne!(
+            (after.ctime(), after.ctime_nsec()),
+            ctime_before,
+            "precondition: ctime moved"
+        );
+
+        let d2 = cas.ingest_file(&f).unwrap();
+        assert_eq!(cas.reads(), 2, "the swap must miss the memo and re-hash");
+        assert_ne!(d1, d2);
+        assert_eq!(d2, Digest::of(b"b"), "the fresh digest reflects v2");
     }
 }

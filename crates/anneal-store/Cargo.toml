@@ -1,0 +1,17 @@
+[package]
+name = "anneal-store"
+version.workspace = true
+edition.workspace = true
+description = "The .anneal/ store: layout, capability-guarded writes, warm commit records, and crash-safe persistence for the action cache and snapshot index."
+
+[dependencies]
+anneal-core = { path = "../anneal-core" }
+anneal-cas = { path = "../anneal-cas" }
+anneal-snapshot = { path = "../anneal-snapshot" }
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

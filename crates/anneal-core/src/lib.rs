@@ -19,6 +19,7 @@
 //!   the stable, canonical *data* to hash (e.g. [`AxisValues::consumed`]).
 
 mod config;
+mod crash;
 mod digest;
 mod label;
 
@@ -26,5 +27,6 @@ pub use config::{
     Axis, AxisValues, Configuration, Coverage, DebugInfo, ExecMode, Lto, OptLevel, Platform,
     Sanitizer, ALL_AXES,
 };
+pub use crash::crash_point;
 pub use digest::{Digest, DigestParseError};
 pub use label::{Label, LabelParseError};

@@ -170,7 +170,7 @@ impl<'a> RuleContext<'a> {
     pub fn declare_state(&self, decl: PersistentStateDecl) -> Result<StateHandle, RuleError> {
         self.state_registry.check(self.rule_kind, &decl)?;
         Ok(StateHandle {
-            key: state_key(self.rule_kind, &decl),
+            key: state_key(self.rule_kind, self.label(), &decl),
             kind: decl.kind,
             namespace: decl.namespace,
             paths: decl.paths,

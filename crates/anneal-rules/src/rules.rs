@@ -18,6 +18,13 @@ const GENRULE_SCHEMA: &[AttrSchema] = &[
     AttrSchema::optional("deps", AttrType::LabelList),
     AttrSchema::required("outs", AttrType::StringList),
     AttrSchema::required("cmd", AttrType::String),
+    // An explicit claim that `cmd` is a pure function of its inputs (same
+    // inputs ⇒ byte-identical outputs). Opt-in caching: without it the command
+    // runs every time, because an arbitrary shell command's reproducibility
+    // cannot be assumed (TODO.md P0 #3 — the wrong-output-under-a-valid-key
+    // hazard). A false claim poisons the cache with stale entries; the claim
+    // is the rule author's to make, not the engine's.
+    AttrSchema::optional("deterministic", AttrType::Bool),
 ];
 
 /// `filegroup(name, srcs)` — groups source files into a target. No actions; exposes
@@ -158,6 +165,17 @@ impl Rule for GenRule {
                 },
             })
             .collect();
+
+        // Cache policy (P0 #3, resolved): an arbitrary command is
+        // `NonCacheable` by default — caching it would assume a purity the
+        // engine cannot verify. `deterministic = True` is the explicit opt-in
+        // claim; a fixed-output pin is the other (future) earned path.
+        let deterministic = ctx.attrs().bool_opt("deterministic")?.unwrap_or(false);
+        let builder = if deterministic {
+            builder.cache_policy(anneal_exec::CachePolicy::Deterministic)
+        } else {
+            builder.cache_policy(anneal_exec::CachePolicy::NonCacheable)
+        };
 
         Ok(Analysis {
             actions: vec![builder.try_build()?],

@@ -7,15 +7,24 @@
 //!
 //! This module is the reconciliation engine — deliberately decoupled from the `Action`
 //! model: the caller passes a plain `path -> digest` map of the desired inputs and the
-//! previous [`InputManifest`]. The two correctness rules from §5.5 live here:
+//! previous committed baseline ([`WarmManifest`], owned by `anneal-store`). The three
+//! correctness rules from §5.5 live here:
 //!
-//! * **Unchanged files are left untouched** — preserving their mtime so the inner tool
-//!   skips them.
-//! * **Added/changed files are placed with a distinct inode and a fresh mtime** — never a
-//!   shared-inode hardlink/clone carrying a (possibly stale) CAS-blob mtime. The mtime
-//!   experiment proved cargo's freshness check is mtime-based and content-blind, so a
-//!   stale mtime on changed content is *silently missed* → a correctness bug. A plain
-//!   `fs::write` of a fresh file sets mtime to now, which is exactly what we need.
+//! * **Unchanged files are left untouched** — *verified*, not assumed: the baseline
+//!   records `(mtime, size)` at commit, and reuse stat-checks each unchanged input.
+//!   A mismatch means something touched the file since the commit (power loss
+//!   tearing a just-placed input, an external edit, a `LoudBestEffort` escape) and
+//!   the file is re-placed. The check is content-blind by design — re-place is
+//!   always safe, and a re-placed file gets a fresh mtime so the native tool
+//!   rebuilds exactly what depended on it.
+//! * **Unchanged *and verified* files keep their mtime** — so the inner tool skips
+//!   them.
+//! * **Added/changed files are placed with a distinct inode and a fresh mtime** —
+//!   never a shared-inode hardlink/clone carrying a (possibly stale) CAS-blob mtime.
+//!   The mtime experiment proved cargo's freshness check is mtime-based and
+//!   content-blind, so a stale mtime on changed content is *silently missed* → a
+//!   correctness bug. A plain `fs::write` of a fresh file sets mtime to now, which
+//!   is exactly what we need.
 //!
 //! Only declared input paths are touched — never `target/` (the warm snapshot).
 
@@ -26,69 +35,27 @@ use std::path::{Path, PathBuf};
 
 use anneal_cas::Cas;
 use anneal_core::Digest;
-
-/// What is materialized in a warm working tree: declared-input path → content digest.
-/// Persisted in `warm-meta/<key>/inputs` as the diff baseline for the next reuse.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) struct InputManifest {
-    entries: BTreeMap<PathBuf, Digest>,
-}
-
-impl InputManifest {
-    pub(crate) fn new(entries: BTreeMap<PathBuf, Digest>) -> Self {
-        InputManifest { entries }
-    }
-
-    /// Read a manifest from `path`. `Ok(None)` if it is absent — i.e. no clean baseline,
-    /// so the caller must fall back to a cold/restored population, never a partial sync.
-    pub(crate) fn load(path: &Path) -> io::Result<Option<Self>> {
-        match fs::read_to_string(path) {
-            Ok(text) => Ok(Some(parse(&text)?)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Write the manifest atomically (temp + rename), so its presence implies a complete
-    /// file — the property that lets it double as the commit record (§5.4).
-    pub(crate) fn save_atomic(&self, path: &Path) -> io::Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_file_name(format!(
-            "{}.tmp.{}",
-            path.file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("inputs"),
-            std::process::id()
-        ));
-        fs::write(&tmp, serialize(self))?;
-        match fs::rename(&tmp, path) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                let _ = fs::remove_file(&tmp);
-                Err(e)
-            }
-        }
-    }
-}
+use anneal_store::WarmManifest;
 
 /// Per-sync outcome counts (observability and tests).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct SyncStats {
+    /// Unchanged and stat-verified — left untouched (same inode, same mtime).
     pub left: usize,
+    /// Digest changed, newly declared, **or failed the drift check** — re-placed.
     pub replaced: usize,
     pub added: usize,
     pub removed: usize,
 }
 
-/// Reconcile the warm working tree at `cwd` from the `old` manifest to `desired`
-/// (`path -> digest`). Returns the per-category counts. Touches only the paths in `old`
-/// and `desired` — never `target/` or anything else in the tree.
+/// Reconcile the warm working tree at `cwd` from the committed `old` manifest to
+/// `desired` (`path -> digest`). Returns the per-category counts. Touches only
+/// the paths in `old` and `desired` — never `target/` or anything else in the
+/// tree.
 pub(crate) fn sync(
     cas: &Cas,
     cwd: &Path,
-    old: &InputManifest,
+    old: &WarmManifest,
     desired: &BTreeMap<PathBuf, Digest>,
     writable: &BTreeSet<PathBuf>,
 ) -> io::Result<SyncStats> {
@@ -97,8 +64,19 @@ pub(crate) fn sync(
     // Added / changed / unchanged.
     for (rel, digest) in desired {
         let is_writable = writable.contains(rel);
-        match old.entries.get(rel) {
-            Some(prev) if prev == digest && !is_writable => stats.left += 1,
+        match old.entry(rel) {
+            Some(prev) if prev.digest == *digest && !is_writable => {
+                // Drift check: the baseline says this digest is already placed;
+                // verify the file on disk still carries the committed stat
+                // facts. Any mismatch re-places — self-healing, in the safe
+                // direction (a fresh mtime forces the tool to reconsider).
+                if prev.matches_file(&cwd.join(rel)) {
+                    stats.left += 1;
+                } else {
+                    place_fresh(cas, &cwd.join(rel), digest, is_writable)?;
+                    stats.replaced += 1;
+                }
+            }
             Some(_) => {
                 place_fresh(cas, &cwd.join(rel), digest, is_writable)?;
                 stats.replaced += 1;
@@ -112,7 +90,7 @@ pub(crate) fn sync(
 
     // Removed: present last time, not declared now. Leaving a stale source file behind
     // is a phantom compile, so this is correctness, not tidiness.
-    for rel in old.entries.keys() {
+    for (rel, _) in old.iter() {
         if !desired.contains_key(rel) {
             remove(&cwd.join(rel))?;
             stats.removed += 1;
@@ -128,6 +106,11 @@ pub(crate) fn sync(
 /// either fail or carry a stale mtime. `fs::write` of a new file stamps mtime = now,
 /// which is the freshness cargo's mtime-based check requires (§5.5).
 fn place_fresh(cas: &Cas, dest: &Path, digest: &Digest, writable: bool) -> io::Result<()> {
+    // Crash-injection point: after the old file is removed and before the new
+    // bytes land — the "torn warm input" crash state. The commit record is
+    // already gone (BEGIN), so the next run cold-populates rather than trust
+    // this tree.
+    anneal_core::crash_point("warm-input-place");
     let bytes = cas.get(digest)?.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
@@ -166,43 +149,10 @@ fn set_mode(_path: &Path, _writable: bool) -> io::Result<()> {
     Ok(())
 }
 
-fn serialize(m: &InputManifest) -> String {
-    let mut out = String::new();
-    for (path, digest) in &m.entries {
-        out.push_str(&digest.to_hex());
-        out.push('\t');
-        out.push_str(&path.to_string_lossy());
-        out.push('\n');
-    }
-    out
-}
-
-fn parse(text: &str) -> io::Result<InputManifest> {
-    let mut entries = BTreeMap::new();
-    for (i, line) in text.lines().enumerate() {
-        if line.is_empty() {
-            continue;
-        }
-        let (hex, path) = line.split_once('\t').ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("manifest line {}: missing tab", i + 1),
-            )
-        })?;
-        let digest = Digest::from_hex(hex).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("manifest line {}: {e}", i + 1),
-            )
-        })?;
-        entries.insert(PathBuf::from(path), digest);
-    }
-    Ok(InputManifest { entries })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anneal_store::WarmEntry;
     use std::fs::OpenOptions;
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, SystemTime};
@@ -215,18 +165,26 @@ mod tests {
         (tmp, cas, cwd)
     }
 
-    fn manifest(pairs: &[(&str, Digest)]) -> InputManifest {
-        InputManifest::new(pairs.iter().map(|(p, d)| (PathBuf::from(p), *d)).collect())
+    /// A committed baseline for `pairs`, recording each file's real stat — the
+    /// shape a COMMIT produces via [`WarmManifest::record`].
+    fn manifest(cwd: &Path, pairs: &[(&str, Digest)]) -> WarmManifest {
+        let desired: BTreeMap<PathBuf, Digest> =
+            pairs.iter().map(|(p, d)| (PathBuf::from(p), *d)).collect();
+        WarmManifest::record("test-owner", cwd, &desired).unwrap()
     }
+
     fn desired(pairs: &[(&str, Digest)]) -> BTreeMap<PathBuf, Digest> {
         pairs.iter().map(|(p, d)| (PathBuf::from(p), *d)).collect()
     }
+
     fn writable(paths: &[&str]) -> BTreeSet<PathBuf> {
         paths.iter().map(PathBuf::from).collect()
     }
+
     fn mtime(p: &Path) -> SystemTime {
         fs::metadata(p).unwrap().modified().unwrap()
     }
+
     fn inode(p: &Path) -> u64 {
         use std::os::unix::fs::MetadataExt;
         fs::metadata(p).unwrap().ino()
@@ -234,8 +192,8 @@ mod tests {
 
     #[test]
     fn unchanged_file_is_left_untouched() {
-        // An unchanged file must keep its identity (same inode) and mtime, so the inner
-        // tool's fingerprint skips it.
+        // An unchanged, drift-verified file must keep its identity (same inode)
+        // and mtime, so the inner tool's fingerprint skips it.
         let (_t, cas, cwd) = setup();
         let d = cas.put(b"hello").unwrap();
         place_fresh(&cas, &cwd.join("src/lib.rs"), &d, false).unwrap();
@@ -245,7 +203,7 @@ mod tests {
         let stats = sync(
             &cas,
             &cwd,
-            &manifest(&[("src/lib.rs", d)]),
+            &manifest(&cwd, &[("src/lib.rs", d)]),
             &desired(&[("src/lib.rs", d)]),
             &writable(&[]),
         )
@@ -268,6 +226,50 @@ mod tests {
             before_mtime,
             "unchanged file must keep its mtime"
         );
+    }
+
+    #[test]
+    fn drifted_unchanged_file_is_replaced() {
+        // The manifest says digest D at stat S, but the file on disk was
+        // touched since the commit (here: same bytes, new mtime — the drift
+        // check is content-blind by design). Sync must re-place it: a fresh
+        // inode and mtime, so the native tool reconsiders it.
+        let (_t, cas, cwd) = setup();
+        let d = cas.put(b"hello").unwrap();
+        let p = cwd.join("src/lib.rs");
+        place_fresh(&cas, &p, &d, false).unwrap();
+        let committed = manifest(&cwd, &[("src/lib.rs", d)]);
+
+        // Simulate drift: touch the file's mtime without changing content.
+        // (Inputs are placed 0444; make this one writable first so the test
+        // can open it — an external mutator would have the same effect.)
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o644)).unwrap();
+        let future = SystemTime::now() + Duration::from_secs(3600);
+        OpenOptions::new()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_modified(future)
+            .unwrap();
+
+        let stats = sync(
+            &cas,
+            &cwd,
+            &committed,
+            &desired(&[("src/lib.rs", d)]),
+            &writable(&[]),
+        )
+        .unwrap();
+        assert_eq!(
+            stats,
+            SyncStats {
+                replaced: 1,
+                ..Default::default()
+            },
+            "drifted input must be re-placed"
+        );
+        assert!(mtime(&p) <= SystemTime::now() + Duration::from_secs(1));
     }
 
     #[test]
@@ -299,7 +301,7 @@ mod tests {
         let stats = sync(
             &cas,
             &cwd,
-            &manifest(&[("src/lib.rs", old)]),
+            &manifest(&cwd, &[("src/lib.rs", old)]),
             &desired(&[("src/lib.rs", new)]),
             &writable(&[]),
         )
@@ -340,7 +342,7 @@ mod tests {
         let stats = sync(
             &cas,
             &cwd,
-            &manifest(&[("keep.rs", keep), ("gone.rs", gone)]),
+            &manifest(&cwd, &[("keep.rs", keep), ("gone.rs", gone)]),
             &desired(&[("keep.rs", keep), ("new.rs", fresh)]),
             &writable(&[]),
         )
@@ -378,7 +380,7 @@ mod tests {
         sync(
             &cas,
             &cwd,
-            &manifest(&[("x.rs", a)]),
+            &manifest(&cwd, &[("x.rs", a)]),
             &desired(&[("x.rs", b)]),
             &writable(&[]),
         )
@@ -399,7 +401,7 @@ mod tests {
         let stats = sync(
             &cas,
             &cwd,
-            &manifest(&[("pnpm-lock.yaml", lock)]),
+            &manifest(&cwd, &[("pnpm-lock.yaml", lock)]),
             &desired(&[("pnpm-lock.yaml", lock)]),
             &writable(&["pnpm-lock.yaml"]),
         )
@@ -420,19 +422,35 @@ mod tests {
     }
 
     #[test]
-    fn manifest_round_trips_through_disk() {
-        let (_t, _cas, cwd) = setup();
-        let m = manifest(&[
-            ("Cargo.toml", Digest::of(b"1")),
-            ("a/src/lib.rs", Digest::of(b"2")),
-        ]);
-        let path = cwd.join("meta/inputs");
-        m.save_atomic(&path).unwrap();
-        assert_eq!(InputManifest::load(&path).unwrap(), Some(m));
-        // Absent manifest → None (the "no clean baseline" signal).
-        assert_eq!(
-            InputManifest::load(&cwd.join("meta/missing")).unwrap(),
-            None
+    fn baseline_without_stat_facts_still_replaces() {
+        // A hand-built entry with zeroed stat facts (a file that could not be
+        // stat'd at commit) must fail the drift check and re-place — the
+        // fail-safe direction for missing information.
+        let (_t, cas, cwd) = setup();
+        let d = cas.put(b"x").unwrap();
+        let p = cwd.join("a.rs");
+        place_fresh(&cas, &p, &d, false).unwrap();
+        let baseline = WarmManifest::new(
+            "owner",
+            [(
+                PathBuf::from("a.rs"),
+                WarmEntry {
+                    digest: d,
+                    mtime_nanos: 0,
+                    size: 0,
+                },
+            )]
+            .into_iter()
+            .collect(),
         );
+        let stats = sync(
+            &cas,
+            &cwd,
+            &baseline,
+            &desired(&[("a.rs", d)]),
+            &writable(&[]),
+        )
+        .unwrap();
+        assert_eq!(stats.replaced, 1);
     }
 }

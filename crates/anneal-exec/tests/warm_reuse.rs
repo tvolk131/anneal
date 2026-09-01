@@ -58,8 +58,7 @@ fn warm_reuse_stays_correct_across_a_revert() {
     );
 
     // The warm working tree persisted (no teardown) and reflects the last synced state.
-    let tag = &skey.to_hex()[..16];
-    let warm_dir = store.join("warm").join(tag);
+    let warm_dir = exec.store().warm_dir(&skey);
     assert!(
         warm_dir.exists(),
         "warm working tree must persist between builds"
@@ -67,7 +66,7 @@ fn warm_reuse_stays_correct_across_a_revert() {
     assert_eq!(std::fs::read(warm_dir.join("a.txt")).unwrap(), b"A1");
     assert_eq!(std::fs::read(warm_dir.join("b.txt")).unwrap(), b"B2");
     // The manifest (commit record) is present after a clean build.
-    assert!(store.join("warm-meta").join(tag).join("inputs").exists());
+    assert!(exec.store().warm_manifest_path(&skey).exists());
 }
 
 #[test]
@@ -77,7 +76,12 @@ fn private_snapshot_skips_cas_save_under_warm_reuse_but_shared_saves() {
     let tmp = tempfile::tempdir().unwrap();
     let store = tmp.path().join(".anneal");
     let exec = LocalExecutor::new(&store).unwrap(); // warm reuse on by default
-    let index = |k: &Digest| store.join("snapshots").join("index").join(k.to_hex());
+    let index = |k: &Digest| {
+        exec.store()
+            .store_root()
+            .join("snapshots/index")
+            .join(k.to_hex())
+    };
     // Distinct input content per action so they have distinct action digests — otherwise
     // the cache key (which excludes snapshot_key/shared/name) would collide and the second
     // would cache-hit the first instead of running.
@@ -107,13 +111,12 @@ fn private_snapshot_skips_cas_save_under_warm_reuse_but_shared_saves() {
         "private snapshot must not be saved to the CAS under warm reuse"
     );
     // ...but the warm dir + commit manifest exist, so reuse still works.
-    let tag = &priv_key.to_hex()[..16];
     assert!(
-        store.join("warm").join(tag).join("out.txt").exists(),
+        exec.store().warm_dir(&priv_key).join("out.txt").exists(),
         "warm tree persists"
     );
     assert!(
-        store.join("warm-meta").join(tag).join("inputs").exists(),
+        exec.store().warm_manifest_path(&priv_key).exists(),
         "commit manifest written"
     );
 

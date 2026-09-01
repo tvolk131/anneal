@@ -13,22 +13,24 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::process::{Child, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anneal_cas::Cas;
 use anneal_core::Digest;
-use anneal_snapshot::SnapshotStore;
+use anneal_store::{
+    Provenance, Recovered, Store, StoredResult, Verify, WarmManifest, WorkspaceGuard,
+};
 
 use crate::action::{Action, ActionError, CachePolicy, ExecutionMode, InputSource};
-use crate::cache::{action_digest, ActionCache, StoredResult};
+use crate::cache::action_digest;
 use crate::fetch;
 use crate::materializer;
 use crate::query::{query_identity, query_key, QueryResult, QuerySpec, QUERY_STDOUT};
 use crate::sandbox::{self, SandboxSpec};
-use crate::trust::{self, EnforcementGrade, Provenance};
-use crate::warm::{self, InputManifest};
+use crate::trust::{self, EnforcementGrade};
+use crate::warm;
 
 /// Disambiguates per-run sandbox directories for normal (non-snapshot) actions.
 static SANDBOX_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -117,10 +119,14 @@ pub trait Executor {
 
 /// Executes actions on the local machine.
 pub struct LocalExecutor {
-    cas: Cas,
-    cache: ActionCache,
-    snapshots: SnapshotStore,
-    sandboxes: PathBuf,
+    /// The `.anneal` store (see `anneal-store`): layout, persistence, and the
+    /// read view. Cloned-cheap; shared state lives behind `Arc`s.
+    store: Store,
+    /// The write capability — every mutation of the store goes through it.
+    /// Constructed detached (no flock) by [`LocalExecutor::new`] for embedders
+    /// and tests; the CLI passes the real [`Store::lock`] guard so mutating
+    /// commands serialize across processes.
+    guard: WorkspaceGuard,
     retain_sandboxes: bool,
     /// Max actions to run concurrently in [`execute_graph`]. Defaults to the machine's
     /// available parallelism.
@@ -131,20 +137,8 @@ pub struct LocalExecutor {
     /// — without it a snapshot owner's incremental rebuild restores `target/` to a new
     /// sandbox path each run, which cargo treats as stale → full rebuild (the +3495%
     /// case). Disable with `warm_reuse(false)` for fresh-per-build isolation (verification,
-    /// benchmarks). Caveat: persistent per-key dirs want the cross-process workspace lock
-    /// for multi-process safety (tracked).
+    /// benchmarks). Cross-process safety comes from the CLI's workspace lock.
     warm_reuse: bool,
-    /// Persistent warm working trees, keyed by snapshot key: `warm/<key16>/`.
-    warm: PathBuf,
-    /// Warm-dir bookkeeping (manifest = commit record), kept out of the working tree.
-    warm_meta: PathBuf,
-    /// Per-snapshot-key locks: same-key owners share one warm dir and serialize on it
-    /// (§5.3.1), while different keys run concurrently.
-    warm_locks: Mutex<HashMap<Digest, Arc<Mutex<()>>>>,
-    /// Stable per-identity sandbox roots for tool queries (`query.rs` module docs:
-    /// tools embed absolute paths in stdout, so query byte-determinism requires a
-    /// root that survives input edits).
-    queries: PathBuf,
     /// The §2.8 enforcement floor: when set, sealed execution on a platform whose
     /// grade is below `Enforced` **fails rather than silently degrades** — the
     /// mandatory CI posture, since a weakly-enforced run quietly populating even
@@ -153,33 +147,32 @@ pub struct LocalExecutor {
 }
 
 impl LocalExecutor {
-    /// Open a local executor rooted at `store_root` (e.g. `.anneal/`). The CAS,
-    /// action cache, snapshot store, and sandbox roots are created underneath and
-    /// share one volume so hardlink materialization works (§3.4).
+    /// Open a local executor over the store rooted at `store_root` (e.g.
+    /// `.anneal/`). The store is opened and a **detached** write guard is
+    /// created (no workspace flock) — the embedder form. Mutating CLI commands
+    /// construct via [`LocalExecutor::with_store_guard`] with the real
+    /// [`Store::lock`] guard instead.
     pub fn new(store_root: impl Into<PathBuf>) -> io::Result<Self> {
-        let root = store_root.into();
-        let cas = Cas::open(root.join("cas"))?;
-        let cache = ActionCache::open(root.join("cache"))?;
-        let snapshots = SnapshotStore::open(root.join("snapshots"))?;
-        let sandboxes = root.join("sandboxes");
-        fs::create_dir_all(&sandboxes)?;
-        let queries = root.join("queries");
-        fs::create_dir_all(&queries)?;
-        Ok(LocalExecutor {
-            cas,
-            cache,
-            snapshots,
-            sandboxes,
-            queries,
+        let store = Store::open(store_root)?;
+        Ok(Self::with_store_guard(
+            store.clone(),
+            WorkspaceGuard::detached(&store),
+        ))
+    }
+
+    /// Build an executor over an already-opened store and its write guard.
+    /// The guard is the executor's write capability; clones of it (and the
+    /// store) are cheap.
+    pub fn with_store_guard(store: Store, guard: WorkspaceGuard) -> Self {
+        LocalExecutor {
+            store,
+            guard,
             retain_sandboxes: false,
             parallelism: default_parallelism(),
             timings: None,
             warm_reuse: true,
-            warm: root.join("warm"),
-            warm_meta: root.join("warm-meta"),
-            warm_locks: Mutex::new(HashMap::new()),
             require_enforced: false,
-        })
+        }
     }
 
     /// Enable the §2.8 enforcement floor: sealed execution fails on any platform
@@ -217,7 +210,12 @@ impl LocalExecutor {
 
     /// The CAS, so callers can stage inputs and read outputs by digest.
     pub fn cas(&self) -> &Cas {
-        &self.cas
+        self.store.cas()
+    }
+
+    /// The store this executor runs over (read view).
+    pub fn store(&self) -> &Store {
+        &self.store
     }
 
     /// Keep sandbox directories after execution (for debugging). Off by default.
@@ -647,7 +645,7 @@ impl LocalExecutor {
         let out_name = action.outputs.keys().next().unwrap().clone();
 
         // Cache by output content: the pinned blob is present ⇒ nothing to fetch.
-        if self.cas.has(&expected) {
+        if self.store.cas().has(&expected) {
             return Ok(ActionResult {
                 exit_code: 0,
                 outputs: BTreeMap::from([(out_name, expected)]),
@@ -667,7 +665,7 @@ impl LocalExecutor {
                 action: action.name().to_owned(),
                 error,
             })?;
-            let actual = self.cas.put(&bytes)?;
+            let actual = self.store.cas().put(&bytes)?;
             if actual != expected {
                 return Err(ExecError::FixedOutputMismatch { expected, actual });
             }
@@ -713,15 +711,18 @@ impl LocalExecutor {
         if root.exists() {
             let _ = fs::remove_dir_all(&root);
         }
-        let prepared = materializer::prepare_at(&self.cas, action, root)?;
+        let prepared = materializer::prepare_at(self.store.cas(), action, root)?;
         let t_materialize = started.elapsed();
 
         let restore_start = Instant::now();
         if restore {
             if let Some(key) = &action.snapshot_key {
                 for path in &action.snapshot_paths {
-                    self.snapshots
-                        .restore(&self.cas, key, &prepared.cwd.join(path))?;
+                    self.store.snapshots().restore(
+                        self.store.cas(),
+                        key,
+                        &prepared.cwd.join(path),
+                    )?;
                 }
             }
         }
@@ -743,14 +744,17 @@ impl LocalExecutor {
         let mut t_save = Duration::ZERO;
         let outputs = if exit_code == 0 {
             let capture_start = Instant::now();
-            let captured = materializer::capture(&self.cas, action, &prepared)?;
+            let captured = materializer::capture(self.store.cas(), action, &prepared)?;
             t_capture = capture_start.elapsed();
             if save {
                 let save_start = Instant::now();
                 if let Some(key) = &action.snapshot_key {
                     for path in &action.snapshot_paths {
-                        self.snapshots
-                            .save(&self.cas, key, &prepared.cwd.join(path))?;
+                        self.store.snapshots().save(
+                            self.store.cas(),
+                            key,
+                            &prepared.cwd.join(path),
+                        )?;
                     }
                 }
                 t_save = save_start.elapsed();
@@ -804,24 +808,14 @@ impl LocalExecutor {
     fn sandbox_root(&self, key: &Digest) -> PathBuf {
         let nonce = SANDBOX_COUNTER.fetch_add(1, Ordering::Relaxed);
         // Include the pid so two `anneal` processes never collide on a sandbox path. (The
-        // coarse workspace lock already serializes mutating commands; this is cheap
+        // workspace lock already serializes mutating commands; this is cheap
         // defense-in-depth, and what makes relaxing that lock safe later.)
-        self.sandboxes.join(format!(
+        self.store.sandboxes_root().join(format!(
             "{}-{}-{}",
             &key.to_hex()[..16],
             std::process::id(),
             nonce
         ))
-    }
-
-    /// The per-snapshot-key serialization lock for a warm dir, created on first use.
-    fn warm_key_lock(&self, key: &Digest) -> Arc<Mutex<()>> {
-        self.warm_locks
-            .lock()
-            .unwrap()
-            .entry(*key)
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
     }
 
     /// Run a snapshot-owner action against a **persistent warm working tree** (§5).
@@ -830,20 +824,19 @@ impl LocalExecutor {
     /// materialize all inputs → restore the last good snapshot). The snapshot is still
     /// saved to the CAS (when `save` — i.e. the snapshot is *shared*, §5.8.1) so consumers
     /// and other machines can restore it; a *private* snapshot skips the per-build save and
-    /// lives only in the warm dir. Same-key owners serialize via [`LocalExecutor::warm_key_lock`].
+    /// lives only in the warm dir. Same-key owners serialize on the store's per-key
+    /// transaction handle (`anneal-store::WorkspaceGuard::warm`).
     fn run_warm(&self, action: &Action, save: bool) -> Result<ActionResult, ExecError> {
         let started = Instant::now();
         let skey = action
             .snapshot_key
             .expect("run_warm is only called for snapshot owners, which have a snapshot_key");
-        let tag = skey.to_hex();
-        let tag = &tag[..16];
-        let warm_dir = self.warm.join(tag);
-        let manifest_path = self.warm_meta.join(tag).join("inputs");
 
-        // Same-key owners share this warm dir; serialize on it (different keys run free).
-        let key_lock = self.warm_key_lock(&skey);
-        let _guard = key_lock.lock().unwrap();
+        // Same-key owners share one warm dir; serialize on it (different keys run free).
+        // The transaction handle holds the key's mutex for the whole BEGIN→COMMIT span.
+        let warm = self.guard.warm(&skey);
+        let txn = warm.lock();
+        let warm_dir = txn.warm_dir();
 
         // The desired declared inputs as path -> digest (the action is already resolved).
         let desired: BTreeMap<PathBuf, Digest> = action
@@ -862,14 +855,21 @@ impl LocalExecutor {
             .collect();
 
         // Reuse iff a committed manifest exists AND the working tree is present.
-        let baseline = match InputManifest::load(&manifest_path)? {
-            Some(old) if warm_dir.exists() => Some(old),
+        // The load is tolerant: a torn manifest degrades (a note is printed,
+        // the good prefix is used) and an absent one means cold-populate —
+        // never a build error (accelerator state must not fail a build).
+        let baseline = match self.store.load_warm_manifest(&skey)? {
+            Recovered::Clean(old) if warm_dir.exists() => Some(old),
+            Recovered::Degraded { value: old, note } if warm_dir.exists() => {
+                eprintln!("note: warm tree {skey} recovered degraded: {note}");
+                Some(old)
+            }
             _ => None,
         };
         // BEGIN the transaction: the manifest doubles as the commit record (§5.4), so
         // clear it before mutating — a crash then leaves no baseline and the next run
         // cold-populates rather than trusting a half-synced tree.
-        let _ = fs::remove_file(&manifest_path);
+        txn.begin()?;
 
         let t_materialize;
         let mut t_restore = Duration::ZERO;
@@ -879,7 +879,13 @@ impl LocalExecutor {
             let _ = fs::remove_dir_all(warm_dir.join(".home"));
             let _ = fs::remove_dir_all(warm_dir.join(".tmp"));
             let prepared = materializer::layout(action, warm_dir.clone())?;
-            warm::sync(&self.cas, &prepared.cwd, &old, &desired, &writable_inputs)?;
+            warm::sync(
+                self.store.cas(),
+                &prepared.cwd,
+                &old,
+                &desired,
+                &writable_inputs,
+            )?;
             t_materialize = m.elapsed();
             prepared
         } else {
@@ -888,12 +894,15 @@ impl LocalExecutor {
             if warm_dir.exists() {
                 let _ = fs::remove_dir_all(&warm_dir);
             }
-            let prepared = materializer::prepare_at(&self.cas, action, warm_dir.clone())?;
+            let prepared = materializer::prepare_at(self.store.cas(), action, warm_dir.clone())?;
             t_materialize = m.elapsed();
             let r = Instant::now();
             for path in &action.snapshot_paths {
-                self.snapshots
-                    .restore(&self.cas, &skey, &prepared.cwd.join(path))?;
+                self.store.snapshots().restore(
+                    self.store.cas(),
+                    &skey,
+                    &prepared.cwd.join(path),
+                )?;
             }
             t_restore = r.elapsed();
             prepared
@@ -915,7 +924,7 @@ impl LocalExecutor {
         let mut t_save = Duration::ZERO;
         let outputs = if exit_code == 0 {
             let c = Instant::now();
-            let captured = materializer::capture(&self.cas, action, &prepared)?;
+            let captured = materializer::capture(self.store.cas(), action, &prepared)?;
             t_capture = c.elapsed();
             let s = Instant::now();
             // Shared snapshots are saved to the CAS for consumers; private ones aren't
@@ -923,13 +932,21 @@ impl LocalExecutor {
             // unconditional, so warm reuse works regardless.
             if save {
                 for path in &action.snapshot_paths {
-                    self.snapshots
-                        .save(&self.cas, &skey, &prepared.cwd.join(path))?;
+                    self.store.snapshots().save(
+                        self.store.cas(),
+                        &skey,
+                        &prepared.cwd.join(path),
+                    )?;
                 }
             }
             t_save = s.elapsed();
-            // COMMIT: the atomically-written manifest's presence marks the tree clean.
-            InputManifest::new(desired).save_atomic(&manifest_path)?;
+            // COMMIT: record the new baseline (digest + stat facts, stat'd from the
+            // tree) — the atomically-written manifest's presence marks it clean.
+            txn.commit(&WarmManifest::record(
+                action.name(),
+                &prepared.cwd,
+                &desired,
+            )?)?;
             captured
         } else {
             // Failed build: leave the manifest absent → next run cold-populates. No teardown.
@@ -972,7 +989,7 @@ impl LocalExecutor {
     ) -> Result<ActionResult, ExecError> {
         guard_valid(action)?;
         guard_resolved(action)?;
-        let root = self.sandboxes.join(sandbox_name);
+        let root = self.store.sandboxes_root().join(sandbox_name);
         self.run_core(action, root, restore, save)
     }
 
@@ -998,9 +1015,9 @@ impl LocalExecutor {
         self.check_enforcement_floor(action)?;
 
         let key = query_key(action);
-        if let Some(stored) = self.cache.lookup(&key)? {
+        if let Some(stored) = self.store.actions().lookup(&key)? {
             if let Some(digest) = stored.outputs.get(QUERY_STDOUT) {
-                if let Some(stdout) = self.cas.get(digest)? {
+                if let Some(stdout) = self.store.cas().get(digest)? {
                     return Ok(QueryResult {
                         stdout,
                         cache_hit: true,
@@ -1012,14 +1029,14 @@ impl LocalExecutor {
         }
 
         let identity = query_identity(action);
-        let lock = self.warm_key_lock(&identity);
+        let lock = self.store.key_lock(&identity);
         let _guard = lock.lock().unwrap();
 
-        let root = self.queries.join(&identity.to_hex()[..16]);
+        let root = self.store.queries_root().join(&identity.to_hex()[..16]);
         if root.exists() {
             fs::remove_dir_all(&root)?;
         }
-        let prepared = materializer::prepare_at(&self.cas, action, root)?;
+        let prepared = materializer::prepare_at(self.store.cas(), action, root)?;
 
         let sandbox_spec = SandboxSpec {
             mode: action.execution_mode,
@@ -1056,8 +1073,8 @@ impl LocalExecutor {
             });
         }
 
-        let digest = self.cas.put(&stdout)?;
-        self.cache.insert(
+        let digest = self.store.cas().put(&stdout)?;
+        self.guard.actions().insert(
             &key,
             &StoredResult {
                 exit_code: 0,
@@ -1090,8 +1107,8 @@ impl LocalExecutor {
             .snapshot_key
             .expect("run_warm_uncached requires a snapshot owner (a snapshot_key)");
         if fresh {
-            let tag = skey.to_hex();
-            let _ = fs::remove_file(self.warm_meta.join(&tag[..16]).join("inputs"));
+            // Discard the commit record so the next run cold-populates.
+            self.guard.warm(&skey).lock().discard_record();
         }
         self.run_warm(action, /*save*/ false)
     }
@@ -1141,7 +1158,15 @@ impl Executor for LocalExecutor {
         ) && matches!(action.execution_mode, ExecutionMode::Sealed);
 
         if cacheable {
-            if let Some(stored) = self.cache.lookup(&key)? {
+            // Verified hit (§3.1): the entry is honored only if its output
+            // blobs are present — `Verify::Stats` is one `stat` per output.
+            // A missing blob (torn store, a GC or import bug) fails open to a
+            // re-run: cost is time, never correctness.
+            if let Some(stored) =
+                self.store
+                    .actions()
+                    .lookup_verified(&key, self.store.cas(), Verify::Stats)?
+            {
                 return Ok(ActionResult {
                     exit_code: stored.exit_code,
                     outputs: stored.outputs,
@@ -1161,7 +1186,7 @@ impl Executor for LocalExecutor {
         };
 
         if result.exit_code == 0 && cacheable {
-            self.cache.insert(
+            self.guard.actions().insert(
                 &key,
                 &StoredResult {
                     exit_code: result.exit_code,

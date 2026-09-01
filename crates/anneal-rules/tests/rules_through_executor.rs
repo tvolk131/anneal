@@ -101,6 +101,7 @@ fn genrule_analyzes_executes_and_caches() {
         .strings("srcs", ["a.txt", "b.txt"])
         .strings("outs", ["combined.txt"])
         .string("cmd", "cat $(SRCS) > $(OUTS)")
+        .value("deterministic", anneal_rules::AttrValue::Bool(true))
         .build();
     let label = anneal_core::Label::parse("//pkg:combined").unwrap();
     let tc = TestContext::new();

@@ -101,6 +101,7 @@ dependencies = [
  "anneal-loader",
  "anneal-query",
  "anneal-rules",
+ "anneal-store",
  "clap",
  "libc",
  "tempfile",
@@ -120,6 +121,7 @@ dependencies = [
  "anneal-cas",
  "anneal-core",
  "anneal-snapshot",
+ "anneal-store",
  "libc",
  "serde_json",
  "tempfile",
@@ -168,6 +170,17 @@ version = "0.0.0"
 dependencies = [
  "anneal-cas",
  "anneal-core",
+ "tempfile",
+]
+
+[[package]]
+name = "anneal-store"
+version = "0.0.0"
+dependencies = [
+ "anneal-cas",
+ "anneal-core",
+ "anneal-snapshot",
+ "libc",
  "tempfile",
 ]
 
