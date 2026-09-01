@@ -9,7 +9,7 @@
 //! explanations, and generated-file materialization. All substantive logic lives in the
 //! libraries; this file only orchestrates and formats.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anneal_action::{Action, InputSource};
@@ -42,10 +42,18 @@ enum Command {
         /// The target label, e.g. `//app:app`.
         target: String,
     },
-    /// Build a target and summarize its test results.
+    /// Build a target and summarize its test results. With `--base`, the CI
+    /// execute mode instead: build and test **everything affected** by the
+    /// change since HEAD diverged from the ref — the oracle's answer, executed.
     Test {
-        /// The target label, e.g. `//app:app`.
-        target: String,
+        /// The target label, e.g. `//app:app`. Omit with `--base` to test
+        /// every affected target.
+        target: Option<String>,
+        /// Test every target affected since HEAD diverged from this ref
+        /// (merge-base). Affected targets without tests are still built; a
+        /// compile break fails the run.
+        #[arg(long, conflicts_with = "target")]
+        base: Option<String>,
     },
     /// List the targets affected by changes. The CI oracle: the change set is
     /// derived from the graph (owning packages plus reverse dependents), so a
@@ -177,14 +185,26 @@ fn run(cli: Cli) -> Result<i32, String> {
             cli.config.require_enforced,
             cli.config.exec_mode.is_none(),
         ),
-        Command::Test { target } => test(
-            &target,
-            &config,
-            &root,
-            cli.config.jobs,
-            cli.config.require_enforced,
-            cli.config.exec_mode.is_none(),
-        ),
+        Command::Test { target, base } => match (target, base) {
+            (Some(target), None) => test(
+                &target,
+                &config,
+                &root,
+                cli.config.jobs,
+                cli.config.require_enforced,
+                cli.config.exec_mode.is_none(),
+            ),
+            (None, Some(base)) => test_affected(
+                &base,
+                &config,
+                &root,
+                cli.config.jobs,
+                cli.config.require_enforced,
+                cli.config.exec_mode.is_none(),
+            ),
+            (None, None) => Err("specify a target label or --base <git-ref>".to_owned()),
+            (Some(_), Some(_)) => unreachable!("clap rejects target with --base"),
+        },
         Command::Materialize {
             target,
             check,
@@ -313,26 +333,7 @@ fn affected(
     format: Option<&str>,
     root: &Path,
 ) -> Result<i32, String> {
-    use anneal_query::changes;
-    let (base_desc, mut changed) = match (base, since) {
-        (Some(git_ref), _) => {
-            let cb = changes::changed_base(root, git_ref).map_err(|e| e.to_string())?;
-            (format!("{git_ref} (merge-base {})", cb.base), cb.files)
-        }
-        (None, Some(git_ref)) => (
-            git_ref.to_string(),
-            changes::changed_since(root, git_ref).map_err(|e| e.to_string())?,
-        ),
-        (None, None) => return Err("specify --base <git-ref> or --since <git-ref>".to_owned()),
-    };
-    // Untracked (non-ignored) files are part of the change set in both forms.
-    for path in changes::untracked(root).map_err(|e| e.to_string())? {
-        if !changed.contains(&path) {
-            changed.push(path);
-        }
-    }
-    changed.sort();
-    changed.dedup();
+    let (base_desc, changed) = change_set(base, since, root)?;
 
     // The requested format is part of the contract whenever the query
     // succeeds — including the empty answer.
@@ -399,6 +400,171 @@ fn incremental_cone(
         return None;
     }
     Some(result.targets.into_iter().collect())
+}
+
+/// The change set for a ref-keyed query: merge-base-resolved (`--base`) or
+/// literal (`--since`), unioned with untracked-but-unignored files. The one
+/// definition of "what changed" shared by `affected` and `test --base`.
+fn change_set(
+    base: Option<&str>,
+    since: Option<&str>,
+    root: &Path,
+) -> Result<(String, Vec<PathBuf>), String> {
+    use anneal_query::changes;
+    let (base_desc, mut changed) = match (base, since) {
+        (Some(git_ref), _) => {
+            let cb = changes::changed_base(root, git_ref).map_err(|e| e.to_string())?;
+            (format!("{git_ref} (merge-base {})", cb.base), cb.files)
+        }
+        (None, Some(git_ref)) => (
+            git_ref.to_string(),
+            changes::changed_since(root, git_ref).map_err(|e| e.to_string())?,
+        ),
+        (None, None) => return Err("specify --base <git-ref> or --since <git-ref>".to_owned()),
+    };
+    for path in changes::untracked(root).map_err(|e| e.to_string())? {
+        if !changed.contains(&path) {
+            changed.push(path);
+        }
+    }
+    changed.sort();
+    changed.dedup();
+    Ok((base_desc, changed))
+}
+
+/// The locked execution setup shared by mutating commands: the store, its
+/// write capability, and an executor over both.
+fn locked_exec(
+    root: &Path,
+    jobs: Option<usize>,
+    require_enforced: bool,
+) -> Result<(Store, anneal_store::WorkspaceGuard, LocalExecutor), String> {
+    let store =
+        Store::open(root.join(".anneal")).map_err(|e| format!("opening .anneal store: {e}"))?;
+    let guard = store
+        .lock()
+        .map_err(|e| format!("acquiring workspace lock: {e}"))?;
+    let mut exec = LocalExecutor::with_store_guard(store.clone(), guard.clone());
+    if let Some(j) = jobs {
+        exec = exec.jobs(j);
+    }
+    let exec = exec.require_enforced(require_enforced);
+    Ok((store, guard, exec))
+}
+
+/// Execute mode — the CI rung: test every target affected since HEAD diverged
+/// from `base`. Composition all the way down: the change set (merge-base ∪
+/// untracked) selects affected targets; each affected target's demanded
+/// actions (its tests plus the builds they stand on) are collected and
+/// deduplicated by action name — shared dependencies execute once; the
+/// executor runs the union sandboxed. Affected-but-testless targets are still
+/// built: a compile break in an affected target fails the run. Exit codes:
+/// 0 all green (including "no changes"), 1 failures, 2 could-not-determine.
+#[allow(clippy::too_many_arguments)]
+fn test_affected(
+    base: &str,
+    config: &Configuration,
+    root: &Path,
+    jobs: Option<usize>,
+    require_enforced: bool,
+    auto_cone: bool,
+) -> Result<i32, String> {
+    let (base_desc, changed) = change_set(Some(base), None, root)?;
+    if changed.is_empty() {
+        println!("no changes since {base_desc}");
+        return Ok(0);
+    }
+    let registry = builtin_rules();
+    let graph = load_workspace(root, &registry).map_err(|e| e.to_string())?;
+    let result = anneal_query::affected(root, &graph, &changed);
+    if result.workspace_wide {
+        eprintln!(
+            "note: {} change(s) outside any package (e.g. {}) — treating the whole workspace as affected",
+            result.unowned.len(),
+            result.unowned[0].display(),
+        );
+    }
+    let affected = result.targets;
+    if affected.is_empty() {
+        println!("no affected targets since {base_desc}");
+        return Ok(0);
+    }
+    eprintln!("{} affected target(s) since {base_desc}", affected.len());
+
+    let (store, _guard, exec) = locked_exec(root, jobs, require_enforced)?;
+    let materialized = MaterializeStore::open(store.local_root().to_path_buf(), root)
+        .map_err(|e| format!("reading materialize manifest: {e}"))?
+        .paths();
+    let mut analyzer = Analyzer::new(&graph, &registry, config, root, exec.cas())
+        .with_executor(&exec)
+        .with_materialized_paths(materialized);
+    if auto_cone {
+        if let Some(cone) = incremental_cone(root, &graph) {
+            let total = graph.len();
+            println!(
+                "focus cone: {} incremental / {} hermetic target(s)",
+                cone.len(),
+                total.saturating_sub(cone.len())
+            );
+            analyzer = analyzer.with_incremental_cone(cone);
+        }
+    }
+
+    // Union of per-target demands, deduplicated by action name: overlapping
+    // analyses emit identical actions for shared dependencies (same graph,
+    // same configuration, same cone), so the first copy is the copy.
+    let mut by_name: BTreeMap<String, Action> = BTreeMap::new();
+    for label in &affected {
+        let analyzed = analyzer.analyze(label).map_err(|e| e.to_string())?;
+        for action in anneal_analysis::demanded_actions(&analyzed, label, true) {
+            by_name.entry(action.name().to_owned()).or_insert(action);
+        }
+    }
+    let actions: Vec<Action> = by_name.into_values().collect();
+    println!(
+        "{} demanded action(s) across {} affected target(s)",
+        actions.len(),
+        affected.len()
+    );
+
+    let results = exec
+        .execute_graph_observed(&actions, &|action, result| {
+            print_action_status(action, result)
+        })
+        .map_err(|e| e.to_string())?;
+    let (failed_actions, skipped) = failure_counts(&results);
+    let cached = results.iter().filter(|r| r.cache_hit).count();
+    let mut passed = 0usize;
+    let mut failed = 0usize;
+    let mut saw_test = false;
+    for (i, result) in results.iter().enumerate() {
+        if let Some(ok) = test_outcome(&exec, result) {
+            saw_test = true;
+            if ok {
+                passed += 1;
+            } else {
+                failed += 1;
+                println!("  FAIL  {}", actions[i].name());
+            }
+        }
+    }
+    if !saw_test && failed_actions == 0 && skipped == 0 {
+        println!(
+            "tests: no test actions among the affected targets — {} action(s) executed as compile validation ({cached} cached)",
+            actions.len()
+        );
+        return Ok(0);
+    }
+    println!(
+        "tests: {passed} passed, {failed} failed — {} affected target(s), {} action(s) ({cached} cached)",
+        affected.len(),
+        actions.len()
+    );
+    if failed > 0 || failed_actions > 0 || skipped > 0 {
+        Ok(1)
+    } else {
+        Ok(0)
+    }
 }
 
 /// Analyze and execute a target's action graph; return the process exit code.

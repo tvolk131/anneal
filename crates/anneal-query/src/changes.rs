@@ -99,12 +99,24 @@ pub fn changed_base(root: &Path, git_ref: &str) -> Result<ChangedBase, ChangesEr
 
 /// Files present in the working tree that git has never tracked **and no
 /// ignore rule covers** (`--exclude-standard`): a brand-new source file shows
-/// up; `.anneal/`, `target/`, and other ignored debris never do.
+/// up; `target/` and other ignored debris never do. Anneal's own store
+/// (`.anneal/`) is filtered structurally as well — a repo that hasn't
+/// gitignored it yet would otherwise flip every change query workspace-wide
+/// after its first build.
 pub fn untracked(root: &Path) -> Result<Vec<PathBuf>, ChangesError> {
-    Ok(lines(&git(
-        root,
-        &["ls-files", "--others", "--exclude-standard"],
-    )?))
+    Ok(
+        lines(&git(root, &["ls-files", "--others", "--exclude-standard"])?)
+            .into_iter()
+            .filter(|p| !is_anneal_store(p))
+            .collect(),
+    )
+}
+
+/// Whether a path is inside anneal's store directory (`.anneal/…`).
+fn is_anneal_store(path: &Path) -> bool {
+    path.components()
+        .next()
+        .is_some_and(|c| c.as_os_str() == ".anneal")
 }
 
 /// The dirty working tree — staged, unstaged, and untracked — as
@@ -272,6 +284,17 @@ mod tests {
             vec![PathBuf::from("brand-new.txt")],
             "untracked must include new sources and exclude ignored junk"
         );
+    }
+
+    #[test]
+    fn untracked_excludes_the_anneal_store_itself() {
+        // Without this, the first build (which creates `.anneal/`) would turn
+        // every later change query workspace-wide in un-gitignored repos.
+        let r = repo();
+        fs::create_dir_all(r.root.join(".anneal/store/objects")).unwrap();
+        fs::write(r.root.join(".anneal/store/objects/blob"), b"x").unwrap();
+        fs::write(r.root.join("real.txt"), "r\n").unwrap();
+        assert_eq!(untracked(&r.root).unwrap(), vec![PathBuf::from("real.txt")]);
     }
 
     #[test]

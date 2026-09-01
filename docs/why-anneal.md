@@ -84,9 +84,11 @@ graph-derived closure can over-select (safe); it cannot silently skip a declared
 because there is no filter to forget to update. Output is labels (default) or one JSON object
 (`base`, `changed_files`, `unowned`, `workspace_wide`, `targets`); the exit code is 0 whenever
 the query *succeeds*, so a CI consuming it treats a nonzero exit as "could not determine" —
-never as "passed". This is the oracle form of CI on Anneal: decide with it today, and let it
-*execute* the affected cone (a `test --base` form, with pruning and sandbox enforcement) as
-that lands.
+never as "passed". Execute mode follows the oracle through: `anneal test --base origin/main`
+runs every affected target's demanded actions — its tests plus the builds they stand on —
+sandboxed, with shared dependencies executing once and affected-but-testless targets still
+compiled. A clean checkout runs the cone Hermetic (no warm state — cache-backed only), so
+what CI validates is exactly what the cache can reproduce.
 
 ## Wrap native tools instead of replacing them
 
@@ -177,11 +179,11 @@ anneal build //path/to/package:target
 anneal test //path/to/package:target
 ```
 
-The CI oracle — graph-derived impact, merge-base-scoped, machine-readable — is the first
-thing a repository can adopt without changing how it builds:
+The CI ladder — decide, then execute:
 
 ```console
-anneal affected --base origin/main --format json
+anneal affected --base origin/main --format json   # the oracle: what is affected
+anneal test --base origin/main --require-enforced  # execute it: tests + the builds they stand on
 ```
 
 CI can require the strongest enforcement grade available for its actions:
