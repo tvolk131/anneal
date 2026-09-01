@@ -115,9 +115,8 @@ impl StateHandle {
 /// Derive the state key. Folds in the declaring rule's kind (§2.6 scoping),
 /// the **declaring target's label** (owner identity — TODO.md P0 #4: distinct
 /// owners with identical toolchain and configuration shards must never share
-/// a warm tree or snapshot; re-keying invalidates existing state once, which
-/// is acceptable for an accelerator), the namespace and shard (identity), the
-/// kind discriminant, and — for interleaved state — the attestation epoch
+/// a warm tree or snapshot), the namespace and shard (identity), the kind
+/// discriminant, and — for interleaved state — the attestation epoch
 /// (revocation).
 pub(crate) fn state_key(rule_kind: &str, owner: &Label, decl: &PersistentStateDecl) -> Digest {
     let mut buf = Vec::new();

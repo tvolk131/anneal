@@ -26,8 +26,7 @@ use crate::action::{Action, InputSource};
 use crate::SANDBOX_VERSION;
 
 /// The version tag of the identity encoding itself. Bumped when the *meaning*
-/// of an identity changes (v2 adds the output map and the network flag) — every
-/// existing entry invalidates, exactly once.
+/// of an identity changes (v2 added the output map and the network flag).
 const ACTION_IDENTITY_VERSION: &str = "anneal-action-v2";
 
 /// The complete identity-relevant projection of an [`Action`]. Field-for-field

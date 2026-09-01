@@ -55,10 +55,7 @@ commit record; the latter is the persisted generation restored on cold starts. R
 tree: it must be unreachable from the process running inside the tree, which cannot
 forge or destroy its own alibi.
 
-Migration from the current flat layout: **none.** The pre-cutover layout is abandoned
-with no handling code of any kind — a breaking change explicitly accepted (all state is
-derived; users delete `.anneal` once or let the new layout replace it). `lock.rs` moves
-out of `anneal-cli`.
+`lock.rs` moves out of `anneal-cli` into this crate.
 
 ## 3. Crash-safety model
 
@@ -212,8 +209,7 @@ Implementing the crate closes, or gives a home to, the store-side audit:
   `NonCacheable` by default and cache only through explicit opt-in — a fixed-output pin
   or a declared-deterministic path with audit sampling);
 - owner identity in snapshot/warm keys, plus a human-readable owner line in the warm
-  manifest for diagnostics (P0 #4; re-keying invalidates existing warm dirs and snapshots
-  once — acceptable for accelerators);
+  manifest for diagnostics (P0 #4);
 - digest-memo hardening — `(mtime, size, ctime, inode)` with a paranoid re-hash tier
   (P0 #2);
 - action-hit existence check (fail-open to re-run, as the query path already does);
@@ -225,7 +221,7 @@ Implementing the crate closes, or gives a home to, the store-side audit:
 ## 8. Rollout
 
 1. **Facade, no behavior change:** layout constants, `Store::open` returning the
-   existing handles, `lock.rs` relocated, legacy-layout migration, boot recovery.
+   existing handles, `lock.rs` relocated, boot recovery.
 2. **Persistence and policy:** action-cache and warm-manifest persistence move in with
    `Recovered`/`Verify`; the §7 fixes land inside the crate, each with its
    crash-injection test.
@@ -239,12 +235,8 @@ Implementing the crate closes, or gives a home to, the store-side audit:
    all §7 fixes, crash-injection tests. Phase 3 (export/import/GC/fsck/doctor) is a
    follow-up gated on the identity work it transports.
 2. **Generic-action cacheability:** `NonCacheable` by default; explicit opt-in only.
-3. **Legacy layout:** no migration code; breaking change accepted.
-4. **Interruption tests:** store-API fault injection for every §3.3 phase label, plus a
+3. **Interruption tests:** store-API fault injection for every §3.3 phase label, plus a
    small set of end-to-end subprocess-kill tests on the Linux CI lane.
-5. **Consequences accepted:** identity changes (output map, owner-identity keys, the
-   `anneal-action-v1` → `v2` bump) and the layout change invalidate every existing cache
-   entry, snapshot, and warm dir, exactly once.
 
 ## 10. Deliberately excluded
 

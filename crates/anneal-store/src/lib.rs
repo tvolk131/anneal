@@ -150,9 +150,7 @@ impl Clone for Store {
 
 impl Store {
     /// Open (creating if necessary) the store rooted at `root` — the `.anneal`
-    /// directory itself. No legacy-layout handling: an older layout is simply
-    /// absent from the new paths and re-populates (a breaking change accepted
-    /// in the proposal, §9.3).
+    /// directory itself.
     pub fn open(root: impl Into<PathBuf>) -> io::Result<Store> {
         let root = root.into();
         let store_root = root.join("store");
