@@ -45,7 +45,8 @@
 
 - [ ] Add stable diagnostic codes and actionable undeclared-input messages based on behavior
       the current sandbox can actually report.
-- [ ] Close the untracked-file gap in `affected --since` without sweeping ignored build junk.
+- [x] Close the untracked-file gap in `affected --since` without sweeping ignored build junk.
+      (Both `affected` forms now union `git ls-files --others --exclude-standard`.)
 - [ ] Add `affected --explain` and `why --all` after defining bounded output behavior.
 - [ ] Add user-facing toolchain registration or provisioning so first-party rules do not
       require `ANNEAL_TOOLCHAIN_MANIFEST` and Nix.

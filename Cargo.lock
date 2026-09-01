@@ -114,6 +114,7 @@ dependencies = [
  "anneal-store",
  "clap",
  "libc",
+ "serde_json",
  "tempfile",
 ]
 

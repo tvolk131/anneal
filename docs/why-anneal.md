@@ -66,6 +66,28 @@ Sandboxing proves an input boundary; it does not prove output determinism. Rule 
 engine still need an explicit cacheability contract, and Anneal has pre-1.0 hardening work in
 that area.
 
+## Affected sets you can prove
+
+Polyglot CI usually answers "what should run?" with hand-maintained path filters, and path
+filters fail in two directions. Over-triggering (a README edit rebuilds the world) is merely
+expensive; **under-triggering is silent** — a runtime-loaded file the filter doesn't know about
+means tests that quietly stop running. Anneal answers the question from the graph instead:
+
+```console
+anneal affected --base origin/main --format json
+```
+
+`--base` diffs from where `HEAD` diverged from the ref (merge-base), so the answer is exactly
+this change set however far the target branch has moved — never inflated by the branch's own
+progress. Untracked-but-unignored files count as changes; ignored debris never does. The
+graph-derived closure can over-select (safe); it cannot silently skip a declared dependency,
+because there is no filter to forget to update. Output is labels (default) or one JSON object
+(`base`, `changed_files`, `unowned`, `workspace_wide`, `targets`); the exit code is 0 whenever
+the query *succeeds*, so a CI consuming it treats a nonzero exit as "could not determine" —
+never as "passed". This is the oracle form of CI on Anneal: decide with it today, and let it
+*execute* the affected cone (a `test --base` form, with pruning and sandbox enforcement) as
+that lands.
+
 ## Wrap native tools instead of replacing them
 
 Anneal's first-party rules model native work at a deliberately coarse level.
@@ -155,6 +177,13 @@ anneal build //path/to/package:target
 anneal test //path/to/package:target
 ```
 
+The CI oracle — graph-derived impact, merge-base-scoped, machine-readable — is the first
+thing a repository can adopt without changing how it builds:
+
+```console
+anneal affected --base origin/main --format json
+```
+
 CI can require the strongest enforcement grade available for its actions:
 
 ```console
@@ -164,14 +193,13 @@ anneal build //path/to/package:target --require-enforced
 Dependency-impact and path queries are available separately:
 
 ```console
-anneal affected --since origin/main
 anneal why //app:binary //lib:generated_config
 anneal why //app:binary --since origin/main
 ```
 
-`affected --since` is graph-derived rather than a hand-maintained path filter, but currently
-omits untracked files that have not been added to Git. The local focus-cone path used by
-`build` and `test` derives dirty files from `git status` and does include untracked files.
+Both `affected` forms (`--base`, and the literal-ref `--since`) include untracked-but-
+unignored files. The local focus-cone path used by `build` and `test` derives dirty files
+from `git status` and includes the same horizon.
 
 ## Where Anneal sits
 

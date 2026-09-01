@@ -191,3 +191,158 @@ fn affected_and_why_since_track_a_git_change() {
         String::from_utf8_lossy(&why.stdout)
     );
 }
+
+// --- The CI oracle: `affected --base` / `--format json` / the untracked fix -------------
+
+use std::process::Command as GitCommand;
+
+fn git(root: &Path, args: &[&str]) {
+    let out = GitCommand::new("git")
+        .args([
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .current_dir(root)
+        .output()
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A git repo whose `main` has one commit; HEAD sits on a `feature` branch
+/// with one committed change and one uncommitted untracked file.
+fn oracle_workspace(build: &str) -> tempfile::TempDir {
+    let tmp = workspace(build);
+    let pkg = tmp.path().join("pkg");
+    std::fs::write(pkg.join("src.txt"), "v1\n").unwrap();
+    git(tmp.path(), &["init", "-q", "-b", "main"]);
+    git(tmp.path(), &["add", "."]);
+    git(tmp.path(), &["commit", "-q", "-m", "base"]);
+    git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(pkg.join("src.txt"), "v2\n").unwrap();
+    std::fs::write(pkg.join("brand-new.txt"), "n\n").unwrap(); // committed change + …
+    git(tmp.path(), &["add", "."]);
+    git(tmp.path(), &["commit", "-q", "-m", "feature work"]);
+    std::fs::write(pkg.join("uncommitted.txt"), "u\n").unwrap(); // …an untracked one
+                                                                 // The target branch moves forward: a literal `--since main` diff would
+                                                                 // wrongly include upstream.txt in this branch's change set.
+    git(tmp.path(), &["stash", "-q", "--include-untracked"]);
+    git(tmp.path(), &["checkout", "-q", "main"]);
+    std::fs::write(pkg.join("upstream.txt"), "u\n").unwrap();
+    git(tmp.path(), &["add", "."]);
+    git(tmp.path(), &["commit", "-q", "-m", "upstream moves"]);
+    git(tmp.path(), &["checkout", "-q", "feature"]);
+    git(tmp.path(), &["stash", "pop", "-q"]);
+    tmp
+}
+
+const SIMPLE_GENRULE: &str =
+    "genrule(name = \"gen\", srcs = [\"src.txt\"], outs = [\"out.txt\"], cmd = \"cp $(SRCS) $(OUTS)\", deterministic = True)\n";
+
+#[test]
+fn affected_base_scopes_to_this_branch_and_includes_untracked() {
+    let ws = oracle_workspace(SIMPLE_GENRULE);
+    let out = anneal(ws.path(), &["affected", "--base", "main"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("//pkg:gen"),
+        "the changed package's target is affected:\n{stdout}"
+    );
+    // Exit code 0 with changes; and "no changes" is also success (the answer
+    // is the output, not the code).
+}
+
+#[test]
+fn affected_since_also_includes_untracked_files() {
+    // The TODO item named this form specifically: `--since` must union
+    // untracked-but-unignored files exactly like `--base` does.
+    let ws = oracle_workspace(SIMPLE_GENRULE);
+    let out = anneal(
+        ws.path(),
+        &["affected", "--since", "main", "--format", "json"],
+    );
+    assert!(out.status.success());
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    let files = v["changed_files"].as_array().unwrap();
+    assert!(
+        files.iter().any(|f| f == "pkg/uncommitted.txt"),
+        "--since must include untracked files:\n{files:?}"
+    );
+}
+
+#[test]
+fn affected_json_is_machine_readable() {
+    let ws = oracle_workspace(SIMPLE_GENRULE);
+    let out = anneal(
+        ws.path(),
+        &["affected", "--base", "main", "--format", "json"],
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("one JSON object");
+    assert_eq!(v["workspace_wide"], false);
+    assert_eq!(v["targets"], serde_json::json!(["//pkg:gen"]));
+    let files = v["changed_files"].as_array().unwrap();
+    assert!(
+        files.iter().any(|f| f == "pkg/uncommitted.txt"),
+        "untracked files are changes:\n{files:?}"
+    );
+    assert!(files.iter().any(|f| f == "pkg/src.txt"));
+    assert!(
+        !files.iter().any(|f| f == "pkg/upstream.txt"),
+        "the target branch's own movement is not this branch's change set"
+    );
+    assert!(v["base"].as_str().unwrap().contains("merge-base"));
+}
+
+#[test]
+fn affected_with_no_changes_exits_zero() {
+    let tmp = workspace(SIMPLE_GENRULE);
+    std::fs::write(tmp.path().join("pkg/src.txt"), "v1\n").unwrap();
+    git(tmp.path(), &["init", "-q", "-b", "main"]);
+    git(tmp.path(), &["add", "."]);
+    git(tmp.path(), &["commit", "-q", "-m", "base"]);
+    let out = anneal(tmp.path(), &["affected", "--base", "main"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("no changes"));
+
+    // The format is part of the contract even for the empty answer: JSON in,
+    // JSON out — a consumer must never hit a parse error on success.
+    let out = anneal(
+        tmp.path(),
+        &["affected", "--base", "main", "--format", "json"],
+    );
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim())
+        .expect("no-changes is still one JSON object");
+    assert_eq!(v["changed_files"], serde_json::json!([]));
+    assert_eq!(v["targets"], serde_json::json!([]));
+    assert_eq!(v["workspace_wide"], false);
+}
+
+#[test]
+fn affected_requires_a_ref() {
+    let tmp = workspace(SIMPLE_GENRULE);
+    std::fs::write(tmp.path().join("pkg/src.txt"), "v1\n").unwrap();
+    let out = anneal(tmp.path(), &["affected"]);
+    assert!(!out.status.success(), "no ref is a usage error, not a pass");
+}

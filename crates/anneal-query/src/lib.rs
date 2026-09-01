@@ -1,4 +1,6 @@
-//! Graph queries (§11): ownership, `affected`, and `why`.
+//! Graph queries (§11): ownership, `affected`, and `why` — plus [`changes`],
+//! the VCS seam that turns "what differs from X?" into changed-file sets for
+//! those queries to scope.
 //!
 //! Milestone-1 scope: [`owner`] (the file → package map) and [`affected`] (the
 //! reverse-dependency closure of a change). `why` arrives next.
@@ -8,6 +10,8 @@ use std::path::{Path, PathBuf};
 
 use anneal_core::Label;
 use anneal_loader::TargetGraph;
+
+pub mod changes;
 
 /// The package that **owns** a path: the nearest enclosing directory containing a
 /// `BUILD` file (§1.5). Returns the package path (`/`-separated; empty string for the
