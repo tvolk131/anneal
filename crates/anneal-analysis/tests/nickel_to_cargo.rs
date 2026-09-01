@@ -4,9 +4,10 @@
 //! the file at execution; Anneal never introspects it), and it's the Nickel → Rust
 //! direction of generated-native-package routing.
 
+use anneal_action::Action;
 use anneal_analysis::Analyzer;
 use anneal_core::{AxisValues, Configuration, Label, OptLevel, Platform};
-use anneal_exec::{Action, ActionResult, LocalExecutor};
+use anneal_exec::{ActionResult, LocalExecutor};
 use anneal_loader::load_package;
 use anneal_rules::builtin_rules;
 use anneal_test::{TestOutcome, TestResult};

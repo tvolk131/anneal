@@ -7,11 +7,13 @@ description = "Analyzes a target graph into an action graph: dep-ordered rule an
 [dependencies]
 anneal-core = { path = "../anneal-core" }
 anneal-cas = { path = "../anneal-cas" }
+anneal-action = { path = "../anneal-action" }
 anneal-exec = { path = "../anneal-exec" }
 anneal-rules = { path = "../anneal-rules" }
 anneal-loader = { path = "../anneal-loader" }
 
 [dev-dependencies]
+anneal-action = { path = "../anneal-action" }
 tempfile = "3"
 anneal-test = { path = "../anneal-test" }
 

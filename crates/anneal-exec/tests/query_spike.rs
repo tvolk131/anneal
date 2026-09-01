@@ -15,7 +15,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anneal_exec::{LocalExecutor, QuerySpec, Toolchain};
+use anneal_action::{QuerySpec, Toolchain};
+use anneal_exec::LocalExecutor;
 
 /// Resolve a sealed-mountable rust toolchain. Preferred source is the Nix
 /// manifest (`ANNEAL_TOOLCHAIN_MANIFEST`, exported by the dev shell) because it

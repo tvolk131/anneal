@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use anneal_exec::Toolchain;
+use anneal_action::Toolchain;
 use serde::Deserialize;
 
 use crate::rule::RuleError;

@@ -13,8 +13,9 @@
 
 use std::path::Path;
 
+use anneal_action::Action;
 use anneal_core::{AxisValues, Configuration, Label, Platform};
-use anneal_exec::{Action, Executor, LocalExecutor};
+use anneal_exec::{Executor, LocalExecutor};
 use anneal_rules::{AttrValue, Attrs, GenRule, Rule, TestContext};
 
 fn host_config() -> Configuration {

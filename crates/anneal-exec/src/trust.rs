@@ -5,7 +5,7 @@
 
 pub use anneal_store::{CacheTier, EnforcementGrade};
 
-use crate::action::{Action, CachePolicy, ExecutionMode};
+use anneal_action::{Action, CachePolicy, ExecutionMode};
 
 /// The executing host platform, for provenance.
 pub(crate) fn host_platform() -> String {
@@ -31,10 +31,10 @@ pub(crate) fn host_platform() -> String {
 /// Deterministic ∧ Sealed ∧ grade < Enforced ⇒ Local  (§2.8)
 /// ```
 pub fn compute_tier(action: &Action, grade: EnforcementGrade) -> CacheTier {
-    if !matches!(action.execution_mode, ExecutionMode::Sealed) {
+    if !matches!(action.execution_mode(), ExecutionMode::Sealed) {
         return CacheTier::None;
     }
-    match action.cache_policy {
+    match action.cache_policy() {
         CachePolicy::NonCacheable | CachePolicy::SnapshotConsuming => CacheTier::None,
         CachePolicy::FixedOutput { .. } => CacheTier::Promotable,
         CachePolicy::SnapshotBased => CacheTier::Local,
@@ -81,7 +81,7 @@ mod tests {
         let action = Action::builder("a", vec!["./tool".to_owned()])
             .snapshot(Digest::of(b"k"), vec!["target".into()])
             .build();
-        assert_eq!(action.cache_policy, CachePolicy::SnapshotBased);
+        assert_eq!(action.cache_policy(), CachePolicy::SnapshotBased);
         assert_eq!(
             compute_tier(&action, EnforcementGrade::Enforced),
             CacheTier::Local
@@ -110,23 +110,24 @@ mod tests {
 
     #[test]
     fn uncacheable_shapes_are_tier_none() {
-        let mut consuming = Action::builder("a", vec!["./tool".to_owned()])
+        let consuming = Action::builder("a", vec!["./tool".to_owned()])
             .snapshot_restore(Digest::of(b"k"), vec!["target".into()])
             .build();
         assert_eq!(
             compute_tier(&consuming, EnforcementGrade::Enforced),
             CacheTier::None
         );
-        consuming.execution_mode = ExecutionMode::Native;
+        let native = Action::builder("a", vec!["./tool".to_owned()])
+            .snapshot_restore(Digest::of(b"k"), vec!["target".into()])
+            .mode(ExecutionMode::Native)
+            .build();
         assert_eq!(
-            compute_tier(&consuming, EnforcementGrade::Enforced),
+            compute_tier(&native, EnforcementGrade::Enforced),
             CacheTier::None
         );
-        let permeable = {
-            let mut a = base();
-            a.execution_mode = ExecutionMode::Permeable;
-            a
-        };
+        let permeable = Action::builder("a", vec!["./tool".to_owned()])
+            .mode(ExecutionMode::Permeable)
+            .build();
         assert_eq!(
             compute_tier(&permeable, EnforcementGrade::Enforced),
             CacheTier::None

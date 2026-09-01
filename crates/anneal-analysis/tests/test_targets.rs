@@ -2,9 +2,10 @@
 //! split, and the payoff — an unrelated edit busts the *compile* cache (coarse
 //! whole-tree inputs) but the *run* still hits because the test binary is unchanged.
 
+use anneal_action::Action;
 use anneal_analysis::Analyzer;
 use anneal_core::{AxisValues, Configuration, Label, OptLevel, Platform};
-use anneal_exec::{Action, ActionResult, LocalExecutor};
+use anneal_exec::{ActionResult, LocalExecutor};
 use anneal_loader::load_package;
 use anneal_rules::builtin_rules;
 

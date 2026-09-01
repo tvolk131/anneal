@@ -6,11 +6,10 @@
 //! `corelib`'s artifact from the snapshot while recompiling `applib` — exactly the
 //! incremental path whose correctness the invariant governs.
 
+use anneal_action::Action;
 use anneal_analysis::Analyzer;
 use anneal_core::{AxisValues, Configuration, Label, OptLevel, Platform};
-use anneal_exec::{
-    prime_snapshot, verify_correctness_neutral, verify_warm_neutral, Action, LocalExecutor,
-};
+use anneal_exec::{prime_snapshot, verify_correctness_neutral, verify_warm_neutral, LocalExecutor};
 use anneal_loader::load_package;
 use anneal_rules::builtin_rules;
 

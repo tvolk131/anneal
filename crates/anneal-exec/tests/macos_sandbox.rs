@@ -5,8 +5,9 @@ use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
+use anneal_action::{Action, Toolchain};
 use anneal_core::Digest;
-use anneal_exec::{Action, Executor, LocalExecutor, Toolchain};
+use anneal_exec::{Executor, LocalExecutor};
 
 mod support;
 

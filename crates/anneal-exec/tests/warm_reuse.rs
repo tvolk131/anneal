@@ -9,8 +9,9 @@
 
 use std::path::PathBuf;
 
+use anneal_action::Action;
 use anneal_core::Digest;
-use anneal_exec::{Action, Executor, LocalExecutor};
+use anneal_exec::{Executor, LocalExecutor};
 
 mod support;
 

@@ -2,10 +2,11 @@
 name = "anneal-exec"
 version.workspace = true
 edition.workspace = true
-description = "Execution kernel: Action model, action cache, materializer, sandbox, and the Executor interface."
+description = "Execution kernel: scheduler, sandbox, materializer, warm reuse, fixed-output fetch, and the Executor interface."
 
 [dependencies]
 anneal-core = { path = "../anneal-core" }
+anneal-action = { path = "../anneal-action" }
 anneal-cas = { path = "../anneal-cas" }
 anneal-snapshot = { path = "../anneal-snapshot" }
 anneal-store = { path = "../anneal-store" }
@@ -15,6 +16,7 @@ libc = "0.2"
 ureq = "3"
 
 [dev-dependencies]
+anneal-action = { path = "../anneal-action" }
 serde_json = "1"
 tempfile = "3"
 

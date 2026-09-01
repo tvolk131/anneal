@@ -3,7 +3,7 @@
 //! This crate *is* the system/rule boundary (§5.3): "system provides policy; rules
 //! provide mechanism." The narrow interface is [`Rule::analyze`], which maps a
 //! target's attributes, configuration, and dependency providers to a set of
-//! [`anneal_exec::Action`]s plus the typed [`ProviderSet`] it exposes to dependents
+//! [`anneal_action::Action`]s plus the typed [`ProviderSet`] it exposes to dependents
 //! (§5.2).
 //!
 //! The system side hands the rule a [`RuleContext`]: typed attribute access,
@@ -17,7 +17,7 @@
 //!
 //! Three rules: [`rules::FileGroup`], [`rules::Alias`], [`rules::GenRule`]. `genrule`
 //! consumes **resolved** source files (paths on disk, and `filegroup` providers) and
-//! emits one [`anneal_exec::Action`]. Consuming the *produced* outputs of another
+//! emits one [`anneal_action::Action`]. Consuming the *produced* outputs of another
 //! action as inputs (the genrule→genrule action graph) needs post-execution digest
 //! threading and arrives with `anneal-analysis`. Per-rule axis interpretation (§13.6)
 //! is also deferred — `genrule` is configuration-invariant for now.

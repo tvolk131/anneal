@@ -13,6 +13,7 @@ anneal-core = { path = "../anneal-core" }
 anneal-loader = { path = "../anneal-loader" }
 anneal-analysis = { path = "../anneal-analysis" }
 anneal-rules = { path = "../anneal-rules" }
+anneal-action = { path = "../anneal-action" }
 anneal-exec = { path = "../anneal-exec" }
 tempfile = "3"
 

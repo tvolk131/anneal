@@ -2,9 +2,10 @@
 //! the build's cache key (configuration matters), and a coverage build — whose flag
 //! is stable-supported — actually compiles through the kernel.
 
+use anneal_action::{action_digest, Action};
 use anneal_analysis::{ActionGraph, Analyzer};
 use anneal_core::{AxisValues, Configuration, Coverage, DebugInfo, Label, Platform};
-use anneal_exec::{action_digest, Action, Executor, LocalExecutor};
+use anneal_exec::{Executor, LocalExecutor};
 use anneal_loader::load_package;
 use anneal_rules::builtin_rules;
 

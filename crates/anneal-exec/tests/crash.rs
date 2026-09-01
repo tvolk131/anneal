@@ -11,9 +11,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use anneal_action::Action;
 use anneal_core::Digest;
 use anneal_exec::materialize::MaterializeStore;
-use anneal_exec::{Action, Executor, LocalExecutor};
+use anneal_exec::{Executor, LocalExecutor};
 
 mod support;
 

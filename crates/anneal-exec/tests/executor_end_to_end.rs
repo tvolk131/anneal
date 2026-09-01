@@ -4,8 +4,9 @@
 
 use std::collections::BTreeMap;
 
+use anneal_action::{Action, CachePolicy};
 use anneal_core::Digest;
-use anneal_exec::{Action, CachePolicy, Executor, LocalExecutor};
+use anneal_exec::{Executor, LocalExecutor};
 
 mod support;
 

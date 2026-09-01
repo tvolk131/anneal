@@ -11,9 +11,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
+use anneal_action::{QueryError, QueryRunner, QuerySpec};
 use anneal_cas::Cas;
 use anneal_core::{Configuration, Label};
-use anneal_exec::{LocalExecutor, QuerySpec};
 
 use crate::attrs::Attrs;
 use crate::providers::{Artifact, ArtifactSource, ProviderSet};
@@ -108,9 +108,11 @@ pub struct RuleContext<'a> {
     rule_kind: &'a str,
     /// Cross-target state-declaration registry, owned by the analysis run.
     state_registry: &'a StateRegistry,
-    /// The executor, for analysis-time tool queries (§3.6). The **sole** optional
-    /// capability: a query-free analysis run has none, and `query` says so honestly.
-    executor: Option<&'a LocalExecutor>,
+    /// The query capability, for analysis-time tool queries (§3.6). The
+    /// **sole** optional capability: a query-free analysis run wires none, and
+    /// `query` says so honestly. A capability object, not the engine: the
+    /// analyzer wires the real executor; tests can inject a fake.
+    executor: Option<&'a dyn QueryRunner>,
     /// Workspace-relative paths written into the tree by `anneal materialize` (empty =
     /// nothing excluded). Source discovery skips them: they are tree copies of
     /// *generated* outputs, kept only so native tools can see them — the routed action
@@ -157,7 +159,7 @@ impl<'a> RuleContext<'a> {
     /// Enable analysis-time tool queries by wiring the executor (§3.6). The only
     /// optional capability — without it, [`query`](Self::query) reports that this
     /// analysis run has no executor.
-    pub fn with_executor(mut self, executor: &'a LocalExecutor) -> Self {
+    pub fn with_executor(mut self, executor: &'a dyn QueryRunner) -> Self {
         self.executor = Some(executor);
         self
     }
@@ -192,7 +194,7 @@ impl<'a> RuleContext<'a> {
         executor
             .run_query(spec)
             .map(|result| result.stdout)
-            .map_err(|e| RuleError::Message(format!("query failed: {e}")))
+            .map_err(|e: QueryError| RuleError::Message(format!("query failed: {e}")))
     }
 
     pub fn label(&self) -> &Label {

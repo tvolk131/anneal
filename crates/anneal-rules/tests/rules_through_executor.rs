@@ -1,7 +1,7 @@
 //! Phase 2 vertical slice: a rule's analysis produces real [`Action`]s that run and
 //! cache through the Phase 1 kernel.
 //!
-//! [`Action`]: anneal_exec::Action
+//! [`Action`]: anneal_action::Action
 
 use anneal_core::{AxisValues, Configuration, Platform};
 use anneal_exec::{Executor, LocalExecutor};

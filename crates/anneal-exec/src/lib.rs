@@ -26,8 +26,6 @@
 //! Linux.
 //! The precise sealed-mode contract lives in `docs/sandbox-contract.md`.
 
-mod action;
-mod cache;
 mod executor;
 /// Native fixed-output downloads (§FOD): the executor fetches pinned blobs
 /// in-process (rustls + embedded Mozilla roots) — no curl, no sandbox, no
@@ -54,13 +52,8 @@ mod verify;
 /// snapshot-owner path via `LocalExecutor::warm_reuse`.
 mod warm;
 
-pub use action::{
-    Action, ActionBuilder, ActionError, CachePolicy, ExecutionMode, Input, InputSource, Toolchain,
-};
-pub use cache::action_digest;
 pub use executor::{ActionResult, ExecError, Executor, LocalExecutor, PhaseTimings, SandboxError};
 pub use fetch::FetchError;
-pub use query::{QueryBuilder, QueryResult, QuerySpec};
 pub use trust::compute_tier;
 pub use verify::{
     prime_snapshot, verify_correctness_neutral, verify_warm_neutral, NeutralityReport,
@@ -69,7 +62,3 @@ pub use verify::{
 // The stored trust vocabulary lives in `anneal-store` (it is what cache entries
 // persist); re-exported here so downstream crates see one vocabulary.
 pub use anneal_store::{CacheTier, EnforcementGrade, Provenance};
-
-/// Participates in every cache key (§8.1). Bump when sandbox semantics change so that
-/// a sandbox behavior change invalidates previously-cached results.
-pub(crate) const SANDBOX_VERSION: &str = "anneal-sandbox-7";

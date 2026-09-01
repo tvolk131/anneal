@@ -6,7 +6,8 @@
 //! complete as *skipped* (carrying the root failure's name) while independent
 //! subgraphs keep running — only infrastructure errors abort the run.
 
-use anneal_exec::{Action, ActionBuilder, ExecError, ExecutionMode, LocalExecutor};
+use anneal_action::{Action, ActionBuilder, ExecutionMode};
+use anneal_exec::{ExecError, LocalExecutor};
 
 /// A permeable shell action. These tests exercise scheduling behavior, and one test
 /// intentionally coordinates through a host temp directory.

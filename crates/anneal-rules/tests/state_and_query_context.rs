@@ -4,8 +4,9 @@
 
 use std::path::PathBuf;
 
+use anneal_action::{QuerySpec, Toolchain};
 use anneal_core::{AxisValues, Configuration, Label, Platform};
-use anneal_exec::{LocalExecutor, QuerySpec, Toolchain};
+use anneal_exec::LocalExecutor;
 use anneal_rules::{
     Attestation, Attrs, Concurrency, PersistentStateDecl, RuleContext, StateKind, TestContext,
 };

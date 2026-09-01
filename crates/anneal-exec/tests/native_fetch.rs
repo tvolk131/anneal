@@ -8,8 +8,9 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::thread;
 
+use anneal_action::Action;
 use anneal_core::Digest;
-use anneal_exec::{Action, ExecError, Executor, LocalExecutor};
+use anneal_exec::{ExecError, Executor, LocalExecutor};
 
 /// Serve each canned response to one connection, in order, then stop. Returns
 /// the base URL and a handle yielding how many connections were served.

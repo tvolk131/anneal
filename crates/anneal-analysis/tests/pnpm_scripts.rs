@@ -4,9 +4,10 @@
 //! a `build`-kind script declares outputs and exposes them as a provider. Both are
 //! `SnapshotConsuming`: they restore `install`'s snapshot read-only and never cache.
 
+use anneal_action::Action;
 use anneal_analysis::Analyzer;
 use anneal_core::{AxisValues, Configuration, Label, OptLevel, Platform};
-use anneal_exec::{Action, LocalExecutor};
+use anneal_exec::LocalExecutor;
 use anneal_loader::load_package;
 use anneal_rules::builtin_rules;
 

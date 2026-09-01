@@ -4,9 +4,10 @@
 //! This is the deterministic, inferred core of the rule (`docs/pnpm-workspace.md` §1, §6);
 //! the script layer and the Nickel→TS routing are later steps.
 
+use anneal_action::Action;
 use anneal_analysis::Analyzer;
 use anneal_core::{AxisValues, Configuration, Label, OptLevel, Platform};
-use anneal_exec::{Action, LocalExecutor};
+use anneal_exec::LocalExecutor;
 use anneal_loader::load_package;
 use anneal_rules::builtin_rules;
 

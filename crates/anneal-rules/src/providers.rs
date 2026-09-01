@@ -8,17 +8,17 @@
 
 use std::path::PathBuf;
 
+use anneal_action::{ActionBuilder, InputSource};
 use anneal_core::Digest;
-use anneal_exec::{ActionBuilder, InputSource};
 
-/// Where an artifact's content comes from — mirroring [`anneal_exec::InputSource`],
+/// Where an artifact's content comes from — mirroring [`anneal_action::InputSource`],
 /// so a provider can carry both resolved sources and not-yet-produced outputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArtifactSource {
     /// Concrete content, known at analysis time (a source file, a `filegroup`).
     Source(Digest),
     /// An output produced by an action, identified by the producing action's id
-    /// (its [`anneal_exec::Action::name`]) and output name. Resolved to content at
+    /// (its [`anneal_action::Action::name`]) and output name. Resolved to content at
     /// execution time.
     Output { action: String, name: String },
 }

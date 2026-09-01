@@ -312,6 +312,57 @@ impl Action {
         &self.name
     }
 
+    // --- The declared read surface -------------------------------------------------
+    //
+    // Fields are `pub(crate)`: the identity fold (this crate) reads them
+    // directly, and construction stays builder-only. Execution reads an Action
+    // through these named accessors — the boundary this crate exists to draw.
+
+    /// argv; `command[0]` is the program.
+    pub fn command(&self) -> &[String] {
+        &self.command
+    }
+
+    pub fn execution_mode(&self) -> ExecutionMode {
+        self.execution_mode
+    }
+
+    pub fn cache_policy(&self) -> CachePolicy {
+        self.cache_policy
+    }
+
+    /// The configuration this action runs under (§3.3).
+    pub fn config(&self) -> &Configuration {
+        &self.config
+    }
+
+    /// The axes this action's cache key depends on (drives trimming, §6.2).
+    pub fn consumed_axes(&self) -> &BTreeSet<Axis> {
+        &self.consumed_axes
+    }
+
+    pub fn timeout_ms(&self) -> u64 {
+        self.timeout_ms
+    }
+
+    /// Mutable cache directories to snapshot, relative to the working directory.
+    pub fn snapshot_paths(&self) -> &[PathBuf] {
+        &self.snapshot_paths
+    }
+
+    /// Whether the snapshot is shared (saved to the CAS for consumers) or
+    /// private (the warm tree is its only live copy). Only meaningful for
+    /// [`CachePolicy::SnapshotBased`].
+    pub fn snapshot_shared(&self) -> bool {
+        self.snapshot_shared
+    }
+
+    /// Whether the output depends on the target platform (part of identity
+    /// when true; a shared marker when false, §6.3).
+    pub fn platform_sensitive(&self) -> bool {
+        self.platform_sensitive
+    }
+
     /// Declared inputs, keyed by logical input name.
     pub fn inputs(&self) -> &BTreeMap<String, Input> {
         &self.inputs
@@ -354,6 +405,35 @@ impl Action {
     /// The URL of a native fixed-output fetch, if this action is one.
     pub fn fetch_url(&self) -> Option<&str> {
         self.fetch_url.as_deref()
+    }
+
+    /// Replace every [`InputSource::Output`] reference with the concrete blob
+    /// its producer emitted, via `resolve` (which the engine backs with the
+    /// outputs produced earlier in the run). Fails when a reference names an
+    /// unproduced output. The engine drives resolution; the model owns the
+    /// mutation — inputs are its representation.
+    pub fn resolve_outputs_with(
+        &mut self,
+        mut resolve: impl FnMut(&str, &str) -> Option<Digest>,
+    ) -> Result<(), ActionError> {
+        for input in self.inputs.values_mut() {
+            if let InputSource::Output { action, name } = &input.source {
+                let digest = resolve(action, name).ok_or_else(|| {
+                    ActionError::new(format!(
+                        "input references unproduced output {name:?} of action {action:?}"
+                    ))
+                })?;
+                input.source = InputSource::Blob(digest);
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether every input is a concrete blob (no unresolved output refs).
+    pub fn is_resolved(&self) -> bool {
+        self.inputs
+            .values()
+            .all(|input| matches!(input.source, InputSource::Blob(_)))
     }
 
     /// Validate the action contract before materialization or keying. This is the

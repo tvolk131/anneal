@@ -20,7 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anneal_exec::Action;
+use anneal_action::Action;
 
 use crate::context::RuleContext;
 use crate::providers::{Artifact, ArtifactSource, FileSet, ProviderSet};

@@ -4,9 +4,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use anneal_action::{Action, InputSource};
 use anneal_cas::Cas;
 use anneal_core::{Configuration, ExecMode, Label};
-use anneal_exec::{Action, InputSource, LocalExecutor};
 use anneal_loader::TargetGraph;
 use anneal_rules::{
     Artifact, ArtifactSource, ProviderSet, ResolvedDep, RuleContext, RuleRegistry,
@@ -94,7 +94,7 @@ pub struct Analyzer<'a> {
     states: StateRegistry,
     /// Executor for analysis-time tool queries (DESIGN.md §3.6). Optional:
     /// rules that never query analyze fine without one.
-    executor: Option<&'a LocalExecutor>,
+    executor: Option<&'a dyn anneal_action::QueryRunner>,
     /// The focus cone (DESIGN.md §4.2): labels colored `Incremental` — the
     /// edited targets plus their transitive dependents. `None` means uniform
     /// coloring (every node gets the base configuration unchanged); `Some`
@@ -185,7 +185,7 @@ impl<'a> Analyzer<'a> {
     /// Enable analysis-time tool queries by wiring the executor through to
     /// rule contexts. Queries are sealed, network-denied, stdout-captured
     /// actions — this is the §5.1 by-design breach of strict phasing.
-    pub fn with_executor(mut self, executor: &'a LocalExecutor) -> Self {
+    pub fn with_executor(mut self, executor: &'a dyn anneal_action::QueryRunner) -> Self {
         self.executor = Some(executor);
         self
     }

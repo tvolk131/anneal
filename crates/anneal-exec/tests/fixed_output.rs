@@ -5,8 +5,9 @@
 //! We exercise the machinery with local shell commands; network *isolation*/enforcement
 //! is a separate concern, so a `printf` stands in for a download here.
 
+use anneal_action::Action;
 use anneal_core::Digest;
-use anneal_exec::{Action, ExecError, Executor, LocalExecutor};
+use anneal_exec::{ExecError, Executor, LocalExecutor};
 
 mod support;
 

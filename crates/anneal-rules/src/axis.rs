@@ -22,10 +22,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use anneal_action::ActionBuilder;
 use anneal_core::{
     Axis, AxisValues, Configuration, Coverage, DebugInfo, ExecMode, Lto, OptLevel, Sanitizer,
 };
-use anneal_exec::ActionBuilder;
 
 /// A stored renderer: closes over a typed per-axis `fn` and the field extraction the builder
 /// method supplied, so by the time it lands here it can only ever read its own axis. Private —
