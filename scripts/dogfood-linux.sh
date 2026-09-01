@@ -13,13 +13,18 @@
 #   ANNEAL_LINUX_SANDBOX_COMMAND  the anneal invocation to run (default:
 #                                 test --base origin/master --require-enforced)
 #   ANNEAL_TOOLCHAIN_MANIFEST     the Nix-built toolchain manifest path
-#   ANNEAL_BIN                    the Nix-built anneal binary path
+#   ANNEAL_BIN                    the anneal binary path *inside the container*
+#                                 (the repo is mounted at /work); built on the
+#                                 host first with the nix dev shell — `nix build
+#                                 .#anneal` fetches crate tarballs inside nix
+#                                 builds and is at the mercy of the CDN, while
+#                                 dev-shell cargo fetches like every other lane
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 image="${ANNEAL_LINUX_SANDBOX_IMAGE:-anneal-linux-sandbox-test}"
 command="${ANNEAL_LINUX_SANDBOX_COMMAND:-test --base origin/master --require-enforced}"
-anneal_bin="${ANNEAL_BIN:?set ANNEAL_BIN to the Nix-built anneal binary}"
+anneal_bin="${ANNEAL_BIN:-target/release/anneal}"
 manifest="${ANNEAL_TOOLCHAIN_MANIFEST:?set ANNEAL_TOOLCHAIN_MANIFEST}"
 
 mkdir -p "$repo/.anneal"
@@ -41,4 +46,4 @@ docker run \
   -e "ANNEAL_TOOLCHAIN_MANIFEST=$manifest" \
   -w /work \
   "$image" \
-  "$anneal_bin" $command
+  "./$anneal_bin" $command

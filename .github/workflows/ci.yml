@@ -101,11 +101,18 @@ jobs:
 
       - uses: DeterminateSystems/determinate-nix-action@v3
 
-      - name: Resolve nix outputs
+      # Build anneal on the host with the dev shell. (Not `nix build .#anneal`:
+      # its cargo vendoring fetches crate tarballs from inside nix builds and
+      # currently hits CDN 403s; dev-shell cargo fetches like every other lane.
+      # Each command is its own step so a failure fails the job loudly — a
+      # failed command substitution in a combined `echo "x=$(cmd)"` step would
+      # otherwise be swallowed.)
+      - name: Build anneal (dev shell)
+        run: nix develop --command cargo build --release -p anneal-cli
+
+      - name: Resolve toolchain manifest
         id: nix
-        run: |
-          echo "manifest=$(nix build .#toolchain-manifest --print-out-paths --no-link)" >> "$GITHUB_OUTPUT"
-          echo "anneal=$(nix build .#anneal --print-out-paths --no-link)/bin/anneal" >> "$GITHUB_OUTPUT"
+        run: echo "manifest=$(nix build .#toolchain-manifest --print-out-paths --no-link)" >> "$GITHUB_OUTPUT"
 
       - name: Restore the anneal store
         uses: actions/cache/restore@v4
@@ -117,7 +124,7 @@ jobs:
       - name: anneal test --base origin/master
         env:
           ANNEAL_TOOLCHAIN_MANIFEST: ${{ steps.nix.outputs.manifest }}
-          ANNEAL_BIN: ${{ steps.nix.outputs.anneal }}
+          ANNEAL_BIN: target/release/anneal
         run: ./scripts/dogfood-linux.sh
 
       - name: Save the anneal store
