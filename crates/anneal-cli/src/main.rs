@@ -522,11 +522,6 @@ fn analyze_target(
 ) -> Result<Pipeline, String> {
     let label = Label::parse(target).map_err(|e| format!("invalid target {target:?}: {e}"))?;
     let registry = builtin_rules();
-    // Loading + analysis runs before any action, and can take a noticeable
-    // moment on a large lockfile (parse, workspace introspection, toolchain
-    // resolution). Announce it on stderr so the terminal isn't silent until
-    // the first action streams — and so stdout (the action log) stays clean.
-    eprintln!("analyzing {label}…");
     // A mutating command takes the workspace write capability for its whole
     // run (`anneal-store`): the exclusive `flock`, boot recovery, and every
     // store write behind the guard. Read-only commands (`affected`/`why`)

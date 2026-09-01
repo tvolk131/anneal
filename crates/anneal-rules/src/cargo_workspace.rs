@@ -70,7 +70,7 @@ use anneal_core::{
 use crate::axis::{configure_axis_action, AxisFlagMap, FlagSink};
 use crate::context::RuleContext;
 use crate::diagnostics;
-use crate::providers::{route_data_inputs, Artifact, ArtifactSource, ProviderSet};
+use crate::providers::{route_data_inputs, Artifact, ArtifactSource, FileSet, ProviderSet};
 use crate::rule::{Analysis, Rule, RuleError};
 use crate::schema::{AttrSchema, AttrType};
 use crate::state::{Attestation, Concurrency, PersistentStateDecl, StateActionExt, StateKind};
@@ -292,6 +292,9 @@ impl Rule for CargoWorkspace {
         )?;
 
         // --- coarse build action ---
+        // The workspace's exposed artifacts, collected while building the
+        // build action below.
+        let mut provided: Vec<Artifact> = Vec::new();
         diagnostics::time(
             "cargo_workspace.build_action",
             || -> Result<(), RuleError> {
@@ -299,16 +302,10 @@ impl Rule for CargoWorkspace {
                     prelude.as_deref(),
                     cargo_args("build", None, None, release_flag),
                 );
+                let build_id = format!("cargo_workspace build {label}");
                 let mut build = with_crates(
                     route_data_inputs(
-                        with_sources(
-                            cargo_builder(
-                                format!("cargo_workspace build {label}"),
-                                build_cmd,
-                                &setup,
-                            ),
-                            &sources,
-                        ),
+                        with_sources(cargo_builder(build_id.clone(), build_cmd, &setup), &sources),
                         &data,
                     ),
                     crate_deps,
@@ -316,7 +313,19 @@ impl Rule for CargoWorkspace {
                 for c in crates.iter().filter(|c| c.is_normal_lib()) {
                     let lib = format!("lib{}.rlib", c.name.replace('-', "_"));
                     let out = PathBuf::from(format!("target/{profile_dir}/{lib}"));
-                    build = build.output(out.to_string_lossy().into_owned(), out);
+                    let name = out.to_string_lossy().into_owned();
+                    build = build.output(name.clone(), out.clone());
+                    // The workspace's exposed interface: its compiled libs.
+                    // Providers are how demand selection (and dependents)
+                    // find the build's outputs — without them, `build` on a
+                    // cargo_workspace target would demand nothing.
+                    provided.push(Artifact {
+                        path: out,
+                        source: ArtifactSource::Output {
+                            action: build_id.clone(),
+                            name,
+                        },
+                    });
                 }
                 actions.push(
                     configure_axis_action(build, ctx.config(), &axis_map, &[Axis::OptLevel])
@@ -478,12 +487,16 @@ impl Rule for CargoWorkspace {
             },
         )?;
 
-        // The routed-data view (what `materialize` parks) is derived by the analyzer from
+        // The routed-data view (what `anneal materialize` parks) is derived by the analyzer from
         // the `data` inputs `route_data_inputs` flagged `mirror_to_tree`; no separate field.
-        Ok(Analysis {
-            actions,
-            providers: ProviderSet::default(),
-        })
+        let providers = if provided.is_empty() {
+            ProviderSet::default()
+        } else {
+            ProviderSet {
+                files: Some(FileSet { files: provided }),
+            }
+        };
+        Ok(Analysis { actions, providers })
     }
 }
 

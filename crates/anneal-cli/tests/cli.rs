@@ -354,3 +354,29 @@ fn affected_requires_a_ref() {
     let out = anneal(tmp.path(), &["affected"]);
     assert!(!out.status.success(), "no ref is a usage error, not a pass");
 }
+
+/// `test` through an alias must find the aliased target's tests: aliases
+/// forward providers but emit no actions, so the CLI resolves the chain
+/// before deriving demand terminals.
+#[test]
+fn test_through_an_alias_runs_the_aliased_targets_tests() {
+    let ws = workspace(
+        "genrule(name = \"t\", outs = [\"results.txt\"], cmd = \"printf 'ANNEAL_TEST_EXIT=0' > $(OUTS)\", deterministic = True)\nalias(name = \"ta\", actual = \"//pkg:t\")\n",
+    );
+    let out = anneal(ws.path(), &["test", "//pkg:ta"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("tests: 1 passed"),
+        "the alias must resolve to the real target's tests:\n{stdout}"
+    );
+    assert!(!stdout.contains("no test targets found"));
+
+    // And build through the alias still works (providers forward).
+    let out = anneal(ws.path(), &["build", "//pkg:ta"]);
+    assert!(out.status.success());
+}
