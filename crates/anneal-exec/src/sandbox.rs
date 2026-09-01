@@ -39,8 +39,8 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::action::{Action, ExecutionMode};
 use crate::executor::SandboxError;
+use anneal_action::{Action, ExecutionMode};
 
 #[cfg(target_os = "linux")]
 use std::ffi::OsStr;
@@ -185,8 +185,9 @@ fn process_hardening_error(error: io::Error) -> SandboxError {
 /// sealed mode where available.
 #[cfg(target_os = "macos")]
 fn wrap(action: &Action, spec: &SandboxSpec) -> Result<Command, SandboxError> {
-    let program = &action.command[0];
-    let args = &action.command[1..];
+    let argv = action.command();
+    let program = &argv[0];
+    let args = &argv[1..];
 
     let mut cmd = match spec.mode {
         ExecutionMode::Sealed => {
@@ -241,7 +242,7 @@ fn macos_profile(action: &Action, spec: &SandboxSpec) -> String {
     push_path_and_canonical(&mut read_paths, spec.tmp);
     push_path_and_canonical(&mut write_paths, spec.tmp);
 
-    for toolchain in action.toolchains.values() {
+    for toolchain in action.toolchains().values() {
         for root in toolchain.read_only_roots() {
             push_path_and_canonical(&mut read_paths, root);
         }
@@ -358,8 +359,9 @@ fn sbpl_string(path: &Path) -> String {
 
 #[cfg(target_os = "linux")]
 fn wrap(action: &Action, spec: &SandboxSpec) -> Result<Command, SandboxError> {
-    let program = &action.command[0];
-    let args = &action.command[1..];
+    let argv = action.command();
+    let program = &argv[0];
+    let args = &argv[1..];
 
     let cmd = match spec.mode {
         ExecutionMode::Sealed => {
@@ -413,13 +415,13 @@ fn wrap(action: &Action, spec: &SandboxSpec) -> Result<Command, SandboxError> {
                 .arg(synthetic_etc.join("group"))
                 .arg("/etc/group");
 
-            for input in action.inputs.values().filter(|input| !input.writable) {
+            for input in action.inputs().values().filter(|input| !input.writable) {
                 cmd.arg("--ro-bind")
                     .arg(spec.cwd.join(&input.path))
                     .arg(guest_cwd(spec).join(&input.path));
             }
 
-            for toolchain in action.toolchains.values() {
+            for toolchain in action.toolchains().values() {
                 for root in toolchain.read_only_roots() {
                     add_parent_dirs(&mut cmd, root);
                     cmd.arg("--ro-bind").arg(root).arg(root);
@@ -450,8 +452,8 @@ fn wrap(action: &Action, spec: &SandboxSpec) -> Result<Command, SandboxError> {
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
 fn wrap(action: &Action, spec: &SandboxSpec) -> Result<Command, SandboxError> {
-    let mut cmd = Command::new(&action.command[0]);
-    cmd.args(&action.command[1..]).current_dir(spec.cwd);
+    let mut cmd = Command::new(action.command()[0]);
+    cmd.args(action.command()[1..]).current_dir(spec.cwd);
     Ok(cmd)
 }
 

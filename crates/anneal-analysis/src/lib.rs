@@ -10,7 +10,7 @@
 //! [`TargetGraph`]: anneal_loader::TargetGraph
 //! [`analyze`]: anneal_rules::Rule::analyze
 //! [`RuleContext`]: anneal_rules::RuleContext
-//! [`Action`]: anneal_exec::Action
+//! [`Action`]: anneal_action::Action
 //!
 //! # Milestone 1 scope
 //!

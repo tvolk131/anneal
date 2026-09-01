@@ -29,8 +29,8 @@
 
 use std::path::PathBuf;
 
+use anneal_action::ActionBuilder;
 use anneal_core::{Digest, Label};
-use anneal_exec::ActionBuilder;
 
 use crate::rule::RuleError;
 
@@ -226,7 +226,7 @@ fn guard_single_state(builder: &ActionBuilder) -> Result<(), RuleError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anneal_exec::Action;
+    use anneal_action::Action;
 
     fn owner() -> Label {
         Label::parse("//pkg:owner").unwrap()

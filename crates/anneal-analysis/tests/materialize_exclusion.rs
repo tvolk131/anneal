@@ -10,9 +10,10 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+use anneal_action::{action_digest, Action};
 use anneal_analysis::{ActionGraph, AnalysisError, Analyzer};
 use anneal_core::{AxisValues, Configuration, Label, Platform};
-use anneal_exec::{action_digest, Action, LocalExecutor};
+use anneal_exec::LocalExecutor;
 use anneal_loader::load_package;
 use anneal_rules::{builtin_rules, ArtifactSource};
 

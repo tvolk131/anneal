@@ -13,13 +13,14 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
+use anneal_action::{Action, InputSource};
 use anneal_analysis::{ActionGraph, Analyzer};
 use anneal_core::{
     AxisValues, Configuration, Coverage, DebugInfo, Digest, ExecMode, Label, Lto, OptLevel,
     Platform, Sanitizer,
 };
 use anneal_exec::materialize::{MaterializeStore, TreeState};
-use anneal_exec::{Action, ActionResult, InputSource, LocalExecutor};
+use anneal_exec::{ActionResult, LocalExecutor};
 use anneal_loader::{load_closure, load_workspace};
 use anneal_rules::{builtin_rules, ArtifactSource};
 use anneal_store::Store;

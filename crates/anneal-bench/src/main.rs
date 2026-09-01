@@ -24,9 +24,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use anneal_action::Action;
 use anneal_analysis::Analyzer;
 use anneal_core::{AxisValues, Configuration, Label, OptLevel, Platform};
-use anneal_exec::{Action, LocalExecutor, PhaseTimings};
+use anneal_exec::{LocalExecutor, PhaseTimings};
 use anneal_loader::load_package;
 use anneal_rules::{builtin_rules, start_rule_timings, take_rule_timings, RuleTiming};
 

@@ -2,9 +2,10 @@
 //! format, is configuration-invariant, validates the format against capability, and
 //! exposes the output as a routable provider.
 
+use anneal_action::{action_digest, Action};
 use anneal_analysis::{ActionGraph, AnalysisError, Analyzer};
 use anneal_core::{AxisValues, Configuration, Label, OptLevel, Platform};
-use anneal_exec::{action_digest, Action, Executor, LocalExecutor};
+use anneal_exec::{Executor, LocalExecutor};
 use anneal_loader::load_package;
 use anneal_rules::{builtin_rules, ArtifactSource};
 

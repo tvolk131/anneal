@@ -1,13 +1,14 @@
-//! Action identity (§8.1): the cache-key computation. The *persistence* of
-//! results (the action cache) lives in `anneal-store`; this module owns what
-//! an action's identity **is**.
+//! Action identity (§8.1): the cache-key computation — a pure function of
+//! the [`Action`] model, owned by the crate that owns the model.
 //!
 //! [`ActionIdentity`] is the compiler-enforced field set: every
-//! identity-relevant property of an [`Action`] is projected into the struct by
-//! [`ActionIdentity::from_action`], and the digest is the fold over its
+//! identity-relevant property of an [`Action`] is projected into the struct
+//! by [`ActionIdentity::from_action`], and the digest is the fold over its
 //! canonical bytes. Adding an `Action` field without adding it here is caught
 //! by the per-field variation tests below — the regression guard for TODO.md
-//! P0 #6.
+//! P0 #6 — and the *encoding itself* is pinned by the golden-digest test, so
+//! no refactor (including the one that moved this code) can silently alter
+//! what an identity means.
 //!
 //! **Deliberately excluded from identity** (each has a test pinning it):
 //! the action *name* (graph plumbing, not work description), `mirror_to_tree`
@@ -23,11 +24,18 @@
 use anneal_core::Digest;
 
 use crate::action::{Action, InputSource};
-use crate::SANDBOX_VERSION;
 
 /// The version tag of the identity encoding itself. Bumped when the *meaning*
 /// of an identity changes (v2 added the output map and the network flag).
 const ACTION_IDENTITY_VERSION: &str = "anneal-action-v2";
+
+/// The version of the execution contract that identities are computed under.
+/// Folded into every digest: a change in *how actions execute* that could
+/// change what a cached result means (sandbox semantics, materialization
+/// rules) bumps this and invalidates every derived entry. The string is
+/// historical — it began as the sandbox-backend version — and its value is
+/// pinned by the golden-digest test.
+pub const EXECUTION_CONTRACT_VERSION: &str = "anneal-sandbox-7";
 
 /// The complete identity-relevant projection of an [`Action`]. Field-for-field
 /// documentation lives on [`Action`]; the rule here is *totality*: if a field
@@ -147,7 +155,7 @@ impl ActionIdentity {
     fn canonical_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         write_str(&mut buf, ACTION_IDENTITY_VERSION);
-        write_str(&mut buf, SANDBOX_VERSION);
+        write_str(&mut buf, EXECUTION_CONTRACT_VERSION);
 
         write_count(&mut buf, self.command.len());
         for arg in &self.command {
@@ -230,8 +238,8 @@ impl ActionIdentity {
 }
 
 /// Compute the **action digest** — the cache key (§8.1). A pure function of
-/// [`ActionIdentity`]: the version tag, the sandbox version, and every
-/// identity-relevant field, length-prefixed.
+/// [`ActionIdentity`]: the version tag, the execution-contract version, and
+/// every identity-relevant field, length-prefixed.
 pub fn action_digest(action: &Action) -> Digest {
     Digest::of(&ActionIdentity::from_action(action).canonical_bytes())
 }
@@ -255,7 +263,7 @@ fn write_str(buf: &mut Vec<u8>, s: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::action::{CachePolicy, ExecutionMode, InputSource, Toolchain};
+    use crate::action::{CachePolicy, ExecutionMode, Toolchain};
     use anneal_core::{Axis, AxisValues, Configuration, OptLevel, Platform};
 
     fn cfg(opt: OptLevel) -> Configuration {
@@ -538,5 +546,26 @@ mod tests {
             .snapshot(Digest::of(b"k2"), vec!["target".into()])
             .build();
         assert_eq!(action_digest(&a), action_digest(&b));
+    }
+
+    // --- The encoding pin ----------------------------------------------------------
+
+    /// The golden digest: a canonical action with a fixed field set, pinned to
+    /// its exact digest. Any change to the identity encoding — a reordered
+    /// fold, a new field, a version bump — changes this hex, forcing the
+    /// change to be conscious. It also proves refactors of this crate (such as
+    /// its extraction from `anneal-exec`) are identity-neutral by construction.
+    #[test]
+    fn golden_digest_pins_the_encoding() {
+        let action = Action::builder("golden", vec!["./tool".to_owned(), "arg".to_owned()])
+            .source_input("src", "src/in.txt", Digest::of(b"golden input"))
+            .output("out", "out/hello.txt")
+            .env("K", "V")
+            .timeout_ms(9_000)
+            .build();
+        assert_eq!(
+            action_digest(&action).to_hex(),
+            "070a3e82a6fe5751f83a6133b3cc1b0b6c1998183162cb4475383ef8ddc284ff"
+        );
     }
 }

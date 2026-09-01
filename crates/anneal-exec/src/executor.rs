@@ -17,17 +17,19 @@ use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use anneal_action::{
+    action_digest, Action, ActionError, CachePolicy, ExecutionMode, InputSource, QueryError,
+    QueryResult, QueryRunner, QuerySpec,
+};
 use anneal_cas::Cas;
 use anneal_core::Digest;
 use anneal_store::{
     Provenance, Recovered, Store, StoredResult, Verify, WarmManifest, WorkspaceGuard,
 };
 
-use crate::action::{Action, ActionError, CachePolicy, ExecutionMode, InputSource};
-use crate::cache::action_digest;
 use crate::fetch;
 use crate::materializer;
-use crate::query::{query_identity, query_key, QueryResult, QuerySpec, QUERY_STDOUT};
+use crate::query::{query_identity, query_key, QUERY_STDOUT};
 use crate::sandbox::{self, SandboxSpec};
 use crate::trust::{self, EnforcementGrade};
 use crate::warm;
@@ -198,7 +200,7 @@ impl LocalExecutor {
 
     /// Fail sealed execution when the platform grade is below the configured floor.
     fn check_enforcement_floor(&self, action: &Action) -> Result<(), ExecError> {
-        if !self.require_enforced || !matches!(action.execution_mode, ExecutionMode::Sealed) {
+        if !self.require_enforced || !matches!(action.execution_mode(), ExecutionMode::Sealed) {
             return Ok(());
         }
         let grade = sandbox::sealed_enforcement_grade();
@@ -367,8 +369,8 @@ fn build_edges(actions: &[Action]) -> Result<Edges, ExecError> {
     // snapshot key -> the index of its owning SnapshotBased action.
     let mut owner_of: HashMap<Digest, usize> = HashMap::new();
     for (i, a) in actions.iter().enumerate() {
-        if a.cache_policy == CachePolicy::SnapshotBased {
-            if let Some(key) = a.snapshot_key {
+        if a.cache_policy() == CachePolicy::SnapshotBased {
+            if let Some(key) = a.snapshot_key() {
                 owner_of.insert(key, i);
             }
         }
@@ -387,7 +389,7 @@ fn build_edges(actions: &[Action]) -> Result<Edges, ExecError> {
 
     for (i, a) in actions.iter().enumerate() {
         // Data edges.
-        for input in a.inputs.values() {
+        for input in a.inputs().values() {
             if let InputSource::Output {
                 action: producer,
                 name,
@@ -404,8 +406,8 @@ fn build_edges(actions: &[Action]) -> Result<Edges, ExecError> {
             }
         }
         // Snapshot-owner edge.
-        if a.cache_policy == CachePolicy::SnapshotConsuming {
-            if let Some(key) = a.snapshot_key {
+        if a.cache_policy() == CachePolicy::SnapshotConsuming {
+            if let Some(key) = a.snapshot_key() {
                 if let Some(&owner) = owner_of.get(&key) {
                     add_edge(i, owner, &mut deps, &mut dependents);
                 }
@@ -586,29 +588,21 @@ fn default_parallelism() -> usize {
         .unwrap_or(1)
 }
 
-/// Return a copy of `action` with every [`InputSource::Output`] replaced by the
-/// concrete blob produced earlier in the run.
+/// Return a copy of `action` with every [`InputSource::Output`] resolved to
+/// the concrete blob produced earlier in the run (the model owns the
+/// mutation; this supplies the produced-output lookup).
 fn resolve_action(
     action: &Action,
     produced: &HashMap<(String, String), Digest>,
 ) -> Result<Action, ExecError> {
     let mut resolved = action.clone();
-    for input in resolved.inputs.values_mut() {
-        if let InputSource::Output {
-            action: producer,
-            name,
-        } = &input.source
-        {
-            let digest = produced
-                .get(&(producer.clone(), name.clone()))
+    resolved
+        .resolve_outputs_with(|producer, name| {
+            produced
+                .get(&(producer.to_owned(), name.to_owned()))
                 .copied()
-                .ok_or_else(|| ExecError::UnresolvedInput {
-                    action: producer.clone(),
-                    output: name.clone(),
-                })?;
-            input.source = InputSource::Blob(digest);
-        }
-    }
+        })
+        .map_err(ExecError::InvalidAction)?;
     Ok(resolved)
 }
 
@@ -636,13 +630,13 @@ impl LocalExecutor {
         expected: Digest,
     ) -> Result<ActionResult, ExecError> {
         // The pin is a single digest, so a FOD pins exactly one artifact.
-        if action.outputs.len() != 1 {
+        if action.outputs().len() != 1 {
             return Err(ExecError::FixedOutputArity {
                 action: action.name().to_owned(),
-                outputs: action.outputs.len(),
+                outputs: action.outputs().len(),
             });
         }
-        let out_name = action.outputs.keys().next().unwrap().clone();
+        let out_name = action.outputs().keys().next().unwrap().clone();
 
         // Cache by output content: the pinned blob is present ⇒ nothing to fetch.
         if self.store.cas().has(&expected) {
@@ -660,7 +654,7 @@ impl LocalExecutor {
         // sandbox, no toolchain, embedded Mozilla roots — and the pin is the
         // sole arbiter of what enters the CAS. `put` returns the actual digest;
         // a wrong-hash blob in the CAS is harmless (it simply isn't `expected`).
-        if let Some(url) = &action.fetch_url {
+        if let Some(url) = &action.fetch_url() {
             let bytes = fetch::download(url).map_err(|error| ExecError::Fetch {
                 action: action.name().to_owned(),
                 error,
@@ -716,11 +710,11 @@ impl LocalExecutor {
 
         let restore_start = Instant::now();
         if restore {
-            if let Some(key) = &action.snapshot_key {
-                for path in &action.snapshot_paths {
+            if let Some(key) = action.snapshot_key() {
+                for path in action.snapshot_paths() {
                     self.store.snapshots().restore(
                         self.store.cas(),
-                        key,
+                        &key,
                         &prepared.cwd.join(path),
                     )?;
                 }
@@ -729,12 +723,12 @@ impl LocalExecutor {
         let t_restore = restore_start.elapsed();
 
         let spec = SandboxSpec {
-            mode: action.execution_mode,
+            mode: action.execution_mode(),
             root: &prepared.root,
             cwd: &prepared.cwd,
             home: &prepared.home,
             tmp: &prepared.tmp,
-            env: &action.env,
+            env: action.env(),
         };
         let run_start = Instant::now();
         let (exit_code, failure_output) = run_command(action, &spec)?;
@@ -748,11 +742,11 @@ impl LocalExecutor {
             t_capture = capture_start.elapsed();
             if save {
                 let save_start = Instant::now();
-                if let Some(key) = &action.snapshot_key {
-                    for path in &action.snapshot_paths {
+                if let Some(key) = action.snapshot_key() {
+                    for path in action.snapshot_paths() {
                         self.store.snapshots().save(
                             self.store.cas(),
-                            key,
+                            &key,
                             &prepared.cwd.join(path),
                         )?;
                     }
@@ -829,7 +823,7 @@ impl LocalExecutor {
     fn run_warm(&self, action: &Action, save: bool) -> Result<ActionResult, ExecError> {
         let started = Instant::now();
         let skey = action
-            .snapshot_key
+            .snapshot_key()
             .expect("run_warm is only called for snapshot owners, which have a snapshot_key");
 
         // Same-key owners share one warm dir; serialize on it (different keys run free).
@@ -840,7 +834,7 @@ impl LocalExecutor {
 
         // The desired declared inputs as path -> digest (the action is already resolved).
         let desired: BTreeMap<PathBuf, Digest> = action
-            .inputs
+            .inputs()
             .values()
             .filter_map(|i| match &i.source {
                 InputSource::Blob(d) => Some((i.path.clone(), *d)),
@@ -848,7 +842,7 @@ impl LocalExecutor {
             })
             .collect();
         let writable_inputs: BTreeSet<PathBuf> = action
-            .inputs
+            .inputs()
             .values()
             .filter(|i| i.writable)
             .map(|i| i.path.clone())
@@ -897,7 +891,7 @@ impl LocalExecutor {
             let prepared = materializer::prepare_at(self.store.cas(), action, warm_dir.clone())?;
             t_materialize = m.elapsed();
             let r = Instant::now();
-            for path in &action.snapshot_paths {
+            for path in action.snapshot_paths() {
                 self.store.snapshots().restore(
                     self.store.cas(),
                     &skey,
@@ -909,12 +903,12 @@ impl LocalExecutor {
         };
 
         let spec = SandboxSpec {
-            mode: action.execution_mode,
+            mode: action.execution_mode(),
             root: &prepared.root,
             cwd: &prepared.cwd,
             home: &prepared.home,
             tmp: &prepared.tmp,
-            env: &action.env,
+            env: action.env(),
         };
         let run_start = Instant::now();
         let (exit_code, failure_output) = run_command(action, &spec)?;
@@ -931,7 +925,7 @@ impl LocalExecutor {
             // (the warm dir is their only live copy). The manifest commit below is
             // unconditional, so warm reuse works regardless.
             if save {
-                for path in &action.snapshot_paths {
+                for path in action.snapshot_paths() {
                     self.store.snapshots().save(
                         self.store.cas(),
                         &skey,
@@ -1039,12 +1033,12 @@ impl LocalExecutor {
         let prepared = materializer::prepare_at(self.store.cas(), action, root)?;
 
         let sandbox_spec = SandboxSpec {
-            mode: action.execution_mode,
+            mode: action.execution_mode(),
             root: &prepared.root,
             cwd: &prepared.cwd,
             home: &prepared.home,
             tmp: &prepared.tmp,
-            env: &action.env,
+            env: action.env(),
         };
         let mut cmd = sandbox::build_command(action, &sandbox_spec).map_err(ExecError::Sandbox)?;
         cmd.stdout(std::process::Stdio::piped())
@@ -1056,7 +1050,7 @@ impl LocalExecutor {
         let stdout_thread = thread::spawn(move || drain(stdout_pipe));
         let stderr_thread = thread::spawn(move || drain(stderr_pipe));
 
-        let status = wait_with_timeout(&mut child, action.timeout_ms)?;
+        let status = wait_with_timeout(&mut child, action.timeout_ms())?;
         let stdout = stdout_thread.join().unwrap_or_default();
         let stderr = stderr_thread.join().unwrap_or_default();
         let exit_code = status.code().unwrap_or(-1);
@@ -1104,13 +1098,22 @@ impl LocalExecutor {
         guard_valid(action)?;
         guard_resolved(action)?;
         let skey = action
-            .snapshot_key
+            .snapshot_key()
             .expect("run_warm_uncached requires a snapshot owner (a snapshot_key)");
         if fresh {
             // Discard the commit record so the next run cold-populates.
             self.guard.warm(&skey).lock().discard_record();
         }
         self.run_warm(action, /*save*/ false)
+    }
+}
+
+/// The analysis-time query capability, as seen by `RuleContext`: the engine
+/// is the one party that can run a query. The inherent [`LocalExecutor::run_query`]
+/// keeps its rich `ExecError`; the contract surface renders it.
+impl QueryRunner for LocalExecutor {
+    fn run_query(&self, spec: &QuerySpec) -> Result<QueryResult, QueryError> {
+        self.run_query(spec).map_err(|e| QueryError(e.to_string()))
     }
 }
 
@@ -1122,7 +1125,7 @@ impl Executor for LocalExecutor {
 
         // Fixed-output (FOD) fetches are cached by their *output* hash, not their inputs,
         // and verified against the pin — a different execution path entirely (§FOD).
-        if let CachePolicy::FixedOutput { expected } = action.cache_policy {
+        if let CachePolicy::FixedOutput { expected } = action.cache_policy() {
             return self.run_fixed_output(action, expected);
         }
 
@@ -1133,29 +1136,29 @@ impl Executor for LocalExecutor {
         // SnapshotBased owns the snapshot (restore + save); SnapshotConsuming only
         // consumes one (restore, no save).
         let restore = matches!(
-            action.cache_policy,
+            action.cache_policy(),
             CachePolicy::SnapshotBased | CachePolicy::SnapshotConsuming
         );
         // A snapshot *owner* reuses its persistent warm working tree when that's enabled
         // (§5); everything else gets a fresh unique sandbox with the snapshot restored.
         let warm_eligible = self.warm_reuse
-            && matches!(action.cache_policy, CachePolicy::SnapshotBased)
-            && action.snapshot_key.is_some();
+            && matches!(action.cache_policy(), CachePolicy::SnapshotBased)
+            && action.snapshot_key().is_some();
         // Save the snapshot to the CAS for owners — **unless** it is *private* and warm
         // reuse is active (§5.8.1): then the warm dir is the live copy, so the per-build
         // save would be pure O(target/) overhead. In the non-warm path we still save even
         // a private snapshot — there's no warm dir, so it remains the only mechanism for
         // cold-start and downstream output reproducibility (e.g. the test-run cache hit).
-        let save = matches!(action.cache_policy, CachePolicy::SnapshotBased)
-            && (action.snapshot_shared || !warm_eligible);
+        let save = matches!(action.cache_policy(), CachePolicy::SnapshotBased)
+            && (action.snapshot_shared() || !warm_eligible);
         // Deterministic and snapshot-based actions are cacheable when sealed; permeable,
         // native, and snapshot-*consuming* are not (§7.2, §8). SnapshotConsuming is
         // deliberately excluded: its output is not trusted reproducible, so it never
         // skips. A snapshot is a separate accelerator for the case where an action runs.
         let cacheable = matches!(
-            action.cache_policy,
+            action.cache_policy(),
             CachePolicy::Deterministic | CachePolicy::SnapshotBased
-        ) && matches!(action.execution_mode, ExecutionMode::Sealed);
+        ) && matches!(action.execution_mode(), ExecutionMode::Sealed);
 
         if cacheable {
             // Verified hit (§3.1): the entry is honored only if its output
@@ -1206,7 +1209,7 @@ fn guard_valid(action: &Action) -> Result<(), ExecError> {
 /// A single action must be fully resolved (every input a concrete blob); Output
 /// references are resolved by `execute_graph` first.
 fn guard_resolved(action: &Action) -> Result<(), ExecError> {
-    for input in action.inputs.values() {
+    for input in action.inputs().values() {
         if let InputSource::Output { action: a, name } = &input.source {
             return Err(ExecError::UnresolvedInput {
                 action: a.clone(),
@@ -1241,9 +1244,9 @@ fn tail(bytes: &[u8]) -> String {
 /// run directly in the host context), so their failures carry no tail.
 fn run_command(action: &Action, spec: &SandboxSpec) -> Result<(i32, Option<String>), ExecError> {
     let mut cmd = sandbox::build_command(action, spec).map_err(ExecError::Sandbox)?;
-    if action.execution_mode == ExecutionMode::Native {
+    if action.execution_mode() == ExecutionMode::Native {
         let mut child = cmd.spawn().map_err(ExecError::Spawn)?;
-        let status = wait_with_timeout(&mut child, action.timeout_ms)?;
+        let status = wait_with_timeout(&mut child, action.timeout_ms())?;
         return Ok((status.code().unwrap_or(-1), None));
     }
 
@@ -1253,7 +1256,7 @@ fn run_command(action: &Action, spec: &SandboxSpec) -> Result<(i32, Option<Strin
     let stderr_pipe = child.stderr.take().expect("stderr was piped above");
     let stdout_thread = thread::spawn(move || drain(stdout_pipe));
     let stderr_thread = thread::spawn(move || drain(stderr_pipe));
-    let status = wait_with_timeout(&mut child, action.timeout_ms)?;
+    let status = wait_with_timeout(&mut child, action.timeout_ms())?;
     let stdout = stdout_thread.join().unwrap_or_default();
     let stderr = stderr_thread.join().unwrap_or_default();
     let exit_code = status.code().unwrap_or(-1);

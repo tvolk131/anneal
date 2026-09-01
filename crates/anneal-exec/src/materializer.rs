@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use anneal_cas::Cas;
 use anneal_core::Digest;
 
-use crate::action::{Action, InputSource};
 use crate::executor::ExecError;
+use anneal_action::{Action, InputSource};
 
 /// A prepared sandbox: directories created and inputs materialized, ready to run.
 pub(crate) struct PreparedSandbox {
@@ -54,10 +54,10 @@ pub(crate) fn prepare_at(
 pub(crate) fn layout(action: &Action, root: PathBuf) -> Result<PreparedSandbox, ExecError> {
     // Joining a bare "." would append a CurDir component that `create_dir_all`
     // rejects, so treat the default working directory as the root itself.
-    let cwd = if action.working_directory == Path::new(".") {
+    let cwd = if action.working_directory() == Path::new(".") {
         root.clone()
     } else {
-        root.join(&action.working_directory)
+        root.join(action.working_directory())
     };
     let home = root.join(".home");
     let tmp = root.join(".tmp");
@@ -68,7 +68,7 @@ pub(crate) fn layout(action: &Action, root: PathBuf) -> Result<PreparedSandbox, 
 
     // Pre-create parent directories for declared outputs, so an action can write to a
     // nested output path (e.g. `gen/config.json`) without creating the dir itself.
-    for output in action.outputs.values() {
+    for output in action.outputs().values() {
         if let Some(parent) = cwd.join(output).parent() {
             std::fs::create_dir_all(parent).map_err(ExecError::Io)?;
         }
@@ -84,7 +84,7 @@ pub(crate) fn layout(action: &Action, root: PathBuf) -> Result<PreparedSandbox, 
 
 /// Materialize all declared inputs of `action` into `cwd` (hardlink/clone from the CAS).
 fn materialize_inputs(cas: &Cas, action: &Action, cwd: &Path) -> Result<(), ExecError> {
-    for input in action.inputs.values() {
+    for input in action.inputs().values() {
         // Inputs must be resolved to blobs before reaching the materializer; the
         // graph executor guarantees this. An unresolved Output is a caller error.
         let digest = match &input.source {
@@ -140,7 +140,7 @@ pub(crate) fn capture(
     prepared: &PreparedSandbox,
 ) -> Result<BTreeMap<String, Digest>, ExecError> {
     let mut outputs = BTreeMap::new();
-    for (name, rel_path) in &action.outputs {
+    for (name, rel_path) in action.outputs() {
         let path = prepared.cwd.join(rel_path);
         let bytes = std::fs::read(&path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {

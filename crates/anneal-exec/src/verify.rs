@@ -17,8 +17,8 @@ use std::collections::BTreeMap;
 
 use anneal_core::Digest;
 
-use crate::action::Action;
 use crate::executor::{ActionResult, ExecError, LocalExecutor};
+use anneal_action::Action;
 
 /// The shared sandbox the verifier (and snapshot priming) run in. Priming and both
 /// verification runs use the **same** path so a snapshot's embedded paths match those

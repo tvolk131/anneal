@@ -37,8 +37,8 @@
 
 use std::path::{Path, PathBuf};
 
+use anneal_action::{Action, ActionBuilder, Toolchain};
 use anneal_core::Digest;
-use anneal_exec::{Action, ActionBuilder, Toolchain};
 
 use crate::attrs::AttrValue;
 use crate::context::RuleContext;

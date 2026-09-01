@@ -1,0 +1,11 @@
+[package]
+name = "anneal-action"
+version.workspace = true
+edition.workspace = true
+description = "The rule/engine contract: the Action model, its cache identity, and the tool-query spec."
+
+[dependencies]
+anneal-core = { path = "../anneal-core" }
+
+[lints]
+workspace = true

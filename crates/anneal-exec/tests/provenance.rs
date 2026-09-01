@@ -2,7 +2,8 @@
 //! real runs, round-tripped through the action cache, and the
 //! `require_enforced` floor failing closed on weakly-enforced platforms.
 
-use anneal_exec::{CacheTier, EnforcementGrade, ExecError, Executor, LocalExecutor, QuerySpec};
+use anneal_action::QuerySpec;
+use anneal_exec::{CacheTier, EnforcementGrade, ExecError, Executor, LocalExecutor};
 
 mod support;
 

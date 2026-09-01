@@ -6,8 +6,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use anneal_action::{Action, Toolchain};
 use anneal_core::Digest;
-use anneal_exec::{Action, Executor, LocalExecutor, Toolchain};
+use anneal_exec::{Executor, LocalExecutor};
 
 fn bwrap_available() -> bool {
     Command::new("bwrap")

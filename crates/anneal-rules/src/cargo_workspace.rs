@@ -62,10 +62,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use anneal_action::{Action, ActionBuilder, Toolchain};
 use anneal_core::{
     Axis, Coverage, DebugInfo, Digest, ExecMode, Lto, OptLevel, Sanitizer, ALL_AXES,
 };
-use anneal_exec::{Action, ActionBuilder, Toolchain};
 
 use crate::axis::{configure_axis_action, AxisFlagMap, FlagSink};
 use crate::context::RuleContext;

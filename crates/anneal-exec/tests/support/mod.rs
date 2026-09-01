@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anneal_exec::{Action, ActionBuilder, Toolchain};
+use anneal_action::{Action, ActionBuilder, Toolchain};
 
 pub fn shell_action(name: impl Into<String>, script: impl Into<String>) -> ActionBuilder {
     Action::builder(name, shell_argv(script))

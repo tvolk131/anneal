@@ -6,6 +6,7 @@ members = [
     "crates/anneal-core",
     "crates/anneal-cas",
     "crates/anneal-store",
+    "crates/anneal-action",
     "crates/anneal-exec",
     "crates/anneal-rules",
     "crates/anneal-loader",

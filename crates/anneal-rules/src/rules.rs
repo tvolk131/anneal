@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anneal_exec::Action;
+use anneal_action::Action;
 
 use crate::context::RuleContext;
 use crate::providers::{route_data_inputs, Artifact, ArtifactSource, FileSet, ProviderSet};
@@ -172,9 +172,9 @@ impl Rule for GenRule {
         // claim; a fixed-output pin is the other (future) earned path.
         let deterministic = ctx.attrs().bool_opt("deterministic")?.unwrap_or(false);
         let builder = if deterministic {
-            builder.cache_policy(anneal_exec::CachePolicy::Deterministic)
+            builder.cache_policy(anneal_action::CachePolicy::Deterministic)
         } else {
-            builder.cache_policy(anneal_exec::CachePolicy::NonCacheable)
+            builder.cache_policy(anneal_action::CachePolicy::NonCacheable)
         };
 
         Ok(Analysis {

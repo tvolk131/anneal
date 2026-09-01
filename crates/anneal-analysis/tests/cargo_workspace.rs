@@ -5,9 +5,10 @@
 //! network (Milestone 1 is scoped to public-/no-dependency workflows; vendoring is
 //! a later increment).
 
+use anneal_action::Action;
 use anneal_analysis::{ActionGraph, Analyzer};
 use anneal_core::{AxisValues, Configuration, OptLevel, Platform};
-use anneal_exec::{Action, Executor, LocalExecutor};
+use anneal_exec::{Executor, LocalExecutor};
 use anneal_loader::load_package;
 use anneal_rules::builtin_rules;
 
@@ -132,7 +133,7 @@ fn native_libs_attach_toolchain_roots_and_env_to_cargo_actions() {
         build.env().get("PKG_CONFIG_PATH")
     );
     // Roots mounted: the zlib toolchain (its closure) is a declared input.
-    let zlib_root_mounted = |action: &anneal_exec::Action| {
+    let zlib_root_mounted = |action: &anneal_action::Action| {
         action.toolchains().get("zlib").is_some_and(|t| {
             t.read_only_roots()
                 .iter()

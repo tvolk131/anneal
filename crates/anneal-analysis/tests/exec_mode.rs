@@ -8,9 +8,10 @@
 //! (`cache_policy` + `snapshot_paths`: SnapshotBased-with-`target/` vs Deterministic),
 //! not via exec_mode. The snapshot's *identity* key stays out of the action key (§8.2).
 
+use anneal_action::{action_digest, Action};
 use anneal_analysis::{ActionGraph, Analyzer};
 use anneal_core::{AxisValues, Configuration, ExecMode, Label, Platform};
-use anneal_exec::{action_digest, Action, LocalExecutor};
+use anneal_exec::LocalExecutor;
 use anneal_loader::load_package;
 use anneal_rules::builtin_rules;
 

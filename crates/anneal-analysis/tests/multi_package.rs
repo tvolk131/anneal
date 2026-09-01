@@ -4,9 +4,10 @@
 //! resolves the cross-package edge. This is the prerequisite for real monorepos and for
 //! `affected`/`why` (§11.3).
 
+use anneal_action::Action;
 use anneal_analysis::Analyzer;
 use anneal_core::{AxisValues, Configuration, Label, Platform};
-use anneal_exec::{Action, LocalExecutor};
+use anneal_exec::LocalExecutor;
 use anneal_loader::load_closure;
 use anneal_rules::builtin_rules;
 

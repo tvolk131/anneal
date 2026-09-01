@@ -3,7 +3,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use anneal_exec::Action;
+use anneal_action::Action;
 
 use crate::attrs::AttrError;
 use crate::axis::AxisFlagMap;
@@ -70,8 +70,8 @@ impl From<AttrError> for RuleError {
     }
 }
 
-impl From<anneal_exec::ActionError> for RuleError {
-    fn from(e: anneal_exec::ActionError) -> Self {
+impl From<anneal_action::ActionError> for RuleError {
+    fn from(e: anneal_action::ActionError) -> Self {
         RuleError::Message(format!("invalid action: {e}"))
     }
 }
