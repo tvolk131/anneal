@@ -267,6 +267,25 @@ fn affected_base_scopes_to_this_branch_and_includes_untracked() {
 }
 
 #[test]
+fn affected_since_also_includes_untracked_files() {
+    // The TODO item named this form specifically: `--since` must union
+    // untracked-but-unignored files exactly like `--base` does.
+    let ws = oracle_workspace(SIMPLE_GENRULE);
+    let out = anneal(
+        ws.path(),
+        &["affected", "--since", "main", "--format", "json"],
+    );
+    assert!(out.status.success());
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    let files = v["changed_files"].as_array().unwrap();
+    assert!(
+        files.iter().any(|f| f == "pkg/uncommitted.txt"),
+        "--since must include untracked files:\n{files:?}"
+    );
+}
+
+#[test]
 fn affected_json_is_machine_readable() {
     let ws = oracle_workspace(SIMPLE_GENRULE);
     let out = anneal(

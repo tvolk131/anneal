@@ -19,6 +19,10 @@
 //! Deleted files appear in every diff form (ownership resolves on the path
 //! string, so a deleted file still maps to its package). Rename entries
 //! contribute **both** sides: the old path's owner is affected by the removal.
+//!
+//! Paths come back **repo-root-relative** (git's default), and callers here
+//! assume the workspace root *is* the git root — a workspace nested inside a
+//! larger repository would need path rebasing, which nothing supports today.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
