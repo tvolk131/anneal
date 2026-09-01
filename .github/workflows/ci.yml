@@ -82,3 +82,47 @@ jobs:
 
       - name: Linux hermeticity tests
         run: ./scripts/test-linux-sandbox-docker.sh
+
+  # The dogfood: anneal builds and unit-tests itself via `anneal test --base`
+  # under --require-enforced, in the privileged Linux-sandbox container.
+  # `.anneal/store` (the transportable half of the store layout) is persisted
+  # across runs with actions/cache, keyed on the real build inputs — so a
+  # docs-only PR restores the store and cache-hits everything, and a code PR
+  # executes only the affected cone. Caches are branch-scoped by GitHub: PRs
+  # restore from master and only master saves.
+  dogfood:
+    name: dogfood (anneal test --base)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # merge-base needs the history
+
+      - uses: DeterminateSystems/determinate-nix-action@v3
+
+      - name: Resolve nix outputs
+        id: nix
+        run: |
+          echo "manifest=$(nix build .#toolchain-manifest --print-out-paths --no-link)" >> "$GITHUB_OUTPUT"
+          echo "anneal=$(nix build .#anneal --print-out-paths --no-link)/bin/anneal" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the anneal store
+        uses: actions/cache/restore@v4
+        with:
+          path: .anneal/store
+          key: anneal-store-v1-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'BUILD') }}
+          restore-keys: anneal-store-v1-${{ runner.os }}-
+
+      - name: anneal test --base origin/master
+        env:
+          ANNEAL_TOOLCHAIN_MANIFEST: ${{ steps.nix.outputs.manifest }}
+          ANNEAL_BIN: ${{ steps.nix.outputs.anneal }}
+        run: ./scripts/dogfood-linux.sh
+
+      - name: Save the anneal store
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/cache/save@v4
+        with:
+          path: .anneal/store
+          key: anneal-store-v1-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'BUILD') }}

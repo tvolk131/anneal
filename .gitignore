@@ -1,2 +1,15 @@
+# Rust build output
+/target
+/spikes/target
+
+# Anneal-owned directory (§15.3)
 .anneal/
+
+# Direnv / nix
+.direnv/
+
+# `nix build` output symlink
+/result
+
+# macOS noise
 .DS_Store

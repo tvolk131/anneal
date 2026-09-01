@@ -95,6 +95,12 @@ nix build .#anneal
 nix build .#toolchain-manifest
 ```
 
+Anneal dogfoods itself: the root `BUILD` models this workspace as one
+`cargo_workspace` target, and CI runs `anneal test --base origin/master
+--require-enforced` in a privileged Linux container, persisting
+`.anneal/store` between runs so unaffected work (including every
+`exclude`d docs edit) is served from the cache rather than rebuilt.
+
 Some real ecosystem tests are gated by `ANNEAL_NETWORK_TESTS=1`; the macOS CI lane
 runs the gated fetch and native-library paths. The heavier transitive crates.io fetch
 test remains explicitly ignored and is run manually when needed.

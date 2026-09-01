@@ -177,9 +177,9 @@ impl Rule for CargoWorkspace {
         };
         let exclude = ctx.attrs().string_list_opt("exclude")?;
         let excluded = |rel: &std::path::Path| -> bool {
-            exclude
-                .iter()
-                .any(|e| rel == std::path::Path::new(e) || rel.starts_with(&format!("{e}/")))
+            exclude.iter().any(|e| {
+                rel == std::path::Path::new(e) || rel.starts_with(format!("{e}/").as_str())
+            })
         };
         let sources = diagnostics::time("cargo_workspace.source_tree", || {
             ctx.source_tree(Path::new("."), ignored)
