@@ -19,7 +19,8 @@ Anneal currently provides a local build-system vertical slice:
 - a local content-addressed store and exact action-result cache;
 - managed warm state for selected native tools;
 - focus-cone execution based on local Git status;
-- dependency-impact and shortest-path queries through `affected` and `why`;
+- the CI oracle form of `affected` (`--base` merge-base scoping, `--format json`)
+  plus dependency-impact and shortest-path queries through `affected` and `why`;
 - Nix-manifest-backed first-party toolchains and pinned fixed-output downloads.
 
 The current product is pre-1.0. It requires Nix for the supported adopter path, has no remote

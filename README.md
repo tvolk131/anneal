@@ -34,7 +34,7 @@ Status labels:
 | `nickel_eval` | **Partial** | Exports one self-contained Nickel source to a selected supported format and exposes it to downstream rules. Multi-file Nickel imports are not yet declared or supported. |
 | Generic and routing rules | **Partial** | `filegroup`, `alias`, and `genrule` work across package boundaries. Generated data consumed by actions can be routed into their sandbox paths. Alias targets forward providers but intentionally do not re-home materialization routes. Arbitrary `genrule` commands are `NonCacheable` by default; caching requires the explicit `deterministic = True` claim. |
 | Worktree materialization | **Available** | `anneal materialize` mirrors generated inputs consumed by a target into tree-shaped paths, tracks ownership/digests, avoids mtime churn, refuses destructive overwrites by default, and supports `--check`, `--list`, `--clean`, and `--force`. It materializes the actual consuming target, not an alias to it. |
-| Dependency queries | **Partial** | `affected --since`, `why <from> <to>`, and `why <target> --since` are available. `affected` currently omits untracked-but-unadded files; `why --all`, `affected --explain`, and general `query`/`aquery` commands are planned. |
+| Dependency queries | **Partial** | `affected --base` (merge-base scoped) and `--since`, with `--format json` and untracked files included; `why <from> <to>` and `why <target> --since` are available. `why --all`, `affected --explain`, and general `query`/`aquery` commands are planned. |
 | Toolchains | **Partial** | First-party rules resolve closure-complete Nix toolchains from `ANNEAL_TOOLCHAIN_MANIFEST`; toolchain identity, roots, action environment, and derived `PATH` enter the action contract. Anneal-managed provisioning and user-facing `WORKSPACE` toolchain registration are planned, so the current adopter path requires Nix. |
 | Fixed-output downloads | **Available** | The executor downloads hash-pinned blobs over a Rust TLS stack, retries transient failures, verifies the expected digest before CAS admission, and skips the network when the pinned blob is already present. |
 | Remote cache and execution | **Planned** | No remote cache backend, GitHub Actions cache transport, or remote executor exists yet. All current reuse is from the local `.anneal` store. |
@@ -63,7 +63,7 @@ The current binary exposes:
 ```text
 anneal build <target>
 anneal test <target>
-anneal affected --since <git-ref>
+anneal affected [--since <git-ref> | --base <git-ref>] [--format <labels|json>]
 anneal why <from> <to>
 anneal why <target> --since <git-ref>
 anneal materialize [<target>] [--check|--list|--clean] [--force]

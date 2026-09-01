@@ -11,7 +11,6 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
 
 use anneal_action::{Action, InputSource};
 use anneal_analysis::{ActionGraph, Analyzer};
@@ -48,11 +47,26 @@ enum Command {
         /// The target label, e.g. `//app:app`.
         target: String,
     },
-    /// List the targets affected by changes since a git ref.
+    /// List the targets affected by changes. The CI oracle: the change set is
+    /// derived from the graph (owning packages plus reverse dependents), so a
+    /// path filter that misses a real dependency cannot silently skip work —
+    /// it can only over-select, which is safe.
     Affected {
-        /// The git ref to diff against (e.g. `origin/main`, a commit SHA).
-        #[arg(long)]
-        since: String,
+        /// The git ref to diff against literally (e.g. `origin/main`, a SHA).
+        /// Prefer `--base` in CI: a literal ref diff grows with the target
+        /// branch's own movement.
+        #[arg(long, conflicts_with = "base")]
+        since: Option<String>,
+        /// Diff since where HEAD diverged from this ref (merge-base): on a PR
+        /// checkout this is exactly the PR's change set, however far the
+        /// target branch has moved.
+        #[arg(long, conflicts_with = "since")]
+        base: Option<String>,
+        /// `labels` (default, one per line) or `json` (one machine-readable
+        /// object: base, changed files, unowned files, workspace-wide flag,
+        /// targets).
+        #[arg(long, value_parser = ["labels", "json"])]
+        format: Option<String>,
     },
     /// Make a target's tree view match its sandbox: build the generated files
     /// its actions consume at tree-shaped paths (its routed `data`) and write
@@ -198,7 +212,11 @@ fn run(cli: Cli) -> Result<i32, String> {
                 )
             }
         }
-        Command::Affected { since } => affected(&since, &root),
+        Command::Affected {
+            since,
+            base,
+            format,
+        } => affected(since.as_deref(), base.as_deref(), format.as_deref(), &root),
         Command::Why { from, to, since } => why(&from, to.as_deref(), since.as_deref(), &root),
     }
 }
@@ -233,7 +251,7 @@ fn why_affected(
     since: &str,
     root: &Path,
 ) -> Result<i32, String> {
-    let changed = git_changed_files(root, since)?;
+    let changed = anneal_query::changes::changed_since(root, since).map_err(|e| e.to_string())?;
     let mut changed_packages: BTreeSet<String> = BTreeSet::new();
     let mut unowned: Vec<PathBuf> = Vec::new();
     for path in &changed {
@@ -279,17 +297,61 @@ fn print_path(path: &[Label]) {
     println!("  {}", rendered.join(" → "));
 }
 
-/// Print the targets affected by changes since `since`: `git diff` → owning
-/// packages → reverse-dependency closure. Loads the whole workspace (reverse-deps need
-/// every target), but runs no analysis.
-fn affected(since: &str, root: &Path) -> Result<i32, String> {
-    let changed = git_changed_files(root, since)?;
+/// The targets affected by changes — the CI oracle. `git diff` (literal
+/// `--since`, or merge-base-resolved `--base`) ∪ untracked files → owning
+/// packages → reverse-dependency closure. Loads the whole workspace
+/// (reverse-deps need every target), but runs no analysis. Untracked-but-not-
+/// ignored files are included: a brand-new source file is a real change even
+/// before its first commit; ignored debris never qualifies.
+///
+/// Exit code: 0 whenever the query succeeds — the answer (possibly "no
+/// changes") *is* the output; nonzero means git or loading failed, and CI
+/// should treat that as "could not determine", never "passed".
+fn affected(
+    since: Option<&str>,
+    base: Option<&str>,
+    format: Option<&str>,
+    root: &Path,
+) -> Result<i32, String> {
+    use anneal_query::changes;
+    let (base_desc, mut changed) = match (base, since) {
+        (Some(git_ref), _) => {
+            let cb = changes::changed_base(root, git_ref).map_err(|e| e.to_string())?;
+            (format!("{git_ref} (merge-base {})", cb.base), cb.files)
+        }
+        (None, Some(git_ref)) => (
+            git_ref.to_string(),
+            changes::changed_since(root, git_ref).map_err(|e| e.to_string())?,
+        ),
+        (None, None) => return Err("specify --base <git-ref> or --since <git-ref>".to_owned()),
+    };
+    // Untracked (non-ignored) files are part of the change set in both forms.
+    for path in changes::untracked(root).map_err(|e| e.to_string())? {
+        if !changed.contains(&path) {
+            changed.push(path);
+        }
+    }
+    changed.sort();
+    changed.dedup();
+
     if changed.is_empty() {
-        println!("no changes since {since}");
+        println!("no changes since {base_desc}");
         return Ok(0);
     }
     let graph = load_workspace(root, &builtin_rules()).map_err(|e| e.to_string())?;
     let result = anneal_query::affected(root, &graph, &changed);
+
+    if format == Some("json") {
+        let json = serde_json::json!({
+            "base": base_desc,
+            "changed_files": changed,
+            "unowned": result.unowned,
+            "workspace_wide": result.workspace_wide,
+            "targets": result.targets.iter().map(|l| l.to_string()).collect::<Vec<_>>(),
+        });
+        println!("{json}");
+        return Ok(0);
+    }
 
     if result.workspace_wide {
         eprintln!(
@@ -313,7 +375,7 @@ fn incremental_cone(
     root: &Path,
     graph: &anneal_loader::TargetGraph,
 ) -> Option<std::collections::HashSet<Label>> {
-    let dirty = git_dirty_files(root).ok()?;
+    let dirty = anneal_query::changes::dirty(root).ok()?;
     if dirty.is_empty() {
         // Clean tree: nothing is being edited, so the whole graph is
         // Hermetic-eligible — an empty cone is correct, not a fallback.
@@ -324,65 +386,6 @@ fn incremental_cone(
         return None;
     }
     Some(result.targets.into_iter().collect())
-}
-
-/// The dirty working tree (staged, unstaged, and untracked), as
-/// workspace-relative paths — the v1 edit horizon for the focus cone.
-fn git_dirty_files(root: &Path) -> Result<Vec<PathBuf>, String> {
-    let out = ProcessCommand::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(root)
-        .output()
-        .map_err(|e| format!("running git: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "git status --porcelain failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(parse_porcelain(&String::from_utf8_lossy(&out.stdout)))
-}
-
-/// Parse `git status --porcelain` output into paths. Rename lines
-/// (`R  old -> new`) contribute both sides — the old path's owner is affected
-/// by the removal, the new path's by the addition.
-fn parse_porcelain(text: &str) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    for line in text.lines() {
-        if line.len() < 4 {
-            continue;
-        }
-        let rest = &line[3..];
-        match rest.split_once(" -> ") {
-            Some((old, new)) => {
-                paths.push(PathBuf::from(old.trim()));
-                paths.push(PathBuf::from(new.trim()));
-            }
-            None => paths.push(PathBuf::from(rest.trim())),
-        }
-    }
-    paths
-}
-
-/// Files changed in the working tree relative to `since` (workspace-root == git-root).
-/// Untracked-but-unadded files are not reported by `git diff` — a known limitation.
-fn git_changed_files(root: &Path, since: &str) -> Result<Vec<PathBuf>, String> {
-    let out = ProcessCommand::new("git")
-        .args(["diff", "--name-only", since])
-        .current_dir(root)
-        .output()
-        .map_err(|e| format!("running git: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "git diff --name-only {since} failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(PathBuf::from)
-        .collect())
 }
 
 /// Analyze and execute a target's action graph; return the process exit code.
@@ -806,24 +809,7 @@ fn routed_files(
 /// The subset of `paths` tracked by git. Empty when not a git repo (nothing
 /// is tracked) — materialize then proceeds without the tracked-file guard.
 fn git_tracked<'p>(root: &Path, paths: impl Iterator<Item = &'p Path>) -> Vec<PathBuf> {
-    let mut cmd = ProcessCommand::new("git");
-    cmd.args(["ls-files", "-z", "--"]).current_dir(root);
-    let mut any = false;
-    for path in paths {
-        cmd.arg(path);
-        any = true;
-    }
-    if !any {
-        return Vec::new();
-    }
-    match cmd.output() {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .split('\0')
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from)
-            .collect(),
-        _ => Vec::new(),
-    }
+    anneal_query::changes::tracked(root, paths)
 }
 
 /// Warn when materialized files are not gitignored: an unignored generated
@@ -831,18 +817,7 @@ fn git_tracked<'p>(root: &Path, paths: impl Iterator<Item = &'p Path>) -> Vec<Pa
 /// horizon on every build.
 fn warn_unignored<'p>(root: &Path, paths: impl Iterator<Item = &'p PathBuf>) {
     let unignored: Vec<PathBuf> = paths
-        .filter(|path| {
-            // check-ignore exits 0 = ignored, 1 = not ignored, 128 = not a
-            // repo / error (then there is no `git status` to pollute).
-            ProcessCommand::new("git")
-                .args(["check-ignore", "-q", "--"])
-                .arg(path)
-                .current_dir(root)
-                .status()
-                .ok()
-                .and_then(|s| s.code())
-                == Some(1)
-        })
+        .filter(|path| !anneal_query::changes::ignored(root, path))
         .cloned()
         .collect();
     if !unignored.is_empty() {
@@ -998,27 +973,5 @@ fn parse_coverage(s: &str) -> Result<Coverage, String> {
         "on" => Ok(Coverage::On),
         "off" => Ok(Coverage::Off),
         other => Err(format!("invalid --coverage {other:?}")),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_porcelain;
-    use std::path::PathBuf;
-
-    #[test]
-    fn porcelain_parsing_covers_modified_untracked_and_renames() {
-        let out =
-            " M crates/a/src/lib.rs\n?? newfile.txt\nR  old/name.rs -> new/name.rs\nA  staged.rs\n";
-        assert_eq!(
-            parse_porcelain(out),
-            vec![
-                PathBuf::from("crates/a/src/lib.rs"),
-                PathBuf::from("newfile.txt"),
-                PathBuf::from("old/name.rs"),
-                PathBuf::from("new/name.rs"),
-                PathBuf::from("staged.rs"),
-            ]
-        );
     }
 }
