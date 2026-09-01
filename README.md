@@ -22,7 +22,7 @@ Status labels:
 | Area | Status | Current behavior and remaining work |
 |---|---|---|
 | Loading and analysis | **Available** | Loads the requested target's transitive package closure; whole-workspace loading supports reverse-dependency queries. Generated-path collisions and generated-output/source shadowing fail during analysis. Enforcing one sweeping workspace owner per package remains planned. |
-| Local execution and caching | **Partial** | Executes independent actions concurrently, caches content-addressed results, reuses warm tool state, streams completion, preserves independent work after failures, skips failed dependents, and reports bounded failure output. `build` and `test` execute the demanded action subgraph (backward reachability from the operation's terminals), so a build never runs a dependency's test actions; the summary reports demanded/pruned counts. The store lives behind the `anneal-store` crate with a crash-safe layout, capability-guarded writes, and interruption tests. |
+| Local execution and caching | **Partial** | Executes independent actions concurrently, caches content-addressed results, reuses warm tool state, streams completion, preserves independent work after failures, skips failed dependents, and reports bounded failure output. `build` and `test` execute the demanded action subgraph (backward reachability from the operation's terminals), so a build never runs a dependency's test actions; the summary reports demanded/pruned counts. `test --base` executes every affected target's demanded actions (merge-base scoped, deduplicated across closures) — the CI execute mode. The store lives behind the `anneal-store` crate with a crash-safe layout, capability-guarded writes, and interruption tests. |
 | Linux sandbox | **Available** | Bubblewrap provides namespace-based filesystem and network isolation. Linux sandbox tests run through the Docker CI path. |
 | macOS sandbox | **Partial** | Seatbelt denies undeclared file access and network access according to action policy, with scrubbed environments and declared toolchain roots. It is graded `LoudBestEffort`, not Linux-equivalent `Enforced`; a Linux VM is a proposal, not a committed execution path. |
 | Focus-cone execution | **Experimental** | `build` and `test` derive dirty targets and their dependents from `git status`, run that cone as `Incremental`, and color the rest `Hermetic`. The monotonicity invariant is enforced. There is no hysteresis or pinning yet; committing makes the tree clean and can trigger a Hermetic rebuild because Incremental and Hermetic action contracts have different keys. |
@@ -63,6 +63,7 @@ The current binary exposes:
 ```text
 anneal build <target>
 anneal test <target>
+anneal test --base <git-ref>
 anneal affected [--since <git-ref> | --base <git-ref>] [--format <labels|json>]
 anneal why <from> <to>
 anneal why <target> --since <git-ref>

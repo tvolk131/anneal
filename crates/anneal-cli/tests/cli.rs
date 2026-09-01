@@ -380,3 +380,180 @@ fn test_through_an_alias_runs_the_aliased_targets_tests() {
     let out = anneal(ws.path(), &["build", "//pkg:ta"]);
     assert!(out.status.success());
 }
+
+// --- Execute mode: `test --base` -------------------------------------------------
+
+/// A repo with two independent test targets and a shared build dep.
+fn exec_ws(a_test_exit: &str) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    for (pkg, build) in [
+        (
+            "lib",
+            "genrule(name = \"lib\", srcs = [\"lib.txt\"], outs = [\"lib.out\"], cmd = \"cp $(SRCS) $(OUTS)\", deterministic = True)\n",
+        ),
+        (
+            "pkg-a",
+            &format!(
+                "genrule(name = \"t\", srcs = [\"a.txt\"], deps = [\"//lib:lib\"], outs = [\"results.txt\"], cmd = \"printf 'ANNEAL_TEST_EXIT={a_test_exit}' > $(OUTS)\", deterministic = True)\n"
+            ),
+        ),
+        (
+            "pkg-b",
+            "genrule(name = \"t\", srcs = [\"b.txt\"], deps = [\"//lib:lib\"], outs = [\"results.txt\"], cmd = \"printf 'ANNEAL_TEST_EXIT=0' > $(OUTS)\", deterministic = True)\n",
+        ),
+    ] {
+        let dir = tmp.path().join(pkg);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("BUILD"), build).unwrap();
+    }
+    std::fs::write(tmp.path().join("lib/lib.txt"), "l\n").unwrap();
+    std::fs::write(tmp.path().join("pkg-a/a.txt"), "a\n").unwrap();
+    std::fs::write(tmp.path().join("pkg-b/b.txt"), "b\n").unwrap();
+    git(tmp.path(), &["init", "-q", "-b", "main"]);
+    git(tmp.path(), &["add", "."]);
+    git(tmp.path(), &["commit", "-q", "-m", "base"]);
+    git(tmp.path(), &["checkout", "-q", "-b", "feature"]);
+    tmp
+}
+
+#[test]
+fn test_base_runs_only_the_affected_cone() {
+    let ws = exec_ws("0");
+    std::fs::write(ws.path().join("pkg-a/a.txt"), "a2\n").unwrap();
+    git(ws.path(), &["add", "."]);
+    git(ws.path(), &["commit", "-q", "-m", "edit pkg-a"]);
+
+    let out = anneal(ws.path(), &["test", "--base", "main"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("//pkg-a:t"), "pkg-a's test runs:\n{stdout}");
+    assert!(
+        !stdout.contains("//pkg-b:t"),
+        "pkg-b is unaffected — its test must not run:\n{stdout}"
+    );
+    // The shared dep builds exactly once even though both closures contain it
+    // — wait, only pkg-a's closure is demanded here; the dedup test is below.
+    assert!(stdout.contains("tests: 1 passed, 0 failed"), "{stdout}");
+}
+
+#[test]
+fn test_base_dedupes_shared_dependencies() {
+    // Both packages depend on //lib:lib; editing the lib makes both affected,
+    // and lib's build action must execute once across the two demand unions.
+    let ws = exec_ws("0");
+    std::fs::write(ws.path().join("lib/lib.txt"), "l2\n").unwrap();
+    git(ws.path(), &["add", "."]);
+    git(ws.path(), &["commit", "-q", "-m", "edit lib"]);
+
+    let out = anneal(ws.path(), &["test", "--base", "main"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lib_runs = stdout
+        .lines()
+        .filter(|l| l.contains("genrule //lib:lib"))
+        .count();
+    assert_eq!(
+        lib_runs, 1,
+        "the shared dep executes exactly once:\n{stdout}"
+    );
+    assert!(stdout.contains("tests: 2 passed, 0 failed"), "{stdout}");
+}
+
+#[test]
+fn test_base_fails_on_a_failing_affected_test() {
+    let ws = exec_ws("1"); // pkg-a's test records a failure
+    std::fs::write(ws.path().join("pkg-a/a.txt"), "a2\n").unwrap();
+    git(ws.path(), &["add", "."]);
+    git(ws.path(), &["commit", "-q", "-m", "edit pkg-a"]);
+
+    let out = anneal(ws.path(), &["test", "--base", "main"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("tests: 0 passed, 1 failed"), "{stdout}");
+}
+
+#[test]
+fn test_base_with_no_changes_is_green_and_instant() {
+    let ws = exec_ws("0");
+    let out = anneal(ws.path(), &["test", "--base", "main"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("no changes"));
+}
+
+#[test]
+fn test_base_counts_untracked_files() {
+    let ws = exec_ws("0");
+    std::fs::write(ws.path().join("pkg-a/new.txt"), "n\n").unwrap(); // never committed
+    let out = anneal(ws.path(), &["test", "--base", "main"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("//pkg-a:t"),
+        "untracked changes count:\n{stdout}"
+    );
+}
+
+#[test]
+fn test_base_on_a_bad_ref_is_could_not_determine() {
+    let ws = exec_ws("0");
+    let out = anneal(ws.path(), &["test", "--base", "no-such-ref"]);
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn test_base_second_run_serves_cache_hits() {
+    let ws = exec_ws("0");
+    std::fs::write(ws.path().join("pkg-a/a.txt"), "a2\n").unwrap();
+    git(ws.path(), &["add", "."]);
+    git(ws.path(), &["commit", "-q", "-m", "edit pkg-a"]);
+    assert!(anneal(ws.path(), &["test", "--base", "main"])
+        .status
+        .success());
+    let again = anneal(ws.path(), &["test", "--base", "main"]);
+    assert!(again.status.success());
+    assert!(String::from_utf8_lossy(&again.stdout).contains("cached"));
+}
+
+#[test]
+fn test_requires_a_target_or_base() {
+    let tmp = workspace("filegroup(name = \"f\", srcs = [\"x\"])\n");
+    std::fs::write(tmp.path().join("pkg/x"), "x\n").unwrap();
+    let out = anneal(tmp.path(), &["test"]);
+    assert!(!out.status.success());
+}
+
+#[test]
+fn test_base_on_an_unowned_change_goes_workspace_wide() {
+    // A change outside any package can't be scoped — everything is affected,
+    // loudly: both packages' tests run.
+    let ws = exec_ws("0");
+    std::fs::write(ws.path().join("README.md"), "unowned\n").unwrap();
+    git(ws.path(), &["add", "."]);
+    git(ws.path(), &["commit", "-q", "-m", "readme"]);
+
+    let out = anneal(ws.path(), &["test", "--base", "main"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("//pkg-a:t"), "{stdout}");
+    assert!(stdout.contains("//pkg-b:t"), "{stdout}");
+    assert!(stdout.contains("tests: 2 passed, 0 failed"), "{stdout}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("whole workspace"),
+        "the conservative fallback must be announced"
+    );
+}
+
+#[test]
+fn test_target_and_base_are_mutually_exclusive() {
+    let ws = exec_ws("0");
+    let out = anneal(ws.path(), &["test", "//pkg-a:t", "--base", "main"]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "clap rejects the pair with a usage error, not a panic"
+    );
+}
